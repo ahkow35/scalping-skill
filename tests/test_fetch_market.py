@@ -41,3 +41,15 @@ def test_build_session_during_us_session():
     s = fm.build_session(1779116400000)
     assert s["us_session_live"] is True
     assert round(s["hours_to_us_close"], 1) == 5.0
+
+
+def test_band_aggregate_buckets_usdc_depth():
+    levels = [
+        {"px": "45.98", "sz": "100"},
+        {"px": "45.99", "sz": "50"},
+        {"px": "46.03", "sz": "10"},
+    ]
+    out = fm.band_aggregate(levels, bucket=0.05)
+    # nearest-bucket: 45.98/45.99 -> 46.0, 46.03 -> 46.05
+    assert out[46.0] == 4598.0 + 2299.5
+    assert out[46.05] == 460.3

@@ -36,3 +36,17 @@ def build_session(now_ms):
         "us_session_live": us_live,
         "asia_handoff_soon": us_close <= now < us_close + timedelta(hours=2),
     }
+
+
+from collections import defaultdict
+
+
+def band_aggregate(levels, bucket=0.05):
+    """Sum USDC notional (px*sz) into nearest price buckets of width `bucket`."""
+    agg = defaultdict(float)
+    inv = 1.0 / bucket
+    for lv in levels:
+        p = float(lv["px"])
+        b = round(round(p * inv) / inv, 2)
+        agg[b] += p * float(lv["sz"])
+    return dict(agg)
