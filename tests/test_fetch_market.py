@@ -53,3 +53,20 @@ def test_band_aggregate_buckets_usdc_depth():
     # nearest-bucket: 45.98/45.99 -> 46.0, 46.03 -> 46.05
     assert out[46.0] == 4598.0 + 2299.5
     assert out[46.05] == 460.3
+
+
+import pytest
+
+
+def test_fetch_btc_dominance_parses_coingecko():
+    payload = {"data": {"market_cap_percentage": {"btc": 54.3},
+                         "market_cap_change_percentage_24h_usd": 1.1}}
+    out = fm.parse_btc_dominance(payload)
+    assert out["btc_d"] == 54.3
+    assert out["btc_d_24h_chg"] == 1.1
+
+
+def test_data_unavailable_raises_named_error():
+    with pytest.raises(fm.DataUnavailable) as e:
+        fm.parse_btc_dominance({"unexpected": True})
+    assert "coingecko" in str(e.value).lower()

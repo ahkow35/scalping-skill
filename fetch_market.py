@@ -50,3 +50,78 @@ def band_aggregate(levels, bucket=0.05):
         b = round(round(p * inv) / inv, 2)
         agg[b] += p * float(lv["sz"])
     return dict(agg)
+
+
+import json
+import urllib.request
+
+HL_INFO = "https://api.hyperliquid.xyz/info"
+CG_GLOBAL = "https://api.coingecko.com/api/v3/global"
+
+
+class DataUnavailable(Exception):
+    """Raised when a source fails. Never emit stale/estimated data."""
+
+
+def _post_json(url, payload, source):
+    try:
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read())
+    except Exception as exc:
+        raise DataUnavailable(f"DATA UNAVAILABLE: {source} ({exc})")
+
+
+def _get_json(url, source):
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            return json.loads(r.read())
+    except Exception as exc:
+        raise DataUnavailable(f"DATA UNAVAILABLE: {source} ({exc})")
+
+
+def parse_btc_dominance(payload):
+    try:
+        d = payload["data"]
+        return {"btc_d": float(d["market_cap_percentage"]["btc"]),
+                "btc_d_24h_chg": float(d["market_cap_change_percentage_24h_usd"])}
+    except (KeyError, TypeError, ValueError):
+        raise DataUnavailable("DATA UNAVAILABLE: coingecko (/global shape)")
+
+
+def fetch_btc_dominance():
+    return parse_btc_dominance(_get_json(CG_GLOBAL, "coingecko"))
+
+
+def fetch_ctx(coin):
+    d = _post_json(HL_INFO, {"type": "metaAndAssetCtxs"}, "hyperliquid")
+    for i, u in enumerate(d[0]["universe"]):
+        if u["name"] == coin:
+            c = d[1][i]
+            return {
+                "coin": coin,
+                "mark": float(c["markPx"]), "oracle": float(c["oraclePx"]),
+                "mid": float(c["midPx"]), "funding": float(c["funding"]),
+                "premium": float(c["premium"]),
+                "oi_usdc": float(c["openInterest"]) * float(c["markPx"]),
+                "prev_day_px": float(c["prevDayPx"]),
+                "day_vol_usdc": float(c["dayNtlVlm"]),
+            }
+    raise DataUnavailable(f"DATA UNAVAILABLE: hyperliquid (coin {coin} not found)")
+
+
+def fetch_candles(coin, interval, start_ms, end_ms):
+    rows = _post_json(HL_INFO, {"type": "candleSnapshot", "req": {
+        "coin": coin, "interval": interval,
+        "startTime": start_ms, "endTime": end_ms}}, "hyperliquid")
+    return [{"t": iso_utc(k["t"]), "o": float(k["o"]), "h": float(k["h"]),
+             "l": float(k["l"]), "c": float(k["c"]), "v": float(k["v"])}
+            for k in rows]
+
+
+def fetch_l2(coin):
+    d = _post_json(HL_INFO, {"type": "l2Book", "coin": coin}, "hyperliquid")
+    bids, asks = d["levels"]
+    return {"asks": band_aggregate(asks), "bids": band_aggregate(bids)}
