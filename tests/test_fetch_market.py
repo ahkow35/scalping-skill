@@ -70,3 +70,17 @@ def test_data_unavailable_raises_named_error():
     with pytest.raises(fm.DataUnavailable) as e:
         fm.parse_btc_dominance({"unexpected": True})
     assert "coingecko" in str(e.value).lower()
+
+
+def test_assemble_marks_macro_unavailable_when_btcd_fails(monkeypatch):
+    monkeypatch.setattr(fm, "fetch_ctx", lambda c: {"coin": c, "mark": 46.0})
+    monkeypatch.setattr(fm, "fetch_candles", lambda *a: [])
+    monkeypatch.setattr(fm, "fetch_l2", lambda c: {"asks": {}, "bids": {}})
+
+    def boom():
+        raise fm.DataUnavailable("DATA UNAVAILABLE: coingecko (down)")
+    monkeypatch.setattr(fm, "fetch_btc_dominance", boom)
+
+    out = fm.assemble("HYPE", deep=False, now_ms=1779102720000)
+    assert out["btc_dominance"] == "DATA UNAVAILABLE: coingecko (down)"
+    assert out["macro_can_clear"] is False

@@ -125,3 +125,53 @@ def fetch_l2(coin):
     d = _post_json(HL_INFO, {"type": "l2Book", "coin": coin}, "hyperliquid")
     bids, asks = d["levels"]
     return {"asks": band_aggregate(asks), "bids": band_aggregate(bids)}
+
+
+import sys
+import time as _time
+
+_NOW = lambda: int(_time.time() * 1000)
+_DAY = 86400000
+
+
+def assemble(coin, deep=False, now_ms=None):
+    now_ms = now_ms or _NOW()
+    out = {"session": build_session(now_ms), "primary": coin}
+
+    out["ctx"] = fetch_ctx(coin)
+    out["btc_ctx"] = fetch_ctx("BTC")
+
+    spans = [("1h", 3 * _DAY), ("15m", 9000000), ("5m", 5400000)]
+    if deep:
+        spans = [("1d", 35 * _DAY), ("4h", 12 * _DAY)] + spans
+    out["candles"] = {iv: fetch_candles(coin, iv, now_ms - span, now_ms)
+                      for iv, span in spans}
+    out["btc_candles"] = {iv: fetch_candles("BTC", iv, now_ms - span, now_ms)
+                          for iv, span in (("4h", 12 * _DAY), ("1h", 3 * _DAY))}
+    out["book"] = fetch_l2(coin)
+
+    try:
+        out["btc_dominance"] = fetch_btc_dominance()
+        out["macro_can_clear"] = True
+    except DataUnavailable as exc:
+        out["btc_dominance"] = str(exc)
+        out["macro_can_clear"] = False
+    return out
+
+
+def main(argv):
+    args = [a for a in argv[1:] if a != "--deep"]
+    deep = "--deep" in argv[1:] or "deep" in args
+    args = [a for a in args if a != "deep"]
+    coin = (args[0].upper() if args else "HYPE")
+    try:
+        out = assemble(coin, deep=deep)
+    except DataUnavailable as exc:
+        print(str(exc))
+        return 1
+    print(json.dumps(out, indent=2, default=str))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
