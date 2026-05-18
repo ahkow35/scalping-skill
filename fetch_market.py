@@ -135,7 +135,7 @@ _DAY = 86400000
 
 
 def assemble(coin, deep=False, now_ms=None):
-    now_ms = now_ms or _NOW()
+    now_ms = _NOW() if now_ms is None else now_ms
     out = {"session": build_session(now_ms), "primary": coin}
 
     out["ctx"] = fetch_ctx(coin)
