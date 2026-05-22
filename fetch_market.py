@@ -27,6 +27,13 @@ def build_session(now_ms):
     h_open = (us_open - now).total_seconds() / 3600
     h_close = (us_close - now).total_seconds() / 3600
     us_live = us_open <= now < us_close
+    # weekend window: Fri 20:00 UTC -> Sun 20:00 UTC. weekday(): Mon=0 .. Sun=6.
+    wd = now.weekday()
+    weekend = (
+        (wd == 4 and now.hour >= 20)   # Friday after 20:00
+        or wd == 5                      # all Saturday
+        or (wd == 6 and now.hour < 20)  # Sunday before 20:00
+    )
     return {
         "utc": now.strftime("%Y-%m-%d %H:%M UTC"),
         "sgt": now.astimezone(SGT).strftime("%Y-%m-%d %H:%M SGT"),
@@ -35,6 +42,7 @@ def build_session(now_ms):
         "hours_to_econ_window": round((econ - now).total_seconds() / 3600, 2),
         "us_session_live": us_live,
         "asia_handoff_soon": us_close <= now < us_close + timedelta(hours=2),
+        "weekend_window": weekend,
     }
 
 

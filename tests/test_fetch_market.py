@@ -84,3 +84,31 @@ def test_assemble_marks_macro_unavailable_when_btcd_fails(monkeypatch):
     out = fm.assemble("HYPE", deep=False, now_ms=1779102720000)
     assert out["btc_dominance"] == "DATA UNAVAILABLE: coingecko (down)"
     assert out["macro_can_clear"] is False
+
+
+def test_weekend_window_true_friday_evening():
+    # 2026-05-22 is a Friday. 21:00 UTC == inside the weekend window (Fri 20:00 → Sun 20:00).
+    # 2026-05-22 21:00 UTC = 1779483600000 ms
+    s = fm.build_session(1779483600000)
+    assert s["weekend_window"] is True
+
+
+def test_weekend_window_true_saturday():
+    # 2026-05-23 is a Saturday. 12:00 UTC == inside the window.
+    # 2026-05-23 12:00 UTC = 1779537600000 ms
+    s = fm.build_session(1779537600000)
+    assert s["weekend_window"] is True
+
+
+def test_weekend_window_false_friday_morning():
+    # 2026-05-22 (Fri) 10:00 UTC == before the 20:00 Fri start.
+    # 2026-05-22 10:00 UTC = 1779444000000 ms
+    s = fm.build_session(1779444000000)
+    assert s["weekend_window"] is False
+
+
+def test_weekend_window_false_sunday_late():
+    # 2026-05-24 (Sun) 21:00 UTC == after the 20:00 Sun end.
+    # 2026-05-24 21:00 UTC = 1779656400000 ms
+    s = fm.build_session(1779656400000)
+    assert s["weekend_window"] is False
