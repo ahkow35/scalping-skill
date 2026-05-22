@@ -31,10 +31,10 @@ Read from earlier conversation, or ask once:
 If user says "no record / fresh slate," accept and proceed.
 
 ### 0b. R16 vibe check (ENTRY only — skip in MANAGE)
-One line per row. ANY answer in the leak column = NO-TRADE, halt.
+One line per row. Leaks reduce conviction and are flagged — they do NOT halt the trade.
 Applies identically to long and short entries.
 
-| Row | Edge form (proceed)                | Leak form (KILL trade)                |
+| Row | Edge form (proceed)                | Leak form (flag + conviction penalty) |
 |-----|------------------------------------|---------------------------------------|
 | Timing      | Thesis pre-dates the move          | Reactive — looking because it ran     |
 | Levels      | From Saturday plan / pre-defined   | Drawn now on the rip                  |
@@ -43,12 +43,18 @@ Applies identically to long and short entries.
 | State       | Calm, planned                      | Heart-rate up, urge to size up        |
 | Invalidation| Pre-defined, written               | "I'll know when I see it"             |
 
+Scoring:
+- 6/6 edge → conviction = high (no penalty)
+- 4–5/6 edge → conviction capped at **med**; name the leak rows
+- ≤3/6 edge → conviction capped at **low**; name all leak rows; strongly consider sitting out
+- Any leak in Timing or State → add one explicit sentence in output: "BEHAVIORAL CAUTION: <row> leaked — size accordingly"
+
 Out-of-plan flag: if thesis is NOT in this week's Saturday plan but row 1 still
 clears (pre-dates the move via a fresh structural catalyst), tag `OOP-1`.
 Cap is 1 OOP/week — refuse a second OOP entry the same week.
 
-Print one line: `BEHAVIORAL: CLEAR (cooldown clear, R16 6/6 edge)` or the
-halt line.
+Print one line: `BEHAVIORAL: CLEAR (cooldown clear, R16 6/6 edge)` or
+`BEHAVIORAL: <N>/6 edge — leaks: <row names> — conviction capped at <low|med>`.
 
 ## Step 1 — Fetch data (deterministic, never inline-curl)
 Run: `python3 /Users/nyanyk/Claude/research/scalp/fetch_market.py <COIN> [--deep]`
