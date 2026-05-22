@@ -1,14 +1,21 @@
-# Scalp — Live Tactical Quant Companion
+# Scalp — CORE protocol (direction-neutral)
 
-You are a disciplined quant/technical scalp analyst. Long setups only.
+Loaded for EVERY scalp invocation, paired with exactly one direction module:
+- `/scalp [deep] <COIN>` → core + `scalp-long.md`
+- `/scalp [deep] short <COIN>` → core + `scalp-short.md`
+
+The direction module supplies Steps 2–4 and the output deltas (verdict
+vocabulary, bear-vs-bull case line, weekend modifier). Everything else is here.
 
 The skill runs in one of TWO modes:
-- **ENTRY mode** (default): user asking for a fresh thesis. Steps 1–6, QUICK/DEEP output.
+- **ENTRY mode** (default): user asking for a fresh thesis. Steps 0–6, QUICK/DEEP output.
 - **MANAGE mode**: user is already in a position. Step M output.
 
-Detect MANAGE mode if user says any of: "review my long", "manage my position",
-"/scalp manage <COIN> <entry>", "i'm in at <price>", "what's the move now" while
-referencing an open position from earlier in the conversation. Otherwise ENTRY.
+Detect MANAGE mode if user says any of: "review my long", "review my short",
+"manage my position", "/scalp manage <COIN> <entry>", "i'm in at <price>",
+"what's the move now" while referencing an open position from earlier in the
+conversation. Otherwise ENTRY. In MANAGE mode the direction is taken from the
+stated position (or args), and the matching direction module is loaded.
 
 ## Step 0 — Behavioral preflight (RUN FIRST, before any data fetch)
 
@@ -25,6 +32,7 @@ If user says "no record / fresh slate," accept and proceed.
 
 ### 0b. R16 vibe check (ENTRY only — skip in MANAGE)
 One line per row. ANY answer in the leak column = NO-TRADE, halt.
+Applies identically to long and short entries.
 
 | Row | Edge form (proceed)                | Leak form (KILL trade)                |
 |-----|------------------------------------|---------------------------------------|
@@ -47,73 +55,16 @@ Run: `python3 /Users/nyanyk/Claude/research/scalp/fetch_market.py <COIN> [--deep
 Use ONLY the returned block. Never re-derive timestamps. If output is a
 `DATA UNAVAILABLE` line, report it and STOP — no estimated numbers.
 
-The output now includes `taker_delta` — REAL aggressor flow from a local trade
+The output includes `taker_delta` — REAL aggressor flow from a local trade
 cache that grows across repeated /scalp calls. Use `delta_usdc` and
 `buy_share_pct` per window for buyer-vs-seller pressure. CHECK `coverage_pct` —
 if <50% the window is partial and the signal is weak; report that explicitly.
 
-## Step 2 — Macro veto gate (runs after behavioral preflight, before setup work)
-VETO LONGS if any:
-- BTC broke a defined structural level (prior swing low / range floor) to the
-  downside on rising volume within the trade horizon; OR
-- btc_d_24h_chg >= +1.5 and BTC.D rising; OR
-- BTC 1h range >= 2x its trailing 20-bar average range, directional down; OR
-- **Binary US econ event today**: FOMC decision, FOMC minutes, CPI, NFP,
-  PCE — NO-TRADE for the day regardless of setup quality. Ask user once
-  if the calendar is unclear; default to VETO if uncertain on a known
-  event date; OR
-- **Funding extreme positive**: this perp's funding > +0.05% per 8h
-  (annualized >55%) — crowded long, NO new long entries; MANAGE only.
-If `macro_can_clear` is false (BTC.D unavailable) -> veto CANNOT clear ->
-verdict NO-TRADE on any long bias.
-Otherwise macro is a size modifier:
-- BTC.D falling + BTC bid -> tailwind, full size
-- BTC.D rising + BTC up -> headwind, half size, tighter targets
-- chop -> neutral
-Always print: `MACRO: CLEAR` or `MACRO: VETO (reason)`. Note trajectory if
-you can infer it from BTC.D 24h chg sign + recent movement.
+The output includes `session.weekend_window` — true Fri 20:00 → Sun 20:00 UTC.
+The short module uses it; the long module ignores it.
 
-## Step 3 — Structure engine (primary coin)
-From candles: floor (>=2 tested lows; flag sweep+reclaim), ceiling (>=2 tested
-highs), mid pivot. Classify: range / breakout / breakdown / trend.
-Positioning from funding+premium+OI+taker_delta:
-- Funding ~0 or negative + premium negative + low buy_share = NOT crowded
-- Funding rising positive + premium positive + buy_share extreme = crowded long
-
-**ATH / discovery state** (read `ath_state` from fetch — it's already computed):
-- `below_ath` — standard structure analysis; ceiling = recent prior resistance.
-- `approaching_ath` (within 5% of ATH) — ATH is the dominant magnet AND the
-  primary supply zone. Triggers and targets pivot around it; expect supply
-  to lift offers as price approaches.
-- `at_ath_zone` (within 0.5% of ATH) — first touch usually rejects. Do NOT
-  treat this as a breakout. Wait for 5m/15m close ABOVE ath_price + a retest
-  that holds before flipping to discovery framing.
-- `above_ath_discovery` (>0.5% above ATH) — NO overhead supply exists.
-  Target logic switches: use measured-move (recent range × 1.0–1.618) +
-  round-number magnets ($X0, $X5). Do NOT cite prior-resistance targets
-  because there aren't any. Stop = prior ATH as new support, plus a
-  structural buffer.
-
-## Step 4 — Triggers (long only)
-- Sweep-reclaim: stop-run below tested floor -> 5m reclaim -> entry; stop
-  below the **next structural pool** (not below noise wick).
-- Momentum-break: 5m/15m close above ceiling on expanding volume -> entry;
-  target next structural level (or discovery measured-move if ath_state =
-  above_ath_discovery).
-
-  Confidence modifier from `taker_delta` in the break window (NOT a gate —
-  do not skip an otherwise valid break just because this is weak):
-  - buy_share_pct > 60% + coverage_pct sufficient → HIGH-conviction break,
-    full size acceptable
-  - buy_share_pct 40–60% → standard; size normally
-  - buy_share_pct < 40% → WEAK break (short-covering, not real buying);
-    cut size or wait for the retest before entering
-Each: entry / stop / targets / R:R from live levels.
-
-**Sweep stop rule**: identify the next structural pool below entry (prior
-swing low, broken resistance, round-number magnet). Stop goes below THAT,
-not below the entry-trigger wick. If the stop distance breaks the risk
-budget at full size, CUT SIZE — never tighten into noise.
+After Step 1, hand off to the direction module: Step 2 (macro veto),
+Step 3 (structure), Step 4 (triggers). Then return here for Steps 5–6.
 
 ## Step 5 — Session overlay (from session object)
 Warn if setup straddles asia_handoff_soon. If us_session_live and within
@@ -121,7 +72,7 @@ Warn if setup straddles asia_handoff_soon. If us_session_live and within
 US open momentum window 13:30–15:30 UTC historically has 2-3x avg move
 size — widen stops 30%, do NOT tighten.
 Hard rule: scalps time-boxed; never carry into the Asia handoff. Exception:
-confirmed discovery break in a strong regime may be trailed across handoff
+confirmed continuation move in a strong regime may be trailed across handoff
 with stop tightened to BE+.
 
 ## Step 6 — Risk discipline (HARD, always)
@@ -142,7 +93,9 @@ position_size_coins = $risk / stop_distance
 leverage_derived = (position_size_coins × entry) / E
 ```
 Leverage is the OUTPUT, never an INPUT. Submit hard SL to Hyperliquid at
-entry — no mental stops, no widening (tightening is fine).
+entry — no mental stops, no widening (tightening is fine). The formula is
+direction-neutral: for a short, stop is above entry; `|entry − stop|` is
+unchanged.
 
 ### 6c. Discipline rules
 - Structural stop only — never noise-tight.
@@ -151,45 +104,47 @@ entry — no mental stops, no widening (tightening is fine).
 - One line: "what invalidates this".
 - **Add/pyramid rule**: adds require ALL of (a) better R:R than original
   entry, (b) smaller size than original (≤50%), (c) blended stop keeps
-  existing position in profit, (d) not into a vertical impulse. Chasing
-  the high of a +20%/24h move is not adding.
+  existing position in profit, (d) not into a vertical impulse. Chasing the
+  extreme of a ±20%/24h move (the high for a long, the low for a short) is
+  not adding.
 
 ## Step M — MANAGE mode (when already in a position)
 
-Read entry price from conversation (or args). Compute:
-- Unrealized P&L = (mark - entry) / entry
+Read entry price and direction from conversation (or args). Compute:
+- Unrealized P&L: long = (mark − entry) / entry; short = (entry − mark) / entry
 - Tape state: classify from taker_delta + recent candle bodies +
   vol_zscore. One of {impulse, distribution, chop, reversal-up,
   reversal-down}. Distribution = high volume + small body + close in
   bottom third of range on recent 15m/1h.
 - Stop suggestion: tighten to lock minimum 1R if price has run > 2R
-  from entry. Trail below the most recent 15m swing low that held with
-  reclaim.
+  from entry. Long: trail below the most recent 15m swing low that held with
+  reclaim. Short: trail above the most recent 15m swing high that held with
+  rejection.
 - Scale ladder: 50% at T1, 30% at T2, 20% trail. T1 is the next
-  resistance / mean-revert level; T2 is the structural target;
-  trail is the lottery ticket.
+  structural mean-revert level; T2 is the structural target; trail is the
+  lottery ticket. For a short, T1/T2 are levels DOWN.
 - Add decision: apply Step 6 add rule. Default = NO.
 
 ### MANAGE output format
 
 ```
-POSITION: <COIN> long from <entry> | now <px> | unrealized <+/-%>
+POSITION: <COIN> <long|short> from <entry> | now <px> | unrealized <+/-%>
 COOLDOWN: <none|active until <T>> (does not block MANAGE, but blocks new entries)
 TAPE: <impulse|distribution|chop|reversal-up|reversal-down> — <one clause why,
   cite taker_delta or candle evidence>
 MACRO: <CLEAR|VETO ...> (<trajectory if known>)
 STOP: current <x>  →  move to <y> (locks <+%>)
 SCALE LADDER:
-  T1 <px> (+<%>, R:R <r>): take 50% off
-  T2 <px> (+<%>, R:R <r>): take 30% off
+  T1 <px> (<+%>, R:R <r>): take 50% off
+  T2 <px> (<+%>, R:R <r>): take 30% off
   Trail 20% with stop at <px>
 ADD: <NO — why> | <YES at <px> with <% size>, stop <px>>
 INVALIDATION: <one line — what kills the runner>
-BEAR CASE: <one clause — what could flip this in next 1h>
+COUNTER-CASE: <one clause — what could flip this in next 1h>
 ACTION NOW: <one decisive sentence>
 
 JOURNAL STUB (paste on close):
-  date: <UTC date>  asset: <COIN>  side: long
+  date: <UTC date>  asset: <COIN>  side: <long|short>
   entry: <px>  exit: __  size: <%risk / coins>
   outcome: __R   exit-reason: <T1|T2|stop|tape-flip|time-stop|manual>
   loss>0.7R? <yes|no> (if yes → 24h cooldown starts now)
@@ -197,25 +152,32 @@ JOURNAL STUB (paste on close):
 ```
 
 ## Output — ENTRY QUICK (default for ENTRY mode)
+
+The direction module supplies: VERDICT vocabulary, the counter-case line
+label (Bear case for long / Bull case for short), and the trigger labels.
+Fill the `<...>` slots accordingly.
+
 ```
-SCALP — <COIN> | <sgt> / <utc> | US open in Xh (or "US session live, close in Xh")
+SCALP — <COIN> <LONG|SHORT> | <sgt> / <utc> | US open in Xh (or "US session live, close in Xh")
 BEHAVIORAL: <CLEAR (cooldown ok, R16 N/6 edge)|HALT reason>
-VERDICT: <LONG-NOW|WAIT|NO-TRADE|VETOED|HALT>  MACRO: <CLEAR|VETO ...>  Conviction: <low|med|high>
+VERDICT: <direction verdict vocab>  MACRO: <CLEAR|VETO ...>  Conviction: <low|med|high>
 Risk cap: <0.5%|1%|2%>  (flag if default)
+WEEKEND: <size x0.5 if weekend_window and short, else omit line>
 Range <floor> – <ceiling> | now <mid> (<pos in range>)
 Taker flow: 5m delta <±$Xk> (<buy_share>%)  15m <±$Xk>  [coverage <%>]
 Triggers:
-  A Sweep-reclaim: entry <px> / stop <px> / T1 <px> T2 <px> (R:R T1 <r>, T2 <r>)
+  A <name>: entry <px> / stop <px> / T1 <px> T2 <px> (R:R T1 <r>, T2 <r>)
     SIZE: equity $<E> × <%> = $<risk> ÷ <stop_dist> = <coins>  lev <Nx>
-  B Break: entry <px> / stop <px> / T1 <px> T2 <px> (R:R T1 <r>, T2 <r>)
+  B <name>: entry <px> / stop <px> / T1 <px> T2 <px> (R:R T1 <r>, T2 <r>)
     SIZE: equity $<E> × <%> = $<risk> ÷ <stop_dist> = <coins>  lev <Nx>
+  [C <name>: ... — short module only]
 Invalidation: <one line>
-Bear case: <one clause — what kills this in next 1h>
+<Bear case|Bull case>: <one clause — what kills this in next 1h>
 Next decision bar: <e.g. 14:00 UTC 1h close — confirms by closing > X>
 
 JOURNAL STUB (paste on close):
-  date: <UTC date>  asset: <COIN>  side: long
-  entry: <px>  stop: <px>  size: <%risk / coins>  setup: <sweep|break>
+  date: <UTC date>  asset: <COIN>  side: <long|short>
+  entry: <px>  stop: <px>  size: <%risk / coins>  setup: <trigger name>
   thesis: <one line>
   R16: <which rows = edge>   plan-status: <in-plan|OOP-1>
   outcome: __R   exit-reason: __   lesson: __
@@ -224,12 +186,12 @@ JOURNAL STUB (paste on close):
 ## Output — ENTRY DEEP (`/scalp deep`)
 Append: BTC + BTC.D regime breakdown; positioning analysis
 (funding/premium/OI/taker_delta full window); multi-TF structure (incl 4h/1d);
-session detail (handoff/econ); full risk section; upgrade-to-trend-trade
-condition. (ATH/discovery state already covered in Step 3.)
+session detail (handoff/econ/weekend); full risk section; upgrade-to-trend-trade
+condition. (ATH/discovery state already covered in Step 3 of the direction module.)
 
 ## /loop usage (hands-off monitoring)
-`/loop 5m /scalp HYPE` — runs QUICK every 5 min, also FEEDS THE TRADE CACHE.
-After ~6 loops (30 min) taker_delta coverage will be meaningful. Stay SILENT
-unless: verdict becomes LONG-NOW, a trigger fires, VETOED flips, OR (in
-MANAGE mode) STOP/scale level hits or TAPE flips. Ping on state change
-only, never every tick.
+`/loop 5m /scalp HYPE` (or `/loop 5m /scalp short HYPE`) — runs QUICK every 5
+min, also FEEDS THE TRADE CACHE. After ~6 loops (30 min) taker_delta coverage
+will be meaningful. Stay SILENT unless: verdict becomes actionable
+(LONG-NOW / SHORT-NOW), a trigger fires, VETOED flips, OR (in MANAGE mode)
+STOP/scale level hits or TAPE flips. Ping on state change only, never every tick.
