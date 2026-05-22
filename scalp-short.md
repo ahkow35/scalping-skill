@@ -72,7 +72,9 @@ Positioning from funding+premium+OI+taker_delta (inverted read):
   - sell_share_pct 40–60% → standard; size normally
   - sell_share_pct < 40% → WEAK breakdown (long-squeeze bounce risk);
     cut size or wait for the retest before entering
-  (sell_share_pct = 100 − buy_share_pct from taker_delta.)
+  (sell_share_pct = 100 − buy_share_pct from taker_delta. If buy_share_pct is
+  null — zero volume in the window — treat the modifier as indeterminate and
+  lean on coverage_pct + candle evidence instead.)
 - C Lower-high rejection: after a top, price rallies to a lower high vs the
   prior swing high and rejects (wick + sell-dominant taker delta) -> entry on
   rejection confirmation (5m close back down); stop above the lower high.
