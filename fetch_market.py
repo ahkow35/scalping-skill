@@ -60,6 +60,70 @@ def band_aggregate(levels, bucket=0.05):
     return dict(agg)
 
 
+HL_TAKER_FEE_BPS = 4.5  # Hyperliquid Tier 1 taker fee; reference buffer for microprice gate
+
+
+def compute_microprice(bids, asks):
+    """Stoikov (2018) simple imbalance-weighted microprice from top-of-book.
+
+    micro = ask * (bid_sz / total) + bid * (ask_sz / total)
+
+    Weight inverts intuitively: a big bid stack pulls fair value TOWARD the ask,
+    because the ask is what gets lifted next. `microprice_dev_bps` is the
+    actionable scalar: positive => book leans up, negative => book leans down.
+
+    Top-of-book only (original Stoikov form). Not the multi-level weighted
+    extension and not the full iterative martingale-corrected microprice — the
+    simple form is the right primitive at retail REST/WS latency.
+
+    Inputs are the raw `levels` from Hyperliquid l2Book — list of
+    `{"px": "...", "sz": "..."}` strings. None returns mean L2 is empty or
+    malformed; callers should fall through to the trigger price as written.
+    """
+    base = {"microprice": None, "mid_l1": None, "best_bid": None,
+            "best_ask": None, "best_bid_sz": None, "best_ask_sz": None,
+            "spread_bps": None, "microprice_dev_bps": None,
+            "taker_fee_bps_reference": HL_TAKER_FEE_BPS}
+    if not bids or not asks:
+        return {**base, "note": "empty book"}
+    try:
+        bid = float(bids[0]["px"])
+        ask = float(asks[0]["px"])
+        bid_sz = float(bids[0]["sz"])
+        ask_sz = float(asks[0]["sz"])
+    except (KeyError, ValueError, TypeError, IndexError):
+        return {**base, "note": "malformed level data"}
+
+    total_sz = bid_sz + ask_sz
+    mid = (bid + ask) / 2
+    if total_sz <= 0 or mid <= 0:
+        return {**base, "mid_l1": round(mid, 6) if mid > 0 else None,
+                "best_bid": bid, "best_ask": ask,
+                "best_bid_sz": bid_sz, "best_ask_sz": ask_sz,
+                "note": "zero size or non-positive mid"}
+
+    micro = ask * (bid_sz / total_sz) + bid * (ask_sz / total_sz)
+    spread_bps = (ask - bid) / mid * 10000
+    dev_bps = (micro - mid) / mid * 10000
+
+    note = "positive dev = book leaning up (bid stack dominant); negative = leaning down"
+    if bid >= ask:
+        note = "crossed/locked book — microprice unreliable; " + note
+
+    return {
+        "microprice": round(micro, 6),
+        "mid_l1": round(mid, 6),
+        "best_bid": bid,
+        "best_ask": ask,
+        "best_bid_sz": bid_sz,
+        "best_ask_sz": ask_sz,
+        "spread_bps": round(spread_bps, 2),
+        "microprice_dev_bps": round(dev_bps, 2),
+        "taker_fee_bps_reference": HL_TAKER_FEE_BPS,
+        "note": note,
+    }
+
+
 import json
 import urllib.request
 
@@ -166,7 +230,11 @@ def compute_ath_state(candles_1d, mark):
 def fetch_l2(coin):
     d = _post_json(HL_INFO, {"type": "l2Book", "coin": coin}, "hyperliquid")
     bids, asks = d["levels"]
-    return {"asks": band_aggregate(asks), "bids": band_aggregate(bids)}
+    return {
+        "asks": band_aggregate(asks),
+        "bids": band_aggregate(bids),
+        "execution": compute_microprice(bids, asks),
+    }
 
 
 def fetch_recent_trades(coin):

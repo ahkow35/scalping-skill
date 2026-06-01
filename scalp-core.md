@@ -53,8 +53,14 @@ Out-of-plan flag: if thesis is NOT in this week's Saturday plan but row 1 still
 clears (pre-dates the move via a fresh structural catalyst), tag `OOP-1`.
 Cap is 1 OOP/week — refuse a second OOP entry the same week.
 
-Print one line: `BEHAVIORAL: CLEAR (cooldown clear, R16 6/6 edge)` or
-`BEHAVIORAL: <N>/6 edge — leaks: <row names> — conviction capped at <low|med>`.
+Printing rule (silence-by-default):
+- CLEAR (cooldown ok, R16 6/6) → **omit the BEHAVIORAL line entirely**. The
+  default state does not need to be repeated every run.
+- Any leak → print `BEHAVIORAL: <N>/6 edge — leaks: <row names> — conviction
+  capped at <low|med>` and apply the conviction cap.
+- Halt → print `BEHAVIORAL: HALT (<reason>)` and stop (no data fetch).
+- DEEP mode → always print the full 6/6 score even when clear, so the
+  discipline check is visible in the detailed report.
 
 ## Step 1 — Fetch data (deterministic, never inline-curl)
 Run: `python3 /Users/nyanyk/Claude/research/scalp/fetch_market.py <COIN> [--deep]`
@@ -65,6 +71,12 @@ The output includes `taker_delta` — REAL aggressor flow from a local trade
 cache that grows across repeated /scalp calls. Use `delta_usdc` and
 `buy_share_pct` per window for buyer-vs-seller pressure. CHECK `coverage_pct` —
 if <50% the window is partial and the signal is weak; report that explicitly.
+
+The output includes `book.execution` — Stoikov top-of-book microprice and the
+instantaneous lean of the book. Key field: `microprice_dev_bps` (positive = bid
+stack dominant, book leaning up; negative = ask stack dominant, leaning down).
+Used by Step 6d (execution refinement) and Step M (tape state). `None` values
+mean L2 was empty / malformed — callers fall through to original rules.
 
 The output includes `session.weekend_window` — true Fri 20:00 → Sun 20:00 UTC.
 The short module uses it; the long module ignores it.
@@ -90,18 +102,15 @@ unstated; default to **0.5%** and flag the default in output.
 - **1.0%** — Phase 1 A+ setup, pre-approved in Saturday plan only.
 - **2.0%** — Phase 2 cap (only if Phase 2 is active).
 
-### 6b. Sizing math (required in every trigger block)
-For each trigger output the math, do not skip:
+### 6b. Sizing math (required in every trigger block — one inline)
+Single line per trigger, all values explicit:
 ```
-account_equity = $<E>        risk_cap = <%>
-$risk = E × risk_cap         stop_distance = |entry − stop|
-position_size_coins = $risk / stop_distance
-leverage_derived = (position_size_coins × entry) / E
+SIZE: $<E> × <C>% = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
 ```
-Leverage is the OUTPUT, never an INPUT. Submit hard SL to Hyperliquid at
-entry — no mental stops, no widening (tightening is fine). The formula is
-direction-neutral: for a short, stop is above entry; `|entry − stop|` is
-unchanged.
+Leverage is the OUTPUT (coins × entry / E), never an INPUT. Submit hard SL
+to Hyperliquid at entry — no mental stops, no widening (tightening is fine).
+The formula is direction-neutral: for a short, stop is above entry;
+`|entry − stop|` is unchanged.
 
 ### 6c. Discipline rules
 - Structural stop only — never noise-tight.
@@ -114,6 +123,27 @@ unchanged.
   extreme of a ±20%/24h move (the high for a long, the low for a short) is
   not adding.
 
+### 6d. Microprice execution gate (refines entry execution — does NOT veto)
+Once a trigger fires, choose market vs limit using `book.execution`:
+- **LONG entry**: market-take only if
+  `microprice_dev_bps ≥ +(taker_fee_bps_reference + 1)` (book agrees with the
+  long). Otherwise post limit at `min(trigger_entry, microprice − 1 bp)` and
+  let price come to you.
+- **SHORT entry**: symmetric — market-take only if
+  `microprice_dev_bps ≤ −(taker_fee_bps_reference + 1)`. Otherwise post limit
+  at `max(trigger_entry, microprice + 1 bp)`.
+- **Scale-out (T1/T2 in MANAGE mode)**: same logic in reverse. Closing a long
+  at T1 with `microprice_dev_bps` clearly negative = hit the bid now (book
+  rolling against you). Clearly positive = post at ask. Symmetric for shorts.
+- If `microprice` is `None` (empty / stale book) or `coverage_pct` of the L2
+  feed is suspect, default to the trigger price as written. Never block a
+  fired trigger on missing microprice.
+- Rationale: Stoikov (2018). The book's instantaneous lean is the cheapest
+  meaningful execution edge in the literature — refusing to pay the wrong side
+  of fair value removes most adverse-selection on aggressive fills. This rule
+  is execution-layer, not thesis-layer; it sharpens fills, it does not change
+  what we trade.
+
 ## Step M — MANAGE mode (when already in a position)
 
 Read entry price and direction from conversation (or args). Compute:
@@ -122,6 +152,11 @@ Read entry price and direction from conversation (or args). Compute:
   vol_zscore. One of {impulse, distribution, chop, reversal-up,
   reversal-down}. Distribution = high volume + small body + close in
   bottom third of range on recent 15m/1h.
+- Microprice lean (`book.execution.microprice_dev_bps`): persistent +dev across
+  3+ consecutive /scalp snapshots = bid stack dominant = bullish supporting
+  signal even if candles look flat; persistent −dev = bearish supporting
+  signal. Use as a third leg alongside taker_delta and candles, not as a
+  standalone tape classifier. Single-snapshot dev is noise.
 - Stop suggestion: tighten to lock minimum 1R if price has run > 2R
   from entry. Long: trail below the most recent 15m swing low that held with
   reclaim. Short: trail above the most recent 15m swing high that held with
@@ -133,20 +168,30 @@ Read entry price and direction from conversation (or args). Compute:
 
 ### MANAGE output format
 
+**Two MANAGE shapes, selected by ACTION NOW:**
+- **Action required** (STOP move / scale-out hit / TAPE flip / ADD fires /
+  invalidation triggered) → full block + JOURNAL STUB.
+- **No action** (TAPE state and all decisions unchanged from prior look) →
+  compact one-block form, JOURNAL STUB **suppressed**.
+
+Suppress the COOLDOWN line unless cooldown is active. Suppress COUNTER-CASE
+in the compact form unless conviction is changing.
+
+#### MANAGE — action required
+
 ```
-POSITION: <COIN> <long|short> from <entry> | now <px> | unrealized <+/-%>
-COOLDOWN: <none|active until <T>> (does not block MANAGE, but blocks new entries)
-TAPE: <impulse|distribution|chop|reversal-up|reversal-down> — <one clause why,
-  cite taker_delta or candle evidence>
-MACRO: <CLEAR|VETO ...> (<trajectory if known>)
-STOP: current <x>  →  move to <y> (locks <+%>)
+POSITION: <COIN> <long|short> from <entry> | now <px> | unrealized <±%>
+[COOLDOWN: active until <T> — blocks new entries, not MANAGE]
+TAPE: <state> — <one clause, cite taker_delta / candles / microprice lean>
+MACRO: <CLEAR|VETO ...>
+STOP: <current> → <new> (locks <+%>)
 SCALE LADDER:
-  T1 <px> (<+%>, R:R <r>): take 50% off
-  T2 <px> (<+%>, R:R <r>): take 30% off
+  T1 <px> (<+%>, RR <r>): take 50%
+  T2 <px> (<+%>, RR <r>): take 30%
   Trail 20% with stop at <px>
-ADD: <NO — why> | <YES at <px> with <% size>, stop <px>>
-INVALIDATION: <one line — what kills the runner>
-COUNTER-CASE: <one clause — what could flip this in next 1h>
+ADD: <NO — why> | <YES at <px>, <% size>, SL <px>>
+INVALIDATION: <one line>
+COUNTER-CASE: <one clause>
 ACTION NOW: <one decisive sentence>
 
 JOURNAL STUB (paste on close):
@@ -157,47 +202,134 @@ JOURNAL STUB (paste on close):
   lesson: __
 ```
 
+#### MANAGE — no action (compact)
+
+```
+POSITION: <COIN> <long|short> @<entry> | now <px> <±%> | TAPE <state>
+STOP: <current> (unchanged)  T1 <px>  T2 <px>
+ACTION NOW: HOLD — <one clause why nothing changes>
+Next: <when to re-check>
+```
+
 ## Output — ENTRY QUICK (default for ENTRY mode)
 
 The direction module supplies: VERDICT vocabulary, the counter-case line
 label (Bear case for long / Bull case for short), and the trigger labels.
 Fill the `<...>` slots accordingly.
 
+**Two QUICK shapes, selected by verdict:**
+- **Action verdict** (`LONG-NOW` / `SHORT-NOW`) → full block, JOURNAL STUB included.
+- **No-action verdict** (`WAIT` / `NO-TRADE` / `VETOED` / `HALT`) → compact
+  block, JOURNAL STUB **suppressed** (no trade firing = nothing to journal yet).
+
+Rules that apply to BOTH shapes:
+- Omit the `BEHAVIORAL:` line when clear (see Step 0 printing rule).
+- Omit the `WEEKEND:` line unless `session.weekend_window=true` AND direction=short.
+- Omit the `Risk cap:` line when it's the 0.5% default; flag it only when 1% / 2%
+  is in play. Otherwise include it on the VERDICT line as `Risk: <X%>`.
+- Time header: `<sgt> | <utc>`. Append the US-session clause **only** when within
+  1h of `us_open` or `us_close` (decision-relevant); omit otherwise.
+
+### QUICK — action verdict (LONG-NOW / SHORT-NOW)
+
 ```
-SCALP — <COIN> <LONG|SHORT> | <sgt> / <utc> | US open in Xh (or "US session live, close in Xh")
-BEHAVIORAL: <CLEAR (cooldown ok, R16 N/6 edge)|HALT reason>
-VERDICT: <direction verdict vocab>  MACRO: <CLEAR|VETO ...>  Conviction: <low|med|high>
-Risk cap: <0.5%|1%|2%>  (flag if default)
-WEEKEND: <size x0.5 if weekend_window and short, else omit line>
-Range <floor> – <ceiling> | now <mid> (<pos in range>)
-Taker flow: 5m delta <±$Xk> (<buy_share>%)  15m <±$Xk>  [coverage <%>]
+SCALP — <COIN> <LONG|SHORT> | <sgt> | <utc>  [US open in Xh | US close in Xh]
+[BEHAVIORAL: <leak line> — omit if clear]
+VERDICT: <V>  MACRO: <CLEAR|VETO ...>  Conviction: <low|med|high>  [Risk: <X%> if non-default]
+[WEEKEND: size x0.5 — short + weekend only]
+Range <floor> – <ceiling> | now <mid> (<pos>)
+Flow: 5m <±$Xk> (<buy_share>%)  15m <±$Xk>  [cov <%>]
+Book: micro <px> vs mid <px> (dev <±X> bps)  spread <Y> bps
 Triggers:
-  A <name>: entry <px> / stop <px> / T1 <px> T2 <px> (R:R T1 <r>, T2 <r>)
-    SIZE: equity $<E> × <%> = $<risk> ÷ <stop_dist> = <coins>  lev <Nx>
-  B <name>: entry <px> / stop <px> / T1 <px> T2 <px> (R:R T1 <r>, T2 <r>)
-    SIZE: equity $<E> × <%> = $<risk> ÷ <stop_dist> = <coins>  lev <Nx>
+  A <name>: <entry> / SL <stop> / T1 <px> T2 <px> (RR <r1>/<r2>)
+    SIZE: $<E> × <C>% = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
+  B <name>: <entry> / SL <stop> / T1 <px> T2 <px> (RR <r1>/<r2>)
+    SIZE: $<E> × <C>% = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
   [C <name>: ... — short module only]
 Invalidation: <one line>
-<Bear case|Bull case>: <one clause — what kills this in next 1h>
-Next decision bar: <e.g. 14:00 UTC 1h close — confirms by closing > X>
+<Bear case|Bull case>: <one clause>
+Next: <e.g. 14:00 UTC 1h close — confirms by closing > X>
 
 JOURNAL STUB (paste on close):
   date: <UTC date>  asset: <COIN>  side: <long|short>
   entry: <px>  stop: <px>  size: <%risk / coins>  setup: <trigger name>
   thesis: <one line>
-  R16: <which rows = edge>   plan-status: <in-plan|OOP-1>
+  R16: <edge rows>   plan-status: <in-plan|OOP-1>
   outcome: __R   exit-reason: __   lesson: __
 ```
+
+### QUICK — no-action verdict (WAIT / NO-TRADE / VETOED / HALT)
+
+Compact form. The user just needs the verdict, the reason, the levels we're
+watching, and when to look again. Skip everything else.
+
+```
+SCALP — <COIN> <LONG|SHORT> | <sgt> | <utc>
+[BEHAVIORAL: <leak line> — omit if clear]
+VERDICT: <V>  MACRO: <CLEAR|VETO ...>  Conviction: <low|med|high>
+Watching: A <name> at <entry> | B <name> at <entry>  [C ... — short only]
+Reason: <one clause — why not now, cite the missing condition>
+Next: <when to re-check — e.g. 14:00 UTC 1h close, or "on close above 73.4">
+```
+
+No JOURNAL STUB, no Range/Flow/Book lines, no full trigger sizing. If the
+user wants depth on a WAIT, they can ask `/scalp deep`.
 
 ## Output — ENTRY DEEP (`/scalp deep`)
 Append: BTC + BTC.D regime breakdown; positioning analysis
 (funding/premium/OI/taker_delta full window); multi-TF structure (incl 4h/1d);
 session detail (handoff/econ/weekend); full risk section; upgrade-to-trend-trade
 condition. (ATH/discovery state already covered in Step 3 of the direction module.)
+DEEP always prints the full BEHAVIORAL 6/6 score even when clear.
+
+## Output — TINY (`/scalp tiny`, also default for `/loop`)
+
+Single line, no JOURNAL, no preamble, no end-of-turn summary. Use for
+high-frequency monitoring without flooding the screen.
+
+**TINY — ENTRY mode** (no open position):
+```
+<COIN> <V> | <conv> | <floor>↔<ceil> @ <mid> | dev <±X>bps | next <when>
+```
+Examples:
+- `HYPE WAIT | med | 72.5↔73.4 @ 72.9 | dev −0.2bps | next 14:00 UTC`
+- `HYPE LONG-NOW | high | A 72.55 SL 72.20 RR 1.6 | size 28.6 @ 1.0x | dev +4bps`
+  (when an entry is firing, swap the range field for the firing trigger detail)
+- `HYPE VETOED | n/a | reason: BTC −2.1% on rising vol | next 14:00`
+
+**TINY — MANAGE mode** (position open):
+```
+<COIN> <side> @<entry> | now <px> <±%> | TAPE <state> | <ACTION> | next <when>
+```
+Examples:
+- `HYPE long @72.55 | now 72.91 +0.5% | TAPE chop | NO ACTION | next 14:00 UTC`
+- `HYPE long @72.55 | now 73.42 +1.2% | TAPE impulse | MOVE SL to 72.80 | T1 73.10 hit, scale 50%`
+- `HYPE short @74.20 | now 73.80 +0.5% | TAPE reversal-up | TRIM 30% NOW | invalidation 74.50`
+
+Rules for TINY:
+- Output the line and stop. No headers, no follow-up sentence, no "let me know".
+- On HALT: `<COIN> HALT | <reason>` — single line, no other fields.
+- On data-unavailable: `<COIN> DATA-UNAVAILABLE | <source>` and stop.
+- State-change discipline: in `/loop` TINY, **suppress output entirely** when
+  the verdict, TAPE state, MACRO veto, conviction tier, and STOP/T1/T2/ADD
+  decisions are all unchanged from the previous TINY line. Only emit on
+  state change. (One exception: emit at most every 30 minutes anyway as a
+  liveness heartbeat.)
 
 ## /loop usage (hands-off monitoring)
-`/loop 5m /scalp HYPE` (or `/loop 5m /scalp short HYPE`) — runs QUICK every 5
-min, also FEEDS THE TRADE CACHE. After ~6 loops (30 min) taker_delta coverage
-will be meaningful. Stay SILENT unless: verdict becomes actionable
-(LONG-NOW / SHORT-NOW), a trigger fires, VETOED flips, OR (in MANAGE mode)
-STOP/scale level hits or TAPE flips. Ping on state change only, never every tick.
+**Default to TINY in `/loop`.** Examples:
+- `/loop 5m /scalp HYPE` → TINY ENTRY every 5 min
+- `/loop 5m /scalp short HYPE` → TINY ENTRY short every 5 min
+- `/loop 5m /scalp manage HYPE 72.55` → TINY MANAGE every 5 min
+- `/loop 5m /scalp quick HYPE` → explicit QUICK (only if user wants the full block)
+
+TINY in `/loop` mode is **state-change gated**: emit nothing when verdict,
+TAPE, MACRO veto, conviction, and STOP/scale decisions are all unchanged
+from the prior line. Heartbeat: emit at least one line per 30 min regardless,
+so the user knows the loop is alive. The trade cache fills on every run
+whether or not output is emitted.
+
+Escalate to QUICK automatically on state change to an action verdict
+(`LONG-NOW` / `SHORT-NOW`) or any MANAGE event requiring a decision
+(STOP move, T1/T2 hit, TAPE flip, invalidation triggered). One QUICK on
+the transition, then back to TINY for the steady state.

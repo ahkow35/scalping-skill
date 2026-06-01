@@ -112,3 +112,86 @@ def test_weekend_window_false_sunday_late():
     # 2026-05-24 21:00 UTC = 1779656400000 ms
     s = fm.build_session(1779656400000)
     assert s["weekend_window"] is False
+
+
+# --- microprice (Stoikov 2018, top-of-book simple form) -----------------------
+
+def test_microprice_empty_book_returns_none():
+    out = fm.compute_microprice([], [])
+    assert out["microprice"] is None
+    assert out["mid_l1"] is None
+    assert out["note"] == "empty book"
+
+
+def test_microprice_balanced_sizes_equals_mid():
+    # Equal size on both sides => microprice == mid; dev = 0 bps.
+    bids = [{"px": "42.00", "sz": "100"}]
+    asks = [{"px": "42.10", "sz": "100"}]
+    out = fm.compute_microprice(bids, asks)
+    assert out["mid_l1"] == 42.05
+    assert out["microprice"] == 42.05
+    assert out["microprice_dev_bps"] == 0.0
+
+
+def test_microprice_bid_heavy_leans_toward_ask():
+    # 10x bid stack => fair value pulled toward ask. Canonical Stoikov example.
+    # micro = 42.10 * (1000/1100) + 42.00 * (100/1100) = 42.090909...
+    bids = [{"px": "42.00", "sz": "1000"}]
+    asks = [{"px": "42.10", "sz": "100"}]
+    out = fm.compute_microprice(bids, asks)
+    assert abs(out["microprice"] - 42.0909) < 1e-3
+    assert out["microprice_dev_bps"] > 0
+
+
+def test_microprice_ask_heavy_leans_toward_bid():
+    # micro = 42.10 * (100/1100) + 42.00 * (1000/1100) = 42.009090...
+    bids = [{"px": "42.00", "sz": "100"}]
+    asks = [{"px": "42.10", "sz": "1000"}]
+    out = fm.compute_microprice(bids, asks)
+    assert abs(out["microprice"] - 42.0091) < 1e-3
+    assert out["microprice_dev_bps"] < 0
+
+
+def test_microprice_zero_size_returns_none():
+    bids = [{"px": "42.00", "sz": "0"}]
+    asks = [{"px": "42.10", "sz": "0"}]
+    out = fm.compute_microprice(bids, asks)
+    assert out["microprice"] is None
+    assert "zero size" in out["note"]
+
+
+def test_microprice_malformed_levels_returns_none():
+    out = fm.compute_microprice([{"px": "bad"}], [{"px": "42.10", "sz": "1"}])
+    assert out["microprice"] is None
+    assert "malformed" in out["note"]
+
+
+def test_microprice_crossed_book_is_flagged_but_computed():
+    # Bid above ask — pathological but still produces a number; note must flag it.
+    bids = [{"px": "42.20", "sz": "100"}]
+    asks = [{"px": "42.10", "sz": "100"}]
+    out = fm.compute_microprice(bids, asks)
+    assert out["microprice"] is not None
+    assert "crossed" in out["note"]
+
+
+def test_microprice_carries_taker_fee_reference():
+    bids = [{"px": "42.00", "sz": "100"}]
+    asks = [{"px": "42.10", "sz": "100"}]
+    out = fm.compute_microprice(bids, asks)
+    assert out["taker_fee_bps_reference"] == fm.HL_TAKER_FEE_BPS
+
+
+def test_fetch_l2_emits_execution_key(monkeypatch):
+    # Verify the integration point: fetch_l2 still returns asks/bids AND now execution.
+    def fake_post(url, payload, source):
+        return {"levels": [
+            [{"px": "42.00", "sz": "100"}],  # bids
+            [{"px": "42.10", "sz": "100"}],  # asks
+        ]}
+    monkeypatch.setattr(fm, "_post_json", fake_post)
+    out = fm.fetch_l2("HYPE")
+    assert "asks" in out and "bids" in out  # back-compat
+    assert "execution" in out
+    assert out["execution"]["microprice"] == 42.05
+    assert out["execution"]["microprice_dev_bps"] == 0.0
