@@ -73,7 +73,7 @@ def test_data_unavailable_raises_named_error():
 
 
 def test_assemble_marks_macro_unavailable_when_btcd_fails(monkeypatch):
-    monkeypatch.setattr(fm, "fetch_ctx", lambda c: {"coin": c, "mark": 46.0})
+    monkeypatch.setattr(fm, "fetch_ctx", lambda c, dex=None: {"coin": c, "mark": 46.0})
     monkeypatch.setattr(fm, "fetch_candles", lambda *a: [])
     monkeypatch.setattr(fm, "fetch_l2", lambda c: {"asks": {}, "bids": {}})
 
@@ -195,3 +195,84 @@ def test_fetch_l2_emits_execution_key(monkeypatch):
     assert "execution" in out
     assert out["execution"]["microprice"] == 42.05
     assert out["execution"]["microprice_dev_bps"] == 0.0
+
+
+# --- HIP-3 namespacing -------------------------------------------------------
+
+def test_parse_coin_arg_core_perp_uppercases():
+    coin, dex = fm.parse_coin_arg("hype")
+    assert coin == "HYPE" and dex is None
+
+
+def test_parse_coin_arg_hip3_preserves_dex_lowercase_base_upper():
+    coin, dex = fm.parse_coin_arg("xyz:SPCX")
+    assert coin == "xyz:SPCX" and dex == "xyz"
+
+
+def test_parse_coin_arg_hip3_normalizes_mixed_case():
+    coin, dex = fm.parse_coin_arg("XYZ:spcx")
+    assert coin == "xyz:SPCX" and dex == "xyz"
+
+
+def test_trade_cache_path_sanitizes_colon():
+    p = fm._trade_cache_path("xyz:SPCX")
+    assert p.endswith("xyz_SPCX.jsonl")
+    assert ":" not in p.split("/")[-1]
+
+
+def test_fetch_ctx_passes_dex_param_for_hip3(monkeypatch):
+    seen = {}
+
+    def fake_post(url, payload, source):
+        seen["payload"] = payload
+        return [
+            {"universe": [{"name": "xyz:SPCX"}]},
+            [{
+                "markPx": "200.0", "oraclePx": "200.5", "midPx": "199.9",
+                "funding": "0.0000001", "premium": "-0.005",
+                "openInterest": "1000", "prevDayPx": "198.0",
+                "dayNtlVlm": "5000000",
+            }],
+        ]
+
+    monkeypatch.setattr(fm, "_post_json", fake_post)
+    out = fm.fetch_ctx("xyz:SPCX", dex="xyz")
+    assert seen["payload"] == {"type": "metaAndAssetCtxs", "dex": "xyz"}
+    assert out["coin"] == "xyz:SPCX"
+    assert out["mark"] == 200.0
+
+
+def test_fetch_ctx_omits_dex_for_core_perps(monkeypatch):
+    seen = {}
+
+    def fake_post(url, payload, source):
+        seen["payload"] = payload
+        return [
+            {"universe": [{"name": "HYPE"}]},
+            [{
+                "markPx": "73.5", "oraclePx": "73.4", "midPx": "73.49",
+                "funding": "0.00001", "premium": "0.001",
+                "openInterest": "20000000", "prevDayPx": "67.0",
+                "dayNtlVlm": "1300000000",
+            }],
+        ]
+
+    monkeypatch.setattr(fm, "_post_json", fake_post)
+    out = fm.fetch_ctx("HYPE")
+    assert seen["payload"] == {"type": "metaAndAssetCtxs"}  # no dex key
+    assert out["coin"] == "HYPE"
+
+
+def test_fetch_ctx_error_message_distinguishes_hip3_vs_core():
+    # Core not-found
+    with pytest.raises(fm.DataUnavailable) as e:
+        fm.parse_btc_dominance({})  # warm up pytest import
+    # Real test: simulate missing coin and confirm the dex hint appears.
+    import unittest.mock as um
+    with um.patch.object(fm, "_post_json", return_value=[{"universe": [{"name": "OTHER"}]}, []]):
+        with pytest.raises(fm.DataUnavailable) as e:
+            fm.fetch_ctx("xyz:NOPE", dex="xyz")
+        assert "dex='xyz'" in str(e.value)
+        with pytest.raises(fm.DataUnavailable) as e:
+            fm.fetch_ctx("NOPE")
+        assert "core perps" in str(e.value)

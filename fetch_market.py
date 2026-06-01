@@ -167,8 +167,31 @@ def fetch_btc_dominance():
     return parse_btc_dominance(_get_json(CG_GLOBAL, "coingecko"))
 
 
-def fetch_ctx(coin):
-    d = _post_json(HL_INFO, {"type": "metaAndAssetCtxs"}, "hyperliquid")
+def parse_coin_arg(raw):
+    """Parse a coin string into (canonical_coin, dex_or_None).
+
+    Core perps (BTC, HYPE, ETH...) are uppercased and have no dex.
+    HIP-3 perps are deployer-namespaced (e.g. "xyz:SPCX") — dex lowercased,
+    base uppercased, joined with the colon preserved exactly as Hyperliquid
+    stores them in the universe.
+
+    Examples:
+      parse_coin_arg("hype")      -> ("HYPE", None)
+      parse_coin_arg("xyz:SPCX")  -> ("xyz:SPCX", "xyz")
+      parse_coin_arg("XYZ:spcx")  -> ("xyz:SPCX", "xyz")
+    """
+    if ":" in raw:
+        dex, base = raw.split(":", 1)
+        return f"{dex.lower()}:{base.upper()}", dex.lower()
+    return raw.upper(), None
+
+
+def fetch_ctx(coin, dex=None):
+    """Fetch market context for a perp. Pass dex='xyz' for HIP-3 builder dexes."""
+    payload = {"type": "metaAndAssetCtxs"}
+    if dex is not None:
+        payload["dex"] = dex
+    d = _post_json(HL_INFO, payload, "hyperliquid")
     for i, u in enumerate(d[0]["universe"]):
         if u["name"] == coin:
             c = d[1][i]
@@ -181,7 +204,8 @@ def fetch_ctx(coin):
                 "prev_day_px": float(c["prevDayPx"]),
                 "day_vol_usdc": float(c["dayNtlVlm"]),
             }
-    raise DataUnavailable(f"DATA UNAVAILABLE: hyperliquid (coin {coin} not found)")
+    where = f"dex={dex!r}" if dex else "core perps"
+    raise DataUnavailable(f"DATA UNAVAILABLE: hyperliquid (coin {coin} not found in {where})")
 
 
 def fetch_candles(coin, interval, start_ms, end_ms):
@@ -252,16 +276,22 @@ TRADE_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tra
 TRADE_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000  # keep 6h of trades
 
 
+def _trade_cache_path(coin):
+    """Sanitize coin (e.g. 'xyz:SPCX') into a filesystem-safe cache filename."""
+    return os.path.join(TRADE_CACHE_DIR, f"{coin.replace(':', '_')}.jsonl")
+
+
 def merge_trade_cache(coin, fresh_trades, now_ms):
     """Dedupe fresh trades against on-disk cache, write merged back, return combined list.
 
-    Cache lives at .trade_cache/<COIN>.jsonl (one trade per line). Trades older than
-    TRADE_CACHE_MAX_AGE_MS are dropped on write. Dedupe key is `tid`. This is how we
-    build a meaningful taker-delta history from the 10-trade recentTrades cap — across
-    repeated /scalp calls (typical loop = every 5m) the cache accumulates.
+    Cache lives at .trade_cache/<sanitized-coin>.jsonl (one trade per line). Trades
+    older than TRADE_CACHE_MAX_AGE_MS are dropped on write. Dedupe key is `tid`. This
+    is how we build a meaningful taker-delta history from the 10-trade recentTrades
+    cap — across repeated /scalp calls (typical loop = every 5m) the cache accumulates.
+    HIP-3 namespaced coins (e.g. "xyz:SPCX") have ':' replaced with '_' in the filename.
     """
     os.makedirs(TRADE_CACHE_DIR, exist_ok=True)
-    path = os.path.join(TRADE_CACHE_DIR, f"{coin.upper()}.jsonl")
+    path = _trade_cache_path(coin)
     cutoff = now_ms - TRADE_CACHE_MAX_AGE_MS
 
     by_tid = {}
@@ -355,9 +385,13 @@ _DAY = 86400000
 
 def assemble(coin, deep=False, now_ms=None):
     now_ms = _NOW() if now_ms is None else now_ms
-    out = {"session": build_session(now_ms), "primary": coin}
+    # Detect HIP-3 namespacing. Primary coin may live on a builder dex; BTC ctx for
+    # macro veto is always on core. l2Book / candleSnapshot / recentTrades all accept
+    # namespaced coin names directly with no dex param — only metaAndAssetCtxs needs it.
+    _, primary_dex = parse_coin_arg(coin) if isinstance(coin, str) else (coin, None)
+    out = {"session": build_session(now_ms), "primary": coin, "primary_dex": primary_dex}
 
-    out["ctx"] = fetch_ctx(coin)
+    out["ctx"] = fetch_ctx(coin, dex=primary_dex)
     out["btc_ctx"] = fetch_ctx("BTC")
 
     # 1d always included (365d) — needed for ATH / discovery state detection.
@@ -398,7 +432,8 @@ def main(argv):
     args = [a for a in argv[1:] if a != "--deep"]
     deep = "--deep" in argv[1:] or "deep" in args
     args = [a for a in args if a != "deep"]
-    coin = (args[0].upper() if args else "HYPE")
+    raw = args[0] if args else "HYPE"
+    coin, _ = parse_coin_arg(raw)
     try:
         out = assemble(coin, deep=deep)
     except DataUnavailable as exc:

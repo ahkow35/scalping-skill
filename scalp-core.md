@@ -67,6 +67,16 @@ Run: `python3 /Users/nyanyk/Claude/research/scalp/fetch_market.py <COIN> [--deep
 Use ONLY the returned block. Never re-derive timestamps. If output is a
 `DATA UNAVAILABLE` line, report it and STOP — no estimated numbers.
 
+HIP-3 builder-deployed perps are supported via namespaced coin args
+(`xyz:SPCX`, `vntl:SPACEX`, etc.). The fetcher routes ctx through the
+deployer's dex; L2 / candles / trades use the namespaced coin directly.
+BTC macro context is always pulled from core, regardless of primary's dex.
+**Caveat**: macro veto and US-session overlay assume crypto-continuous
+trading. For HIP-3 TradFi underlyings (stocks, FX, commodities) the
+session timing logic is only meaningful for US-listed assets (NYSE hours
+≈ US session window); for non-US underlyings, treat session overlay as
+indicative and lean on instrument-specific event awareness instead.
+
 The output includes `taker_delta` — REAL aggressor flow from a local trade
 cache that grows across repeated /scalp calls. Use `delta_usdc` and
 `buy_share_pct` per window for buyer-vs-seller pressure. CHECK `coverage_pct` —
