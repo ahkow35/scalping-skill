@@ -1,3 +1,4 @@
+import json
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import fetch_market as fm
@@ -58,12 +59,102 @@ def test_band_aggregate_buckets_usdc_depth():
 import pytest
 
 
-def test_fetch_btc_dominance_parses_coingecko():
+def test_parse_btc_dominance_returns_only_current_snapshot():
+    """CoinGecko /global does NOT expose historical BTC.D change. The 24h
+    delta must come from the local cache, not the parser. (Previously this
+    function mislabeled market_cap_change_percentage_24h_usd as
+    btc_d_24h_chg, which is total-mcap change, not dominance change.)"""
     payload = {"data": {"market_cap_percentage": {"btc": 54.3},
                          "market_cap_change_percentage_24h_usd": 1.1}}
     out = fm.parse_btc_dominance(payload)
-    assert out["btc_d"] == 54.3
-    assert out["btc_d_24h_chg"] == 1.1
+    assert out == {"btc_d": 54.3}
+    assert "btc_d_24h_chg" not in out
+
+
+def test_btcd_cache_appends_and_returns_sorted(tmp_path):
+    p = tmp_path / "btcd.jsonl"
+    now = 1779102720000
+    rows1 = fm.update_btcd_cache(55.0, now, path=str(p))
+    rows2 = fm.update_btcd_cache(55.5, now + 3600_000, path=str(p))
+    assert len(rows2) == 2
+    assert [r["btc_d"] for r in rows2] == [55.0, 55.5]
+    assert rows2[0]["ts"] < rows2[1]["ts"]
+
+
+def test_btcd_cache_drops_old_rows(tmp_path):
+    p = tmp_path / "btcd.jsonl"
+    now = 1779102720000
+    # Seed a 49h-old row directly
+    p.write_text(json.dumps({"ts": now - 49 * 3600_000, "btc_d": 50.0}) + "\n")
+    rows = fm.update_btcd_cache(55.0, now, path=str(p))
+    assert len(rows) == 1
+    assert rows[0]["btc_d"] == 55.0
+
+
+def test_btcd_24h_change_picks_sample_in_tolerance_window():
+    now = 1779102720000
+    rows = [
+        {"ts": now - 25 * 3600_000, "btc_d": 56.0},   # 25h ago — in window
+        {"ts": now - 12 * 3600_000, "btc_d": 55.5},   # 12h ago — out of window
+        {"ts": now, "btc_d": 54.5},
+    ]
+    out = fm.compute_btcd_24h_change(rows, now, current_btcd=54.5)
+    assert out["btc_d_24h_chg"] == round((54.5 - 56.0) / 56.0 * 100, 3)
+    assert out["btc_d_sample_age_min"] == 25 * 60
+    assert out["btc_d_coverage_h"] == 25.0
+
+
+def test_btcd_24h_change_none_when_no_sample_near_24h():
+    now = 1779102720000
+    rows = [
+        {"ts": now - 6 * 3600_000, "btc_d": 55.0},   # only 6h of history
+        {"ts": now, "btc_d": 55.2},
+    ]
+    out = fm.compute_btcd_24h_change(rows, now, current_btcd=55.2)
+    assert out["btc_d_24h_chg"] is None
+    assert out["btc_d_sample_age_min"] is None
+    assert out["btc_d_coverage_h"] == 6.0
+
+
+def test_btcd_24h_change_tolerance_bounds():
+    now = 1779102720000
+    # Sample exactly at 22.4h ago — just OUTSIDE the lower tolerance bound (22.5h)
+    rows = [
+        {"ts": now - int(22.4 * 3600_000), "btc_d": 55.0},
+        {"ts": now, "btc_d": 55.2},
+    ]
+    out = fm.compute_btcd_24h_change(rows, now, current_btcd=55.2)
+    assert out["btc_d_24h_chg"] is None
+
+    # Sample exactly at 22.6h ago — inside the window
+    rows = [
+        {"ts": now - int(22.6 * 3600_000), "btc_d": 55.0},
+        {"ts": now, "btc_d": 55.2},
+    ]
+    out = fm.compute_btcd_24h_change(rows, now, current_btcd=55.2)
+    assert out["btc_d_24h_chg"] is not None
+
+
+def test_btcd_24h_change_picks_closest_sample_when_multiple_in_window():
+    now = 1779102720000
+    rows = [
+        {"ts": now - int(23.0 * 3600_000), "btc_d": 56.0},   # 1h from target
+        {"ts": now - int(24.5 * 3600_000), "btc_d": 56.5},   # 0.5h from target — closer
+        {"ts": now - int(25.4 * 3600_000), "btc_d": 57.0},   # 1.4h from target
+        {"ts": now, "btc_d": 55.0},
+    ]
+    out = fm.compute_btcd_24h_change(rows, now, current_btcd=55.0)
+    # Should have picked the 56.5 sample (closest to 24h ago)
+    expected = round((55.0 - 56.5) / 56.5 * 100, 3)
+    assert out["btc_d_24h_chg"] == expected
+
+
+def test_btcd_24h_change_handles_empty_cache():
+    now = 1779102720000
+    out = fm.compute_btcd_24h_change([], now, current_btcd=55.0)
+    assert out["btc_d_24h_chg"] is None
+    assert out["btc_d_sample_age_min"] is None
+    assert out["btc_d_coverage_h"] is None
 
 
 def test_data_unavailable_raises_named_error():

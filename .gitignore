@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .trade_cache/
+.btcd_cache.jsonl
+.audit_log.jsonl

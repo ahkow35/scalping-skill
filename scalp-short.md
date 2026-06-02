@@ -18,8 +18,17 @@ VETO SHORTS if any:
   date; OR
 - **Funding extreme negative**: this perp's funding < -0.05% per 8h
   (annualized < -55%) — crowded short, NO new short entries; MANAGE only.
-If `macro_can_clear` is false (BTC.D unavailable) -> veto CANNOT clear ->
-verdict NO-TRADE on any short bias.
+If `macro_can_clear` is false (BTC.D snapshot unavailable) -> veto CANNOT
+clear -> verdict NO-TRADE on any short bias.
+
+**BTC.D 24h-change cache warm-up**: `btc_d_24h_chg` is derived from a local
+rolling snapshot cache (CoinGecko's `/global` does not expose historical
+BTC.D change). When `btc_d_24h_chg` is `null`, the cache has not yet
+accumulated a sample near 24h ago (target ±90min) — SKIP only the
+BTC.D-component of the veto; other macro checks (BTC structural break,
+funding extremes, event days) still apply normally. Note `btc_d_coverage_h`
+in the verdict output when this happens so the user knows the macro gate
+is partial.
 Otherwise macro is a size modifier:
 - BTC.D rising + BTC soft -> tailwind for shorts, full size
 - BTC.D falling + BTC bid -> headwind, half size, tighter targets

@@ -154,6 +154,105 @@ Once a trigger fires, choose market vs limit using `book.execution`:
   is execution-layer, not thesis-layer; it sharpens fills, it does not change
   what we trade.
 
+## Step 7 — Audit logging (HARD, always when emitting QUICK / DEEP / MANAGE-action-required)
+
+Every QUICK, DEEP, and MANAGE-action-required output gets appended to the
+audit log via the helper script. This is the foundation for honest
+performance accountability — without it, the skill is unfalsifiable.
+
+### When to log
+- ENTRY QUICK with any verdict (LONG-NOW / SHORT-NOW / WAIT / NO-TRADE / VETOED / HALT): LOG.
+- ENTRY DEEP: LOG (same payload shape as QUICK).
+- MANAGE action-required (STOP move / T1/T2 hit / TAPE flip / ADD / invalidation): LOG.
+- MANAGE no-action compact form: SKIP (state unchanged — not worth a row).
+- TINY in `/loop`: SKIP. Too noisy; state-change-gated emits cover the audit need.
+- TINY on state-change (heartbeat or one-shot `/scalp tiny`): SKIP. The next QUICK on transition logs.
+
+### How to log
+
+Right after printing the output block, shell out:
+
+```bash
+python3 /Users/nyanyk/Claude/research/scalp/audit_log.py log <<'JSON'
+{
+  "coin": "HYPE",
+  "side": "long",
+  "mode": "ENTRY",
+  "verdict": "WAIT",
+  "conviction": "med",
+  "macro_status": "CLEAR",
+  "macro_can_clear": true,
+  "behavioral": {"cooldown": "clear", "r16_score": 6, "leaks": []},
+  "inputs": {
+    "mid": 71.94, "ath_state": "below_ath", "ath_dist_pct": -5.22,
+    "btc_d": 55.93, "btc_d_24h_chg": null, "btc_d_coverage_h": 0.0,
+    "btc_mark": 67383, "funding_8h": 0.00125, "premium": 0.00141,
+    "weekend_window": false, "us_session_live": false,
+    "taker_delta_5m": {"delta_usdc": 5152, "buy_share_pct": 94.0, "coverage_pct": 0.1}
+  },
+  "triggers": {
+    "A": {"entry": 73.55, "stop": 72.30, "t1": 75.0, "t2": 75.83, "rr_t1": 1.16, "rr_t2": 1.82},
+    "B": null
+  },
+  "trigger_used": null
+}
+JSON
+```
+
+The command prints a `trade_id` to stdout. Capture it. Print it in the
+JOURNAL STUB at the top, replacing the freeform date line:
+
+```
+JOURNAL STUB:
+  trade_id: <returned_id>
+  ...
+```
+
+For action verdicts (`LONG-NOW`/`SHORT-NOW`) set `trigger_used: "A"` (or B/C).
+For non-action verdicts set `trigger_used: null`.
+
+For MANAGE-action-required: payload uses `mode: "MANAGE"`, plus an `event`
+field naming what triggered the action (`stop_move`, `t1_hit`, `t2_hit`,
+`tape_flip`, `add_fired`, `invalidation`). The `triggers` block becomes
+the current `scale_ladder` (T1/T2 prices, current SL).
+
+### Resolving on close
+
+When the trade closes (or the thesis is invalidated without an entry), run:
+
+```bash
+python3 /Users/nyanyk/Claude/research/scalp/audit_log.py resolve \
+  <trade_id> <outcome_r> <exit_reason> "<lesson>"
+```
+
+`outcome_r` is the R-multiple (`-1.0`, `2.5`, etc.). `exit_reason` is one of
+`T1`, `T2`, `stop`, `tape-flip`, `time-stop`, `manual`, `unfilled`. Lesson
+is optional but recommended — that's the part that compounds.
+
+### Reviewing performance
+
+```bash
+python3 /Users/nyanyk/Claude/research/scalp/audit_log.py summary [--since-days N]
+```
+
+Returns verdict distribution (catches calibration drift — if VETOED is 90%
+of calls, the gate is mis-tuned) and per-setup expectancy across resolved
+trades (catches "trigger A is actually net-negative at 2am" patterns).
+
+```bash
+python3 /Users/nyanyk/Claude/research/scalp/audit_log.py list-open
+```
+
+Shows entries not yet resolved with age in hours. Stale entries (>72h open
+on an action verdict) usually mean the user forgot to resolve — prompt them.
+
+### Failure handling
+
+If `audit_log.py log` fails (disk full, permission error, etc.), report
+the error to the user AND still emit the trading output — the audit log is
+non-blocking. A missed audit row is better than a missed trade. But flag
+the failure prominently so it gets fixed.
+
 ## Step M — MANAGE mode (when already in a position)
 
 Read entry price and direction from conversation (or args). Compute:

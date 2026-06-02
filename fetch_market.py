@@ -125,6 +125,7 @@ def compute_microprice(bids, asks):
 
 
 import json
+import os
 import urllib.request
 
 HL_INFO = "https://api.hyperliquid.xyz/info"
@@ -155,16 +156,117 @@ def _get_json(url, source):
 
 
 def parse_btc_dominance(payload):
+    """Current BTC dominance from CoinGecko /global.
+
+    CoinGecko's /global does NOT expose historical BTC.D change. The field
+    `market_cap_change_percentage_24h_usd` is total-mcap change, not dominance
+    change — a previous version of this function mislabeled it as
+    `btc_d_24h_chg` and that bug propagated into the macro veto.
+
+    The 24h change must be derived from a local rolling cache of BTC.D
+    snapshots — see `update_btcd_cache` + `compute_btcd_24h_change`.
+    """
     try:
         d = payload["data"]
-        return {"btc_d": float(d["market_cap_percentage"]["btc"]),
-                "btc_d_24h_chg": float(d["market_cap_change_percentage_24h_usd"])}
+        return {"btc_d": float(d["market_cap_percentage"]["btc"])}
     except (KeyError, TypeError, ValueError):
         raise DataUnavailable("DATA UNAVAILABLE: coingecko (/global shape)")
 
 
 def fetch_btc_dominance():
     return parse_btc_dominance(_get_json(CG_GLOBAL, "coingecko"))
+
+
+BTCD_CACHE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ".btcd_cache.jsonl")
+BTCD_CACHE_MAX_AGE_MS = 48 * 60 * 60 * 1000          # keep 48h of snapshots
+BTCD_TARGET_LOOKBACK_MS = 24 * 60 * 60 * 1000        # 24h target lookback
+BTCD_TARGET_TOLERANCE_MS = 90 * 60 * 1000            # ±90min around the 24h mark
+
+
+def update_btcd_cache(btc_d, now_ms, path=None):
+    """Append the current BTC.D snapshot to the local rolling cache.
+
+    Cache is JSONL: one `{"ts": ms, "btc_d": pct}` per line. Rows older than
+    BTCD_CACHE_MAX_AGE_MS are dropped on write. We build the BTC.D 24h-change
+    signal ourselves across repeated /scalp calls because the upstream API
+    does not provide it.
+
+    Returns the merged on-disk history (sorted ascending by ts).
+    """
+    path = path or BTCD_CACHE_PATH
+    cutoff = now_ms - BTCD_CACHE_MAX_AGE_MS
+    rows = []
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if int(r.get("ts", 0)) < cutoff:
+                        continue
+                    rows.append(r)
+        except OSError:
+            pass
+
+    rows.append({"ts": int(now_ms), "btc_d": float(btc_d)})
+    rows.sort(key=lambda r: int(r["ts"]))
+
+    tmp = path + ".tmp"
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(tmp, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    os.replace(tmp, path)
+    return rows
+
+
+def compute_btcd_24h_change(rows, now_ms, current_btcd):
+    """Compute the BTC.D 24h change from cached snapshots.
+
+    Picks the cached sample closest to (now − 24h) within ±90 min tolerance.
+    Returns a dict with:
+      - btc_d_24h_chg: signed % change, or None if no sample in window
+      - btc_d_sample_age_min: age of the chosen sample, or None
+      - btc_d_coverage_h: age of the oldest sample in cache (hours)
+
+    `btc_d_24h_chg = None` is the "cache still warming up" signal — callers
+    should NOT fire the BTC.D-based veto when it is None, but other macro
+    checks (BTC structural break, funding extremes, event days) still apply.
+    """
+    target = now_ms - BTCD_TARGET_LOOKBACK_MS
+    lo = target - BTCD_TARGET_TOLERANCE_MS
+    hi = target + BTCD_TARGET_TOLERANCE_MS
+
+    coverage_h = None
+    if rows:
+        oldest_ts = min(int(r["ts"]) for r in rows)
+        coverage_h = round((now_ms - oldest_ts) / 3_600_000, 1)
+
+    in_window = [r for r in rows if lo <= int(r["ts"]) <= hi]
+    if not in_window:
+        return {"btc_d_24h_chg": None,
+                "btc_d_sample_age_min": None,
+                "btc_d_coverage_h": coverage_h}
+
+    sample = min(in_window, key=lambda r: abs(int(r["ts"]) - target))
+    sample_btcd = float(sample["btc_d"])
+    if sample_btcd == 0:
+        return {"btc_d_24h_chg": None,
+                "btc_d_sample_age_min": None,
+                "btc_d_coverage_h": coverage_h}
+    change_pct = (float(current_btcd) - sample_btcd) / sample_btcd * 100
+    sample_age_min = round((now_ms - int(sample["ts"])) / 60_000, 1)
+    return {"btc_d_24h_chg": round(change_pct, 3),
+            "btc_d_sample_age_min": sample_age_min,
+            "btc_d_coverage_h": coverage_h}
 
 
 def parse_coin_arg(raw):
@@ -269,8 +371,6 @@ def fetch_recent_trades(coin):
     """
     return _post_json(HL_INFO, {"type": "recentTrades", "coin": coin}, "hyperliquid")
 
-
-import os
 
 TRADE_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".trade_cache")
 TRADE_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000  # keep 6h of trades
@@ -420,7 +520,21 @@ def assemble(coin, deep=False, now_ms=None):
         out["taker_delta"] = str(exc)
 
     try:
-        out["btc_dominance"] = fetch_btc_dominance()
+        parsed = fetch_btc_dominance()
+        rows = update_btcd_cache(parsed["btc_d"], now_ms)
+        delta = compute_btcd_24h_change(rows, now_ms, parsed["btc_d"])
+        out["btc_dominance"] = {
+            "btc_d": parsed["btc_d"],
+            **delta,
+            "_note": ("btc_d_24h_chg is derived from a LOCAL ROLLING CACHE of "
+                      "BTC.D snapshots — CoinGecko's /global endpoint does not "
+                      "expose historical BTC.D change. If btc_d_24h_chg is None "
+                      "the cache hasn't yet accumulated a sample near 24h ago "
+                      "(target ±90min); skip the BTC.D component of the macro "
+                      "veto in that case — other macro checks (BTC structure, "
+                      "funding, event days) still apply. btc_d_coverage_h is "
+                      "the age of the oldest sample in cache."),
+        }
         out["macro_can_clear"] = True
     except DataUnavailable as exc:
         out["btc_dominance"] = str(exc)
