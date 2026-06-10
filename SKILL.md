@@ -56,6 +56,14 @@ Performance by setup (resolved only):
   ... sorted by total_r desc
   (if no resolved trades yet: "No resolved trades yet — log outcomes via /scalp resolve")
 
+GATE VALUE (counterfactual replay, <scored> scored):
+  WAITs:  <n> scored, <fired> would have filled — missed <±R>R
+  VETOs:  <n> scored, <fired> would have filled — blocked <±R>R
+          (negative = the gate saved you; positive = the gate cost you)
+  By setup (simulated): <side>-<label>: n <n>, win <pct>%, expectancy <±R>R
+  ... sorted by total_r desc; omit whole block if scored == 0
+  [if unscored open non-action entries exist: "→ run /scalp replay to score <K> new entries"]
+
 Open entries: <open_count> unresolved.
   [if any stale >72h on action verdicts: "⚠ <K> stale action entries — see /scalp list-open"]
 ```
@@ -77,6 +85,26 @@ python3 /Users/nyanyk/Claude/research/scalp/audit_log.py resolve <args>
 If the script returns 0, confirm to the user with the trade_id and outcome.
 If it returns 1 (not found / already resolved), say so plainly and offer to
 list open entries.
+
+### `/scalp replay [--window-h N] [--force]`
+
+Counterfactual scorer — replays every open logged decision against the candles
+that followed it: did the trigger fill, and did the stop or targets get hit
+first? Run:
+```bash
+python3 /Users/nyanyk/Claude/research/scalp/replay.py [--window-h N] [--force]
+```
+
+Returns JSON `{scored: [...], skipped: [...]}`. Render one line per scored
+entry: `<trade_id>  <verdict>  best_r <±R>  (<per-trigger statuses>)`, then
+the skipped list compactly. After rendering, run `/scalp summary` mechanics
+to show the updated GATE VALUE block. Conventions (state them if asked): fills
+at trigger price with no slippage — slightly optimistic; same-candle
+stop/target conflicts drill to 1m and otherwise resolve conservatively as
+stop-first with `ambiguous: true`; 50% out at T1 → stop to breakeven, 50% at
+T2 (the 20% trail is approximated by the T2 exit); window default 72h,
+mark-to-market if still open at window end. Real `/scalp resolve` outcomes
+always take precedence — replay never touches resolved entries.
 
 ### `/scalp list-open`
 

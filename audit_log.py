@@ -140,14 +140,45 @@ def resolve_audit_entry(trade_id, outcome_r, exit_reason, lesson=None,
     return False
 
 
+ACTION_VERDICTS = ("LONG-NOW", "SHORT-NOW")
+
+
+def attach_counterfactual(trade_id, counterfactual, path=None, force=False):
+    """Attach a replay-engine counterfactual block to an entry.
+
+    Returns True on success; False if trade_id not found or already has a
+    counterfactual (unless force=True). Never touches `outcome` — a real
+    trade result always lives separately and takes precedence.
+    """
+    entries = _load_entries(path)
+    for e in entries:
+        if e.get("id") == trade_id:
+            if e.get("counterfactual") is not None and not force:
+                return False
+            e["counterfactual"] = counterfactual
+            _write_entries(entries, path)
+            return True
+    return False
+
+
 def list_open_entries(now_ms=None, path=None):
-    """Entries with outcome=null. Each row gets an `age_h` annotation."""
+    """Entries still needing resolution, with an `age_h` annotation.
+
+    An entry is open when `outcome` is null — EXCEPT non-action verdicts
+    (WAIT/VETOED/...) that already carry a counterfactual: those are
+    considered closed by replay (there was never a live position to resolve).
+    Action verdicts always stay open until a real `resolve`.
+    """
     now_ms = now_ms or _ts_ms()
-    return [
-        {**e, "age_h": round((now_ms - int(e["ts_ms"])) / 3_600_000, 1)}
-        for e in _load_entries(path)
-        if e.get("outcome") is None
-    ]
+    out = []
+    for e in _load_entries(path):
+        if e.get("outcome") is not None:
+            continue
+        if (e.get("verdict") not in ACTION_VERDICTS
+                and e.get("counterfactual") is not None):
+            continue
+        out.append({**e, "age_h": round((now_ms - int(e["ts_ms"])) / 3_600_000, 1)})
+    return out
 
 
 def compute_summary(since_days=None, path=None, now_ms=None):
@@ -190,11 +221,68 @@ def compute_summary(since_days=None, path=None, now_ms=None):
             "total_r": round(sum(rs), 3),
         }
 
+    # "open" mirrors list_open_entries: counterfactually-closed non-action
+    # rows are not open — only live positions / armed action verdicts are.
+    open_n = sum(
+        1 for e in entries
+        if e.get("outcome") is None
+        and not (e.get("verdict") not in ACTION_VERDICTS
+                 and e.get("counterfactual") is not None))
+
     return {
         "total_entries": len(entries),
         "resolved": len(resolved),
-        "open": len(entries) - len(resolved),
+        "open": open_n,
         "verdict_distribution": verdict_counts,
+        "by_setup": setup_stats,
+        "counterfactual": _counterfactual_stats(entries),
+    }
+
+
+def _counterfactual_stats(entries):
+    """Gate-value aggregates over replay-scored entries.
+
+    wait.missed_r  — R the WAITs sat out (positive = the gate cost you)
+    veto.avoided_r — R the VETOs dodged (negative = the gate saved you)
+    by_setup       — counterfactual expectancy per `<side>-<trigger label>`
+    """
+    scored = [e for e in entries if e.get("counterfactual")]
+
+    def bucket(verdicts):
+        rows = [e for e in scored if e.get("verdict") in verdicts]
+        fired = [e for e in rows
+                 if e["counterfactual"].get("best_r") is not None]
+        return {
+            "n": len(rows),
+            "fired": len(fired),
+            "total_best_r": round(sum(e["counterfactual"]["best_r"]
+                                      for e in fired), 3),
+        }
+
+    wait = bucket(("WAIT",))
+    veto = bucket(("VETOED", "NO-TRADE", "HALT"))
+
+    by_setup = {}
+    for e in scored:
+        for label, res in (e["counterfactual"].get("per_trigger") or {}).items():
+            if res.get("r") is None:
+                continue
+            by_setup.setdefault(f"{e.get('side')}-{label}", []).append(res["r"])
+    setup_stats = {}
+    for setup, rs in by_setup.items():
+        setup_stats[setup] = {
+            "n": len(rs),
+            "win_rate": round(sum(1 for r in rs if r > 0) / len(rs), 3),
+            "expectancy_r": round(sum(rs) / len(rs), 3),
+            "total_r": round(sum(rs), 3),
+        }
+
+    return {
+        "scored": len(scored),
+        "wait": {"n": wait["n"], "fired": wait["fired"],
+                 "missed_r": wait["total_best_r"]},
+        "veto": {"n": veto["n"], "fired": veto["fired"],
+                 "avoided_r": veto["total_best_r"]},
         "by_setup": setup_stats,
     }
 
