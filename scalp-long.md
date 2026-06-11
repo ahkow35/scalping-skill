@@ -9,13 +9,14 @@ VETO LONGS if any:
 - BTC broke a defined structural level (prior swing low / range floor) to the
   downside on rising volume within the trade horizon; OR
 - btc_d_24h_chg >= +1.5 and BTC.D rising; OR
-- BTC 1h range >= 2x its trailing 20-bar average range, directional down; OR
 - **Binary US econ event today**: FOMC decision, FOMC minutes, CPI, NFP,
   PCE — NO-TRADE for the day regardless of setup quality. Ask user once
   if the calendar is unclear; default to VETO if uncertain on a known
   event date; OR
-- **Funding extreme positive**: this perp's funding > +0.05% per 8h
-  (annualized >55%) — crowded long, NO new long entries; MANAGE only.
+- **Funding extreme positive**: this perp's funding > +0.03% per 8h
+  (annualized >33%) — crowded long, NO new long entries; MANAGE only.
+  (Tightened from 0.05 on 2026-06-10: backtest showed clear negative
+  forward drift already at 0.03%/8h — 24h mean −1.85% vs +0.38% baseline.)
 If `macro_can_clear` is false (BTC.D snapshot unavailable) -> veto CANNOT
 clear -> verdict NO-TRADE on any long bias.
 
@@ -30,6 +31,12 @@ is partial.
 Otherwise macro is a size modifier:
 - BTC.D falling + BTC bid -> tailwind, full size
 - BTC.D rising + BTC up -> headwind, half size, tighter targets
+- **BTC volatility spike** (BTC 1h range >= 2x trailing 20-bar avg, either
+  direction): half size + widen the structural stop (cut size, never
+  tighten) + tighter time-box. NOT a veto — demoted 2026-06-10: backtest
+  showed down-spikes preceded BETTER 24h returns (capitulation bounce,
+  +1.13% vs +0.29%) but WORSE 4h adverse excursion (−1.84% vs −1.54%).
+  The spike marks stop-out risk, not continuation.
 - chop -> neutral
 Always print: `MACRO: CLEAR` or `MACRO: VETO (reason)`. Note trajectory if
 you can infer it from BTC.D 24h chg sign + recent movement.

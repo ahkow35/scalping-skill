@@ -31,3 +31,12 @@ macro-veto thresholds were backtested against ~208 days of HYPE history.
   protocol files.
 
 Commits: `167aa02`, `fc5a386`.
+
+## 2026-06-11 — Threshold changes applied (Nyan sign-off)
+
+- Funding-extreme veto tightened ±0.05 → ±0.03%/8h (both direction modules
+  + SKILL.md), per backtest: protective effect clear from 0.03.
+- BTC 2× ATR spike demoted from hard veto to size modifier (half size,
+  wider structural stop, tighter time-box) in both modules: backtest showed
+  it marks adverse-excursion risk, not directional continuation.
+- Files: scalp-long.md, scalp-short.md, SKILL.md.

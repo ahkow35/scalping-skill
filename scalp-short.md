@@ -10,14 +10,16 @@ VETO SHORTS if any:
   the UPSIDE on rising volume within the trade horizon; OR
 - btc_d_24h_chg <= -1.5 and BTC.D falling (alts ripping, dominance bleeding
   — anti-short for alts); OR
-- BTC 1h range >= 2x its trailing 20-bar average range, directional UP; OR
 - **Binary US econ event today**: FOMC decision, FOMC minutes, CPI, NFP,
   PCE — NO-TRADE for the day regardless of setup quality (symmetric with the
   long gate; event-day uncertainty kills both directions). Ask user once if
   the calendar is unclear; default to VETO if uncertain on a known event
   date; OR
-- **Funding extreme negative**: this perp's funding < -0.05% per 8h
-  (annualized < -55%) — crowded short, NO new short entries; MANAGE only.
+- **Funding extreme negative**: this perp's funding < -0.03% per 8h
+  (annualized < -33%) — crowded short, NO new short entries; MANAGE only.
+  (Tightened from 0.05 on 2026-06-10: backtest showed negative-funding
+  hours preceded squeeze rallies — 24h mean +1.99% vs +0.38% baseline at
+  0.03%/8h, +7.4% at 0.05 — exactly what kills shorts.)
 If `macro_can_clear` is false (BTC.D snapshot unavailable) -> veto CANNOT
 clear -> verdict NO-TRADE on any short bias.
 
@@ -32,6 +34,11 @@ is partial.
 Otherwise macro is a size modifier:
 - BTC.D rising + BTC soft -> tailwind for shorts, full size
 - BTC.D falling + BTC bid -> headwind, half size, tighter targets
+- **BTC volatility spike** (BTC 1h range >= 2x trailing 20-bar avg, either
+  direction): half size + widen the structural stop (cut size, never
+  tighten) + tighter time-box. NOT a veto — demoted 2026-06-10 (symmetric
+  with the long module): the spike marks adverse-excursion / stop-out
+  risk in both directions, not directional continuation.
 - chop -> neutral
 Always print: `MACRO: CLEAR` or `MACRO: VETO (reason)`. Note trajectory if
 you can infer it from BTC.D 24h chg sign + recent movement.

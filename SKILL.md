@@ -167,8 +167,8 @@ Follow `scalp-core.md` + the direction module exactly.
   Cooldown fail → NO-TRADE — BEHAVIORAL HALT, do not fetch data.
   R16 leaks → conviction penalty + named warning; trade proceeds.
 - Macro veto runs SECOND, from the direction module. Includes hard
-  NO-TRADE on FOMC/CPI/NFP/PCE days + extreme funding (long: >+0.05%/8h;
-  short: <-0.05%/8h).
+  NO-TRADE on FOMC/CPI/NFP/PCE days + extreme funding (long: >+0.03%/8h;
+  short: <-0.03%/8h).
 - User must declare active risk cap (0.5% / 1% / 2%) before triggers;
   default 0.5% and flag it.
 - Every trigger block shows the sizing math (equity × cap = $risk;
