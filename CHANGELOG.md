@@ -40,3 +40,23 @@ Commits: `167aa02`, `fc5a386`.
   wider structural stop, tighter time-box) in both modules: backtest showed
   it marks adverse-excursion risk, not directional continuation.
 - Files: scalp-long.md, scalp-short.md, SKILL.md.
+
+## 2026-06-13 — Profile/state layer + instruction-consistency lint
+
+Acted on external review (5 of 8 items; #6 deferred, #7 rejected).
+
+- **profile.py** (new) — `.scalp_profile.json` {equity, phase} + `/scalp
+  profile` command. Sizing math now sources equity/cap deterministically;
+  unblocks /loop (no more asking for equity every run).
+- **behavioral.py** (new) — cooldown / FOMO-streak / OOP-this-week derived
+  from the audit log instead of conversation memory. Step 0 preflight reads
+  it; works headless under /loop.
+- **audit payload** — `plan_status` captured so the weekly OOP cap persists.
+- **SKILL.md / scalp-core.md** — frontmatter drift fixed (five admin
+  commands; replay/profile/quick in triggers); journal-stub contradiction
+  resolved (log all QUICK, show stub on action verdicts only).
+- **tests/test_skill_consistency.py** (new) — lints command/frontmatter
+  consistency + no blanket journal-stub mandate; catches the drift class.
+- 22 new tests (104 total).
+
+Deferred: econ-dates file (#6). Rejected: openai.yaml (#7, wrong ecosystem).

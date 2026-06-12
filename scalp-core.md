@@ -23,12 +23,17 @@ Two checks. If either fails: output `NO-TRADE — BEHAVIORAL HALT` with the
 failed item, and STOP. Do not fetch data, do not run macro.
 
 ### 0a. Cooldown check (ENTRY + MANAGE)
-Read from earlier conversation, or ask once:
-- "Was the last closed trade a loss > 0.7R?" → 24h cooldown. NO-TRADE on new
-  entries until window clears. (MANAGE allowed: existing position only.)
-- "Have the last 2 entries been FOMO-form (any leak row in 0b below)?" →
-  3-day cooldown. NO-TRADE.
-If user says "no record / fresh slate," accept and proceed.
+Read state from the audit log — works under /loop with no conversation:
+```bash
+python3 /Users/nyanyk/Claude/research/scalp/behavioral.py
+```
+Returns `cooldown {active, until_utc, reasons}`, `fomo_streak`, `oop_this_week`.
+- `cooldown.active` true → 24h loss cooldown (last resolved trade lost >0.7R)
+  or 3-day FOMO cooldown (last 2 entries both leaked). NO-TRADE on new entries
+  until `until_utc`. (MANAGE allowed: existing position only.) Print the
+  reasons.
+- If the log is empty / fresh slate, the script returns all-clear — proceed.
+  Only ask the user if you have reason to distrust the log.
 
 ### 0b. R16 vibe check (ENTRY only — skip in MANAGE)
 One line per row. Leaks reduce conviction and are flagged — they do NOT halt the trade.
@@ -51,7 +56,9 @@ Scoring:
 
 Out-of-plan flag: if thesis is NOT in this week's Saturday plan but row 1 still
 clears (pre-dates the move via a fresh structural catalyst), tag `OOP-1`.
-Cap is 1 OOP/week — refuse a second OOP entry the same week.
+Cap is 1 OOP/week — if `oop_this_week` (from behavioral.py) is already >= 1,
+refuse a second OOP entry this week. Log `plan_status: "OOP-1"` so the count
+holds across /loop runs.
 
 Printing rule (silence-by-default):
 - CLEAR (cooldown ok, R16 6/6) → **omit the BEHAVIORAL line entirely**. The
@@ -105,12 +112,21 @@ with stop tightened to BE+.
 
 ## Step 6 — Risk discipline (HARD, always)
 
-### 6a. Declared risk cap (mandatory input)
-User must state active phase cap before triggers are output. Ask once if
-unstated; default to **0.5%** and flag the default in output.
+### 6a. Declared risk cap + equity (mandatory input)
+Read both from the profile — required for the sizing math, and the only way
+/loop can size without asking:
+```bash
+python3 /Users/nyanyk/Claude/research/scalp/profile.py get
+```
+Returns `{equity, phase}`. Default cap follows phase:
 - **0.5%** — Phase 1 default.
-- **1.0%** — Phase 1 A+ setup, pre-approved in Saturday plan only.
-- **2.0%** — Phase 2 cap (only if Phase 2 is active).
+- **1.0%** — Phase 1 A+ setup, pre-approved in Saturday plan only (per-trade
+  override, declared inline — not stored).
+- **2.0%** — Phase 2 cap (only if `phase` == 2).
+
+If `equity` is null, ask once and offer to save:
+`/scalp profile set equity <amount>`. Do NOT guess equity — without it, no
+action verdict can print sizing. Flag the cap in output only when non-default.
 
 ### 6b. Sizing math (required in every trigger block — one inline)
 Single line per trigger, all values explicit:
@@ -194,13 +210,20 @@ python3 /Users/nyanyk/Claude/research/scalp/audit_log.py log <<'JSON'
     "A": {"entry": 73.55, "stop": 72.30, "t1": 75.0, "t2": 75.83, "rr_t1": 1.16, "rr_t2": 1.82},
     "B": null
   },
-  "trigger_used": null
+  "trigger_used": null,
+  "plan_status": "in-plan"
 }
 JSON
 ```
 
-The command prints a `trade_id` to stdout. Capture it. Print it in the
-JOURNAL STUB at the top, replacing the freeform date line:
+`plan_status` is `"in-plan"` or `"OOP-1"` (drives the weekly OOP cap; see
+Step 0b).
+
+The command prints a `trade_id` to stdout. **Capture it regardless of verdict
+— every QUICK/DEEP output is logged.** But only ACTION verdicts
+(`LONG-NOW`/`SHORT-NOW`) and MANAGE-action-required outputs DISPLAY a JOURNAL
+STUB; print the trade_id at the top of that stub, replacing the freeform date
+line:
 
 ```
 JOURNAL STUB:
@@ -208,8 +231,9 @@ JOURNAL STUB:
   ...
 ```
 
-For action verdicts (`LONG-NOW`/`SHORT-NOW`) set `trigger_used: "A"` (or B/C).
-For non-action verdicts set `trigger_used: null`.
+For no-action verdicts (`WAIT`/`NO-TRADE`/`VETOED`/`HALT`) the row is still
+logged with its trade_id, but NO stub is shown — there is no trade to journal
+yet. Set `trigger_used: "A"` (or B/C) for action verdicts, `null` otherwise.
 
 For MANAGE-action-required: payload uses `mode: "MANAGE"`, plus an `event`
 field naming what triggered the action (`stop_move`, `t1_hit`, `t2_hit`,

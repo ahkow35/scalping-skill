@@ -7,13 +7,16 @@ description: >
   Long AND short setups, each with its own protocol module. Three output sizes —
   TINY (one-line pulse, default for /loop), QUICK (standard), DEEP (full).
   Two modes — ENTRY (fresh thesis) and MANAGE (review open position).
-  Plus three admin commands — `summary` (audit log aggregate stats),
+  Plus five admin commands — `summary` (audit log aggregate stats),
   `resolve` (close out an open trade with outcome), `list-open` (list unresolved
-  entries). Trigger phrases: "/scalp", "/scalp <COIN>", "/scalp tiny <COIN>",
+  entries), `replay` (counterfactual scoring of logged decisions), `profile`
+  (set account equity / phase for sizing). Trigger phrases: "/scalp",
+  "/scalp <COIN>", "/scalp tiny <COIN>", "/scalp quick <COIN>",
   "/scalp deep <COIN>", "/scalp short <COIN>", "/scalp tiny short <COIN>",
   "/scalp deep short <COIN>", "/scalp manage [short] <COIN> <entry>",
   "/scalp tiny manage [short] <COIN> <entry>", "/scalp summary [--since-days N]",
   "/scalp resolve <trade_id> <R> <exit_reason> [lesson]", "/scalp list-open",
+  "/scalp replay [--window-h N] [--force]", "/scalp profile [set <field> <value>]",
   "scalp read", "scalp thesis", "scalp the tape", "review my <COIN> long",
   "review my <COIN> short", "manage my position",
   "what's the move now" (when a position is open).
@@ -127,6 +130,19 @@ and remind the user to resolve.
 
 If the list is empty: `No open audit entries — everything's closed out.`
 
+### `/scalp profile [set <field> <value>]`
+
+Account state the sizing math needs but cannot infer (equity, phase). With no
+args, show current profile:
+```bash
+python3 /Users/nyanyk/Claude/research/scalp/profile.py get
+```
+To update: `python3 .../profile.py set equity 5000` or `set phase 2`. Fields:
+`equity` (USDC, > 0), `phase` (1 → 0.5% default cap, 2 → 2.0%). Render the
+returned JSON as one line: `equity $<E> | phase <N> (default cap <X>%)`. If
+equity is null, say so and prompt the user to set it — the trading flow needs
+it before any action verdict can show sizing.
+
 ## Step 1 — Determine direction, then load the protocol
 
 - Long (default): args do NOT contain `short` → load BOTH
@@ -164,16 +180,22 @@ Follow `scalp-core.md` + the direction module exactly.
 - `/loop` invocations default to TINY unless QUICK/DEEP is explicit.
 - Coin arg defaults to HYPE.
 - **Step 0 Behavioral preflight runs FIRST** (cooldown + R16 vibe check).
-  Cooldown fail → NO-TRADE — BEHAVIORAL HALT, do not fetch data.
-  R16 leaks → conviction penalty + named warning; trade proceeds.
+  Read cooldown/FOMO state from `python3 behavioral.py` (derived from the
+  audit log — works under /loop with no conversation). Cooldown active →
+  NO-TRADE — BEHAVIORAL HALT, do not fetch data. R16 leaks → conviction
+  penalty + named warning; trade proceeds.
 - Macro veto runs SECOND, from the direction module. Includes hard
   NO-TRADE on FOMC/CPI/NFP/PCE days + extreme funding (long: >+0.03%/8h;
   short: <-0.03%/8h).
-- User must declare active risk cap (0.5% / 1% / 2%) before triggers;
-  default 0.5% and flag it.
+- Risk cap + equity come from `python3 profile.py get` (equity, phase →
+  default cap). If equity is null, ask once and offer to save via
+  `/scalp profile set equity <amt>`; a per-trade A+ override to 1% is still
+  declared inline. Flag the cap when non-default.
 - Every trigger block shows the sizing math (equity × cap = $risk;
   $risk ÷ stop_distance = position size; leverage derived, not chosen).
-- Output must include a JOURNAL STUB block (ENTRY + MANAGE).
+- JOURNAL STUB is shown for ACTION verdicts (LONG-NOW / SHORT-NOW) and
+  MANAGE-action-required only. No-action outputs (WAIT/VETOED/NO-TRADE/HALT
+  and compact MANAGE) are still audit-logged but suppress the stub.
 - ALWAYS check `taker_delta.coverage_pct` — if <50%, call out the
   partial coverage and weight the signal accordingly.
 - Short module only: apply the weekend modifier when

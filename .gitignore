@@ -4,3 +4,4 @@ __pycache__/
 .trade_cache/
 .btcd_cache.jsonl
 .audit_log.jsonl
+.scalp_profile.json
