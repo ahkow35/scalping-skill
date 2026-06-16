@@ -19,8 +19,14 @@ stated position (or args), and the matching direction module is loaded.
 
 ## Step 0 — Behavioral preflight (RUN FIRST, before any data fetch)
 
-Two checks. If either fails: output `NO-TRADE — BEHAVIORAL HALT` with the
-failed item, and STOP. Do not fetch data, do not run macro.
+Two checks, NEITHER of which halts the analysis. Both are surfaced in the
+output; the scalp read always proceeds to data fetch and a verdict.
+- Cooldown (0a): informational WARNING only — printed, but zero effect on
+  verdict or conviction.
+- R16 vibe check (0b): leaks cap conviction and are flagged, but do not stop
+  the trade.
+(Macro veto in the direction module is separate and DOES still hard-stop —
+behavioral preflight no longer produces a HALT.)
 
 ### 0a. Cooldown check (ENTRY + MANAGE)
 Read state from the audit log — works under /loop with no conversation:
@@ -29,11 +35,14 @@ python3 /Users/nyanyk/Claude/research/scalp/behavioral.py
 ```
 Returns `cooldown {active, until_utc, reasons}`, `fomo_streak`, `oop_this_week`.
 - `cooldown.active` true → 24h loss cooldown (last resolved trade lost >0.7R)
-  or 3-day FOMO cooldown (last 2 entries both leaked). NO-TRADE on new entries
-  until `until_utc`. (MANAGE allowed: existing position only.) Print the
-  reasons.
-- If the log is empty / fresh slate, the script returns all-clear — proceed.
-  Only ask the user if you have reason to distrust the log.
+  or 3-day FOMO cooldown (last 2 entries both leaked). Print a prominent
+  `BEHAVIORAL WARNING: cooldown active (<reasons>) — informational only` line
+  and PROCEED with the full analysis. The cooldown does NOT block the entry
+  and does NOT affect the verdict or conviction — it is a heads-up that the
+  recent decision pattern was poor, nothing more. (Changed 2026-06-14 at
+  operator request: cooldown demoted from hard HALT to FYI warning.)
+- If the log is empty / fresh slate, the script returns all-clear — omit the
+  warning entirely.
 
 ### 0b. R16 vibe check (ENTRY only — skip in MANAGE)
 One line per row. Leaks reduce conviction and are flagged — they do NOT halt the trade.
@@ -65,7 +74,9 @@ Printing rule (silence-by-default):
   default state does not need to be repeated every run.
 - Any leak → print `BEHAVIORAL: <N>/6 edge — leaks: <row names> — conviction
   capped at <low|med>` and apply the conviction cap.
-- Halt → print `BEHAVIORAL: HALT (<reason>)` and stop (no data fetch).
+- Cooldown active → print `BEHAVIORAL WARNING: cooldown active (<reason>) —
+  informational only` and PROCEED. No stop, no conviction effect. Stacks with
+  a leak line if R16 also leaks.
 - DEEP mode → always print the full 6/6 score even when clear, so the
   discipline check is visible in the detailed report.
 
@@ -94,6 +105,15 @@ instantaneous lean of the book. Key field: `microprice_dev_bps` (positive = bid
 stack dominant, book leaning up; negative = ask stack dominant, leaning down).
 Used by Step 6d (execution refinement) and Step M (tape state). `None` values
 mean L2 was empty / malformed — callers fall through to original rules.
+
+The output includes `regime` — a deterministic market-regime read (range
+compression, BTC correlation, two-sided-flow score, directionality) with a
+`regime_label` ∈ {trending, ranging, quiet, correlated-chop, unknown} and a
+coarse `fade_ok` boolean. **Phase 1: READ-ONLY** — it does NOT change directional
+verdicts yet. Surface it as the WEATHER line in the output. Its purpose is the
+order-flow insight that directional edge is poor in `quiet` / `correlated-chop`
+tape: when `regime_label` is `quiet` or `correlated-chop`, add one sentence to
+the output noting directional edge is structurally low in this tape.
 
 The output includes `session.weekend_window` — true Fri 20:00 → Sun 20:00 UTC.
 The short module uses it; the long module ignores it.
@@ -369,6 +389,7 @@ Rules that apply to BOTH shapes:
 SCALP — <COIN> <LONG|SHORT> | <sgt> | <utc>  [US open in Xh | US close in Xh]
 [BEHAVIORAL: <leak line> — omit if clear]
 VERDICT: <V>  MACRO: <CLEAR|VETO ...>  Conviction: <low|med|high>  [Risk: <X%> if non-default]
+WEATHER: <regime_label> (compression <x> | BTC-corr <x> | 2-sided <x> | fade_ok <bool>)
 [WEEKEND: size x0.5 — short + weekend only]
 Range <floor> – <ceiling> | now <mid> (<pos>)
 Flow: 5m <±$Xk> (<buy_share>%)  15m <±$Xk>  [cov <%>]
@@ -400,6 +421,7 @@ watching, and when to look again. Skip everything else.
 SCALP — <COIN> <LONG|SHORT> | <sgt> | <utc>
 [BEHAVIORAL: <leak line> — omit if clear]
 VERDICT: <V>  MACRO: <CLEAR|VETO ...>  Conviction: <low|med|high>
+WEATHER: <regime_label> (compression <x> | BTC-corr <x> | 2-sided <x> | fade_ok <bool>)
 Watching: A <name> at <entry> | B <name> at <entry>  [C ... — short only]
 Reason: <one clause — why not now, cite the missing condition>
 Next: <when to re-check — e.g. 14:00 UTC 1h close, or "on close above 73.4">
@@ -422,7 +444,7 @@ high-frequency monitoring without flooding the screen.
 
 **TINY — ENTRY mode** (no open position):
 ```
-<COIN> <V> | <conv> | <floor>↔<ceil> @ <mid> | dev <±X>bps | next <when>
+<COIN> <V> | <conv> | <floor>↔<ceil> @ <mid> | dev <±X>bps | wx <regime_label> | next <when>
 ```
 Examples:
 - `HYPE WAIT | med | 72.5↔73.4 @ 72.9 | dev −0.2bps | next 14:00 UTC`

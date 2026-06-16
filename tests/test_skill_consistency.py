@@ -50,3 +50,13 @@ def test_no_blanket_journal_stub_mandate():
     text = _read()
     assert "Output must include a JOURNAL STUB block (ENTRY + MANAGE)" not in text, \
         "blanket JOURNAL STUB mandate contradicts no-action compact formats"
+
+
+def test_core_documents_regime_weather_line():
+    import os
+    core = os.path.join(os.path.dirname(__file__), "..", "scalp-core.md")
+    with open(core) as f:
+        text = f.read()
+    assert "regime" in text.lower()
+    assert "WEATHER" in text
+    assert "fade_ok" in text

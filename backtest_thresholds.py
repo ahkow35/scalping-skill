@@ -31,8 +31,9 @@ import json
 import sys
 import time
 
-from fetch_market import _post_json, HL_INFO
+from fetch_market import _post_json, HL_INFO, fetch_candles
 from replay import fetch_candles_ms
+import regime as _regime_mod
 
 H1_MS = 3_600_000
 
@@ -203,11 +204,101 @@ def run(coin="HYPE", days=365):
     return report
 
 
+# --------------------------------------------------------- regime backtest
+
+# Flow (taker_delta) has no multi-day history (the live trade cache spans ~6h),
+# so the backtest cannot reconstruct the two-sided-flow signal. It assumes
+# NEUTRAL two-sided flow and validates only the STRUCTURAL regime gate
+# (range_compression + directionality + btc_corr). The live `ranging` label
+# additionally requires real two-sided flow at decision time — that half is not
+# backtestable from candles and is validated live via the audit log instead.
+_NEUTRAL_FLOW = {"5m": {"buy_share_pct": 50.0},
+                 "15m": {"buy_share_pct": 50.0},
+                 "1h": {"buy_share_pct": 50.0}}
+_BACKTEST_WINDOW = 48  # trailing bars handed to classify (mimics live bounded candle feed)
+
+
+def regime_forward_stats(primary_candles, btc_candles, horizon_bars=4,
+                         params=None):
+    """At each bar i (given enough history), label the regime from a TRAILING
+    window of candles ending at i, then measure the forward net return over the
+    next `horizon_bars`. Group by label. A useful classifier shows: 'trending'
+    bars precede LARGE net moves (continuation) and 'ranging' bars precede SMALL
+    net moves (mean-reversion). Returns {label: {n, mean_abs_fwd_ret, mean_fwd_ret}}.
+
+    A trailing window (not the full prefix) is used so directionality reflects
+    recent structure, mirroring the live bounded candle feed. Flow is assumed
+    neutral (see _NEUTRAL_FLOW) -> validates the structural gate only.
+    """
+    p = {**_regime_mod.DEFAULT_PARAMS, **(params or {})}
+    need = max(p["baseline_n"], p["corr_lookback"])
+    buckets = {}
+    n = len(primary_candles)
+    for i in range(need, n - horizon_bars):
+        lo = max(0, i + 1 - _BACKTEST_WINDOW)
+        seg = primary_candles[lo:i + 1]
+        bseg = btc_candles[lo:i + 1]
+        out = _regime_mod.classify({"15m": seg, "1h": seg}, {"15m": bseg},
+                                   _NEUTRAL_FLOW, {"execution": {}}, params=p)
+        label = out["regime_label"]
+        c0 = float(primary_candles[i]["c"])
+        c1 = float(primary_candles[i + horizon_bars]["c"])
+        if c0 <= 0:
+            continue
+        fwd = (c1 - c0) / c0
+        b = buckets.setdefault(label, {"n": 0, "_sum_abs": 0.0, "_sum": 0.0})
+        b["n"] += 1
+        b["_sum_abs"] += abs(fwd)
+        b["_sum"] += fwd
+    result = {}
+    for label, b in buckets.items():
+        result[label] = {
+            "n": b["n"],
+            "mean_abs_fwd_ret": round(b["_sum_abs"] / b["n"], 6),
+            "mean_fwd_ret": round(b["_sum"] / b["n"], 6),
+        }
+    return result
+
+
+def regime_compression_sweep(primary_candles, btc_candles, horizon_bars=4,
+                             grid=(0.4, 0.5, 0.6, 0.7, 0.8)):
+    """Sweep compression_quiet to check the chosen value sits on a plateau, not
+    a spike. Returns {value: {ranging_abs, trending_abs, separation}} so a human
+    can confirm stable behavior around DEFAULT_PARAMS."""
+    rows = {}
+    for v in grid:
+        stats = regime_forward_stats(primary_candles, btc_candles,
+                                     horizon_bars=horizon_bars,
+                                     params={"compression_quiet": v})
+        rang = stats.get("ranging", {}).get("mean_abs_fwd_ret")
+        trend = stats.get("trending", {}).get("mean_abs_fwd_ret")
+        sep = (trend - rang) if (rang is not None and trend is not None) else None
+        rows[v] = {"ranging_abs": rang, "trending_abs": trend, "separation": sep}
+    return rows
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--coin", default="HYPE")
     ap.add_argument("--days", type=int, default=365)
+    ap.add_argument("--regime", action="store_true",
+                    help="Run regime threshold backtest instead of ATR/funding report.")
     args = ap.parse_args(argv[1:])
+    if args.regime:
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - args.days * 86_400_000
+        primary_1h = fetch_candles(args.coin, "1h", start_ms, now_ms)
+        btc_1h = fetch_candles("BTC", "1h", start_ms, now_ms)
+        fwd_stats = regime_forward_stats(primary_1h, btc_1h)
+        sweep = regime_compression_sweep(primary_1h, btc_1h)
+        print(json.dumps({
+            "coin": args.coin,
+            "days": args.days,
+            "bars": len(primary_1h),
+            "regime_forward_stats": fwd_stats,
+            "compression_sweep": sweep,
+        }, indent=2))
+        return 0
     print(json.dumps(run(coin=args.coin, days=args.days), indent=2))
     return 0
 

@@ -155,6 +155,22 @@ def _get_json(url, source):
         raise DataUnavailable(f"DATA UNAVAILABLE: {source} ({exc})")
 
 
+_CG_HEADERS = {"User-Agent": "scalp-tool/1.0 (personal trading script)"}
+
+
+def _cg_get_json(url, source):
+    """CoinGecko GET with User-Agent header and 2 retries at 8s each."""
+    last_exc = None
+    for _ in range(2):
+        try:
+            req = urllib.request.Request(url, headers=_CG_HEADERS)
+            with urllib.request.urlopen(req, timeout=8) as r:
+                return json.loads(r.read())
+        except Exception as exc:
+            last_exc = exc
+    raise DataUnavailable(f"DATA UNAVAILABLE: {source} (<{last_exc}>)")
+
+
 def parse_btc_dominance(payload):
     """Current BTC dominance from CoinGecko /global.
 
@@ -174,7 +190,7 @@ def parse_btc_dominance(payload):
 
 
 def fetch_btc_dominance():
-    return parse_btc_dominance(_get_json(CG_GLOBAL, "coingecko"))
+    return parse_btc_dominance(_cg_get_json(CG_GLOBAL, "coingecko"))
 
 
 BTCD_CACHE_PATH = os.path.join(
@@ -182,6 +198,7 @@ BTCD_CACHE_PATH = os.path.join(
 BTCD_CACHE_MAX_AGE_MS = 48 * 60 * 60 * 1000          # keep 48h of snapshots
 BTCD_TARGET_LOOKBACK_MS = 24 * 60 * 60 * 1000        # 24h target lookback
 BTCD_TARGET_TOLERANCE_MS = 90 * 60 * 1000            # ±90min around the 24h mark
+BTCD_STALE_FALLBACK_MS = 2 * 60 * 60 * 1000          # use cache as fallback if < 2h stale
 
 
 def update_btcd_cache(btc_d, now_ms, path=None):
@@ -226,6 +243,31 @@ def update_btcd_cache(btc_d, now_ms, path=None):
             f.write(json.dumps(r) + "\n")
     os.replace(tmp, path)
     return rows
+
+
+def _read_latest_btcd(path=None):
+    """Return the most recent cached BTC.D row {ts, btc_d}, or raise DataUnavailable."""
+    path = path or BTCD_CACHE_PATH
+    if not os.path.exists(path):
+        raise DataUnavailable("DATA UNAVAILABLE: coingecko (no cache on disk)")
+    best = None
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                    if best is None or int(r.get("ts", 0)) > int(best.get("ts", 0)):
+                        best = r
+                except json.JSONDecodeError:
+                    continue
+    except OSError as exc:
+        raise DataUnavailable(f"DATA UNAVAILABLE: coingecko (cache read error: {exc})")
+    if best is None:
+        raise DataUnavailable("DATA UNAVAILABLE: coingecko (cache empty)")
+    return best
 
 
 def compute_btcd_24h_change(rows, now_ms, current_btcd):
@@ -479,6 +521,8 @@ def bucket_taker_delta(trades, now_ms,
 import sys
 import time as _time
 
+import regime as regime_mod
+
 _NOW = lambda: int(_time.time() * 1000)
 _DAY = 86400000
 
@@ -502,7 +546,8 @@ def assemble(coin, deep=False, now_ms=None):
     out["candles"] = {iv: fetch_candles(coin, iv, now_ms - span, now_ms)
                       for iv, span in spans}
     out["btc_candles"] = {iv: fetch_candles("BTC", iv, now_ms - span, now_ms)
-                          for iv, span in (("4h", 12 * _DAY), ("1h", 3 * _DAY))}
+                          for iv, span in (("4h", 12 * _DAY), ("1h", 3 * _DAY),
+                                           ("15m", 9000000))}
     out["book"] = fetch_l2(coin)
     out["ath_state"] = compute_ath_state(out["candles"].get("1d", []), out["ctx"]["mark"])
 
@@ -519,12 +564,36 @@ def assemble(coin, deep=False, now_ms=None):
     except DataUnavailable as exc:
         out["taker_delta"] = str(exc)
 
+    out["regime"] = regime_mod.classify(
+        out["candles"], out["btc_candles"],
+        out.get("taker_delta"), out.get("book"))
+
+    _live_exc = None
+    parsed_btcd = None
+    btcd_source = "live"
     try:
-        parsed = fetch_btc_dominance()
-        rows = update_btcd_cache(parsed["btc_d"], now_ms)
-        delta = compute_btcd_24h_change(rows, now_ms, parsed["btc_d"])
+        parsed_btcd = fetch_btc_dominance()
+    except DataUnavailable as exc:
+        _live_exc = exc
+        # Fallback: use the most recent cached snapshot if < 2h stale
+        try:
+            cached = _read_latest_btcd()
+            age_ms = now_ms - int(cached["ts"])
+            if age_ms > BTCD_STALE_FALLBACK_MS:
+                raise DataUnavailable(
+                    f"DATA UNAVAILABLE: coingecko (cache {round(age_ms/3_600_000, 1)}h stale)"
+                )
+            parsed_btcd = {"btc_d": float(cached["btc_d"])}
+            btcd_source = f"cache ({round(age_ms / 60_000)}min old — live: {_live_exc})"
+        except DataUnavailable:
+            pass
+
+    if parsed_btcd is not None:
+        rows = update_btcd_cache(parsed_btcd["btc_d"], now_ms)
+        delta = compute_btcd_24h_change(rows, now_ms, parsed_btcd["btc_d"])
         out["btc_dominance"] = {
-            "btc_d": parsed["btc_d"],
+            "btc_d": parsed_btcd["btc_d"],
+            "source": btcd_source,
             **delta,
             "_note": ("btc_d_24h_chg is derived from a LOCAL ROLLING CACHE of "
                       "BTC.D snapshots — CoinGecko's /global endpoint does not "
@@ -536,8 +605,8 @@ def assemble(coin, deep=False, now_ms=None):
                       "the age of the oldest sample in cache."),
         }
         out["macro_can_clear"] = True
-    except DataUnavailable as exc:
-        out["btc_dominance"] = str(exc)
+    else:
+        out["btc_dominance"] = str(_live_exc)
         out["macro_can_clear"] = False
     return out
 

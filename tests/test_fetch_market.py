@@ -172,6 +172,13 @@ def test_assemble_marks_macro_unavailable_when_btcd_fails(monkeypatch):
         raise fm.DataUnavailable("DATA UNAVAILABLE: coingecko (down)")
     monkeypatch.setattr(fm, "fetch_btc_dominance", boom)
 
+    # Isolate from the real on-disk BTC.D cache: with the live fetch down, the
+    # fallback reads the cache; force that to fail too so this test deterministically
+    # exercises the fully-unavailable path (not whatever snapshot is on disk).
+    def no_cache(*a, **k):
+        raise fm.DataUnavailable("DATA UNAVAILABLE: coingecko (no cache)")
+    monkeypatch.setattr(fm, "_read_latest_btcd", no_cache)
+
     out = fm.assemble("HYPE", deep=False, now_ms=1779102720000)
     assert out["btc_dominance"] == "DATA UNAVAILABLE: coingecko (down)"
     assert out["macro_can_clear"] is False
@@ -367,3 +374,38 @@ def test_fetch_ctx_error_message_distinguishes_hip3_vs_core():
         with pytest.raises(fm.DataUnavailable) as e:
             fm.fetch_ctx("NOPE")
         assert "core perps" in str(e.value)
+
+
+def test_assemble_attaches_regime_block(monkeypatch):
+    import fetch_market as fm
+
+    def fake_series(closes):
+        return [{"t": "x", "o": x, "h": x + 0.5, "l": x - 0.5, "c": x, "v": 1.0}
+                for x in closes]
+
+    osc = fake_series([100, 101, 100, 101, 100, 101] * 8)
+
+    monkeypatch.setattr(fm, "fetch_ctx", lambda coin, dex=None: {
+        "coin": coin, "mark": 100.0, "oracle": 100.0, "mid": 100.0,
+        "funding": 0.0, "premium": 0.0, "oi_usdc": 0.0,
+        "prev_day_px": 100.0, "day_vol_usdc": 0.0})
+    monkeypatch.setattr(fm, "fetch_candles",
+                        lambda coin, interval, s, e: osc)
+    monkeypatch.setattr(fm, "fetch_l2", lambda coin: {
+        "asks": {}, "bids": {},
+        "execution": {"microprice_dev_bps": 0.1, "microprice": 100.0}})
+    monkeypatch.setattr(fm, "fetch_recent_trades", lambda coin: [])
+    monkeypatch.setattr(fm, "merge_trade_cache", lambda c, f, n: [])
+    monkeypatch.setattr(fm, "bucket_taker_delta", lambda t, n: {
+        "5m": {"buy_share_pct": 50.0}, "15m": {"buy_share_pct": 50.0},
+        "1h": {"buy_share_pct": 50.0}})
+    monkeypatch.setattr(fm, "fetch_btc_dominance", lambda: {"btc_d": 55.0})
+    monkeypatch.setattr(fm, "update_btcd_cache", lambda d, n: [])
+    monkeypatch.setattr(fm, "compute_btcd_24h_change", lambda r, n, d: {
+        "btc_d_24h_chg": None, "btc_d_sample_age_min": None, "btc_d_coverage_h": 0.0})
+
+    out = fm.assemble("HYPE", now_ms=1_750_000_000_000)
+    assert "regime" in out
+    assert out["regime"]["regime_label"] in {
+        "trending", "ranging", "quiet", "correlated-chop", "unknown"}
+    assert "15m" in out["btc_candles"]

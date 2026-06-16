@@ -83,3 +83,26 @@ def test_align_funding_tolerates_ms_offsets():
     aligned = bt.align_funding(candles, funding)
     assert aligned[0] == pytest.approx(0.0001)
     assert aligned[1] == pytest.approx(0.0008)
+
+
+def test_regime_forward_outcomes_separates_ranging_from_trending():
+    # Synthetic: a long ranging block (oscillation) then a clean trend block.
+    # BTC is a SEPARATE flat series so btc_corr is undefined (None) -> the
+    # correlated-chop rule is out of the way, and the structural gate sorts
+    # ranging vs trending. Mean |forward return| must be LOWER after 'ranging'
+    # bars than after 'trending' bars.
+    import backtest_thresholds as bt
+    ranging = []
+    for i in range(60):
+        px = 100.0 + (1.0 if i % 2 else -1.0)  # oscillate 99/101
+        ranging.append(c(T0 + i * H1, px, px + 0.5, px - 0.5, px))
+    trend = []
+    for i in range(60):
+        p = 101.0 + i  # clean up
+        trend.append(c(T0 + (60 + i) * H1, p, p + 0.5, p - 0.5, p))
+    series = ranging + trend
+    btc_flat = [c(T0 + i * H1, 200.0, 200.05, 199.95, 200.0) for i in range(120)]
+    stats = bt.regime_forward_stats(series, btc_flat, horizon_bars=4)
+    assert stats["ranging"]["n"] > 0
+    assert stats["trending"]["n"] > 0
+    assert stats["trending"]["mean_abs_fwd_ret"] > stats["ranging"]["mean_abs_fwd_ret"]
