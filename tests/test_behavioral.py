@@ -124,3 +124,57 @@ def test_combined_cooldown_takes_latest_window(tmp_path):
     assert st["cooldown"]["active"] is True
     assert st["cooldown"]["until_ms"] == NOW - 2 * HOUR + 3 * DAY
     assert len(st["cooldown"]["reasons"]) == 2
+
+
+def _sfentry(p, family, leaks, ts, mode="ENTRY"):
+    """Helper for setup_family-aware entry tests."""
+    audit_log.write_audit_entry(
+        {"coin": "HYPE", "side": "long", "mode": mode, "verdict": "WAIT",
+         "setup_family": family, "behavioral": {"leaks": leaks}},
+        ts_ms=ts, path=p)
+
+
+def test_passive_entries_excluded_from_fomo_streak(tmp_path):
+    p = str(tmp_path / "a.jsonl")
+    _sfentry(p, "passive-fade", ["Timing"], 1779102720000)
+    _sfentry(p, "passive-fade", ["Timing"], 1779102730000)
+    st = behavioral.compute_behavioral_state(now_ms=1779102740000, path=p)
+    assert st["fomo_streak"] == 0
+    assert st["cooldown"]["active"] is False
+
+
+def test_directional_entries_still_build_fomo_streak(tmp_path):
+    p = str(tmp_path / "a.jsonl")
+    _sfentry(p, "directional", ["Timing"], 1779102720000)
+    _sfentry(p, "directional", ["Timing"], 1779102730000)
+    st = behavioral.compute_behavioral_state(now_ms=1779102740000, path=p)
+    assert st["fomo_streak"] == 2
+
+
+def test_passive_tilt_active_after_three_consecutive_losses(tmp_path):
+    p = str(tmp_path / "a.jsonl")
+    base = 1779102720000
+    for i in range(3):
+        tid = audit_log.write_audit_entry(
+            {"coin": "HYPE", "side": "long", "mode": "ENTRY", "verdict": "LONG-NOW",
+             "setup_family": "passive-fade"}, ts_ms=base + i * 1000, path=p)
+        audit_log.resolve_audit_entry(tid, -1.0, "stop", path=p,
+                                      resolved_at_ms=base + i * 1000 + 500)
+    st = behavioral.compute_behavioral_state(now_ms=base + 10000, path=p)
+    assert st["passive_tilt"]["active"] is True
+    assert st["passive_tilt"]["loss_streak"] == 3
+
+
+def test_passive_tilt_resets_on_win(tmp_path):
+    p = str(tmp_path / "a.jsonl")
+    base = 1779102720000
+    rs = [-1.0, -1.0, 0.6]  # most recent (last) is a win -> streak 0
+    for i, r in enumerate(rs):
+        tid = audit_log.write_audit_entry(
+            {"coin": "HYPE", "side": "long", "mode": "ENTRY", "verdict": "LONG-NOW",
+             "setup_family": "passive-fade"}, ts_ms=base + i * 1000, path=p)
+        audit_log.resolve_audit_entry(tid, r, "T1", path=p,
+                                      resolved_at_ms=base + i * 1000 + 500)
+    st = behavioral.compute_behavioral_state(now_ms=base + 10000, path=p)
+    assert st["passive_tilt"]["active"] is False
+    assert st["passive_tilt"]["loss_streak"] == 0

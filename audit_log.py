@@ -221,6 +221,20 @@ def compute_summary(since_days=None, path=None, now_ms=None):
             "total_r": round(sum(rs), 3),
         }
 
+    by_family = {}
+    for e in resolved:
+        fam = e.get("setup_family", "directional")
+        by_family.setdefault(fam, []).append(float(e["outcome"]["outcome_r"]))
+    family_stats = {}
+    for fam, rs in by_family.items():
+        n = len(rs)
+        family_stats[fam] = {
+            "n": n,
+            "win_rate": round(sum(1 for r in rs if r > 0) / n, 3) if n else None,
+            "expectancy_r": round(sum(rs) / n, 3) if n else None,
+            "total_r": round(sum(rs), 3),
+        }
+
     # "open" mirrors list_open_entries: counterfactually-closed non-action
     # rows are not open — only live positions / armed action verdicts are.
     open_n = sum(
@@ -235,6 +249,7 @@ def compute_summary(since_days=None, path=None, now_ms=None):
         "open": open_n,
         "verdict_distribution": verdict_counts,
         "by_setup": setup_stats,
+        "by_setup_family": family_stats,
         "counterfactual": _counterfactual_stats(entries),
     }
 
@@ -285,6 +300,41 @@ def _counterfactual_stats(entries):
                  "avoided_r": veto["total_best_r"]},
         "by_setup": setup_stats,
     }
+
+
+# 40, not 20: this strategy needs ~75% win rate just to break even, so 20
+# samples is statistically noisy enough to flip PROVEN on luck. 40 is a more
+# honest proof bar (costs a longer tiny-size proving period — worth it).
+PASSIVE_MIN_SAMPLES = 40
+PASSIVE_MIN_SIZE_MULT = 0.25
+
+
+def passive_expectancy(path=None, min_samples=PASSIVE_MIN_SAMPLES):
+    """Audit-derived edge gate for passive-fade trades.
+
+    Returns {state, n, win_rate, avg_r, size_mult}:
+      UNPROVEN — fewer than min_samples resolved passive-fade trades; fire at
+                 minimum size (size_mult = 0.25) while collecting data.
+      PROVEN   — >= min_samples and avg_r > 0; size normally (size_mult = 1.0).
+      STOP     — >= min_samples and avg_r <= 0; the setup is net-negative,
+                 stop firing it (size_mult = 0.0).
+    """
+    rs = [float(e["outcome"]["outcome_r"]) for e in _load_entries(path)
+          if e.get("setup_family") == "passive-fade" and e.get("outcome")]
+    n = len(rs)
+    if n == 0:
+        return {"state": "UNPROVEN", "n": 0, "win_rate": None,
+                "avg_r": None, "size_mult": PASSIVE_MIN_SIZE_MULT}
+    win_rate = round(sum(1 for r in rs if r > 0) / n, 3)
+    avg_r = round(sum(rs) / n, 3)
+    if n < min_samples:
+        return {"state": "UNPROVEN", "n": n, "win_rate": win_rate,
+                "avg_r": avg_r, "size_mult": PASSIVE_MIN_SIZE_MULT}
+    if avg_r > 0:
+        return {"state": "PROVEN", "n": n, "win_rate": win_rate,
+                "avg_r": avg_r, "size_mult": 1.0}
+    return {"state": "STOP", "n": n, "win_rate": win_rate,
+            "avg_r": avg_r, "size_mult": 0.0}
 
 
 def main(argv):
@@ -345,6 +395,11 @@ def main(argv):
                       file=sys.stderr)
                 return 2
         out = compute_summary(since_days=since)
+        print(json.dumps(out, indent=2))
+        return 0
+
+    if cmd == "passive-expectancy":
+        out = passive_expectancy()
         print(json.dumps(out, indent=2))
         return 0
 

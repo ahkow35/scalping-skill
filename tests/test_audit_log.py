@@ -272,3 +272,68 @@ class _StringIO:
         self._s = s
     def read(self):
         return self._s
+
+
+def _resolved(p, coin, family, r, ts):
+    tid = audit_log.write_audit_entry(
+        {"coin": coin, "side": "long", "mode": "ENTRY", "verdict": "LONG-NOW",
+         "setup_family": family}, ts_ms=ts, path=p)
+    audit_log.resolve_audit_entry(tid, r, "T1", path=p, resolved_at_ms=ts + 1000)
+    return tid
+
+
+def test_summary_breaks_out_by_setup_family(tmp_path):
+    p = str(tmp_path / "a.jsonl")
+    _resolved(p, "HYPE", "passive-fade", 0.5, 1779102720000)
+    _resolved(p, "HYPE", "passive-fade", -1.0, 1779102730000)
+    _resolved(p, "HYPE", "directional", 2.0, 1779102740000)
+    s = audit_log.compute_summary(path=p)
+    fam = s["by_setup_family"]
+    assert fam["passive-fade"]["n"] == 2
+    assert fam["passive-fade"]["win_rate"] == 0.5
+    assert fam["passive-fade"]["expectancy_r"] == round((0.5 - 1.0) / 2, 3)
+    assert fam["directional"]["n"] == 1
+    assert fam["directional"]["expectancy_r"] == 2.0
+
+
+def test_passive_expectancy_unproven_when_no_samples(tmp_path):
+    p = str(tmp_path / "a.jsonl")
+    out = audit_log.passive_expectancy(path=p)
+    assert out["state"] == "UNPROVEN"
+    assert out["n"] == 0
+    assert out["size_mult"] == 0.25
+
+
+def test_passive_expectancy_unproven_below_min_samples(tmp_path):
+    p = str(tmp_path / "a.jsonl")
+    for i in range(5):
+        _resolved(p, "HYPE", "passive-fade", 0.5, 1779102720000 + i * 1000)
+    out = audit_log.passive_expectancy(path=p, min_samples=20)
+    assert out["state"] == "UNPROVEN"
+    assert out["n"] == 5
+    assert out["size_mult"] == 0.25
+
+
+def test_passive_expectancy_proven_when_positive(tmp_path):
+    p = str(tmp_path / "a.jsonl")
+    # 16 wins * 0.5 = 8.0 ; 4 losses * -1.5 = -6.0 ; sum 2.0 ; avg 0.1 > 0
+    for i in range(16):
+        _resolved(p, "HYPE", "passive-fade", 0.5, 1779102720000 + i * 1000)
+    for i in range(4):
+        _resolved(p, "HYPE", "passive-fade", -1.5, 1779102740000 + i * 1000)
+    out = audit_log.passive_expectancy(path=p, min_samples=20)
+    assert out["state"] == "PROVEN"
+    assert out["n"] == 20
+    assert out["size_mult"] == 1.0
+    assert out["avg_r"] == 0.1
+
+
+def test_passive_expectancy_stop_when_negative_at_sample_size(tmp_path):
+    p = str(tmp_path / "a.jsonl")
+    for i in range(10):
+        _resolved(p, "HYPE", "passive-fade", 0.5, 1779102720000 + i * 1000)
+    for i in range(10):
+        _resolved(p, "HYPE", "passive-fade", -1.5, 1779102740000 + i * 1000)
+    out = audit_log.passive_expectancy(path=p, min_samples=20)
+    assert out["state"] == "STOP"
+    assert out["size_mult"] == 0.0

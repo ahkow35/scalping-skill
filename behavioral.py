@@ -25,11 +25,27 @@ DAY_MS = 24 * HOUR_MS
 LOSS_R_THRESHOLD = -0.7
 LOSS_COOLDOWN_MS = DAY_MS
 FOMO_COOLDOWN_MS = 3 * DAY_MS
+PASSIVE_TILT_N = 3
 
 
 def _has_leaks(entry):
     beh = entry.get("behavioral") or {}
     return bool(beh.get("leaks"))
+
+
+def _passive_tilt(entries):
+    """Trailing consecutive resolved passive-fade LOSSES (range-break signal)."""
+    passive_resolved = sorted(
+        [e for e in entries
+         if e.get("setup_family") == "passive-fade" and e.get("outcome")],
+        key=lambda e: int(e["outcome"]["resolved_at_ms"]))
+    streak = 0
+    for e in reversed(passive_resolved):
+        if float(e["outcome"]["outcome_r"]) < 0:
+            streak += 1
+        else:
+            break
+    return {"active": streak >= PASSIVE_TILT_N, "loss_streak": streak}
 
 
 def _week_start_saturday_ms(now_ms):
@@ -45,7 +61,9 @@ def _week_start_saturday_ms(now_ms):
 def compute_behavioral_state(now_ms=None, path=None):
     now_ms = now_ms or int(time.time() * 1000)
     entries = sorted(audit_log._load_entries(path), key=lambda e: int(e["ts_ms"]))
-    entry_rows = [e for e in entries if e.get("mode") == "ENTRY"]
+    entry_rows = [e for e in entries
+                  if e.get("mode") == "ENTRY"
+                  and e.get("setup_family") != "passive-fade"]
 
     reasons, windows = [], []
 
@@ -92,6 +110,7 @@ def compute_behavioral_state(now_ms=None, path=None):
         },
         "fomo_streak": streak,
         "oop_this_week": oop,
+        "passive_tilt": _passive_tilt(entries),
     }
 
 
