@@ -336,3 +336,30 @@ def test_summary_open_count_matches_list_open_semantics(tmp_path):
         "window_h": 72, "best_r": None, "per_trigger": {}}, path=p)
     s = audit_log.compute_summary(path=p)
     assert s["open"] == 2
+
+
+def test_passive_fade_entries_are_skipped_by_replay():
+    # A passive-fade action entry, even with a directional-looking trigger that
+    # WOULD otherwise score (entry filled + t1 hit), must be skipped — passive
+    # trades resolve manually, not via the directional ladder sim.
+    entry = {
+        "id": "x", "ts_ms": 1, "mode": "ENTRY", "side": "long",
+        "verdict": "FADE-LONG-NOW", "setup_family": "passive-fade",
+        "outcome": None,
+        "triggers": {"A": {"entry": 100.0, "stop": 99.0, "t1": 101.0}},
+    }
+    candles = [c(1, 100.0, 101.0, 99.5, 101.0)]  # would score +1R if not skipped
+    assert replay.apply_replay_to_entry(entry, candles, 72) is None
+
+
+def test_directional_entry_still_scored_after_passive_guard():
+    # Regression: the passive guard must not affect directional entries.
+    entry = {
+        "id": "y", "ts_ms": 1, "mode": "ENTRY", "side": "long",
+        "verdict": "LONG-NOW", "outcome": None,
+        "triggers": {"A": {"entry": 100.0, "stop": 99.0, "t1": 101.0}},
+    }
+    candles = [c(1, 100.0, 101.0, 99.5, 101.0)]
+    cf = replay.apply_replay_to_entry(entry, candles, 72)
+    assert cf is not None
+    assert "per_trigger" in cf and "A" in cf["per_trigger"]

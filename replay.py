@@ -224,6 +224,13 @@ def apply_replay_to_entry(entry, candles, window_h, fetch_finer=None):
         return None
     if entry.get("mode") != "ENTRY":
         return None
+    # Passive-fade trades resolve manually and fast (full exit to the mean /
+    # time-stop), which the directional 50/50-ladder simulator does NOT model —
+    # scoring them here would be wrong. Skip: manual `/scalp resolve` feeds the
+    # passive expectancy gate. (Non-action passive rows still get closed out by
+    # replay_open_entries' non-action path, since this returns None.)
+    if entry.get("setup_family") == "passive-fade":
+        return None
     triggers = entry.get("triggers") or {}
     live = {k: v for k, v in triggers.items() if v}
     scoreable = {k: v for k, v in live.items() if _scoreable_trigger(v)}

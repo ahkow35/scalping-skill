@@ -1,5 +1,45 @@
 # Changelog — scalp skill
 
+## 2026-06-18 — Passive flow-capture mode (Plan 2: 2A + 2B + 2C)
+
+**Summary:** Built `/scalp passive <COIN>` — a both-sides mean-reversion fade
+gated by the Plan 1 regime read and an audit-log expectancy check. Ships at
+UNPROVEN (quarter-size) until ≥40 resolved passive trades prove a net edge
+(else STOP). Three committed phases:
+
+- **2A (`57111d9`)** accounting/risk foundation: `by_setup_family` summary
+  breakout; `passive_expectancy()` UNPROVEN/PROVEN/STOP gate (min_samples=40,
+  quarter-size until proven) + CLI; behavioral carve-out (passive excluded from
+  directional FOMO) + `passive_tilt` guard.
+- **2B (`04f342b`)** `scalp-passive.md` trade module (regime/expectancy/event/
+  tilt gates → range edges → bid/ask limit ladders → exit-to-mean → 3-way
+  invalidation → expectancy-gated sizing + session shot-cap) + `/scalp passive`
+  routing.
+- **2C (this commit)** right-sized: replay SKIPS passive-fade entries (they
+  resolve manually; the directional ladder sim would mis-score them). The full
+  passive simulator was dropped as over-engineering — see PLAN-phase2 §2C.
+- **fetch fix (found by running `/scalp passive` once):** the 15m candle window
+  was 2.5h (~10 bars), but the regime classifier needs ≥20 (compression) / ≥32
+  (btc_corr) — so production regime was ALWAYS "unknown" and passive `fade_ok`
+  NEVER armed (the feature was inert). Widened the primary + BTC 15m windows to
+  12h (~48 bars) in `fetch_market.py`. Live `/scalp passive HYPE` now returns a
+  real regime read (e.g. quiet → SIT-OUT, EXPECTANCY UNPROVEN ×0.25).
+
+Full suite 136 passing. No directional behavior changed.
+
+**Caveat:** the §7 gate was validated on 1h candles; production computes
+compression/correlation on 15m. The compression sweep was inert (label is
+directionality-driven), so the threshold transfers, but the 15m structural read
+is not independently backtested — the expectancy gate remains the real arbiter.
+
+**Decisions:**
+- Expectancy bar raised 20→40 samples (a ~75% breakeven win rate makes 20 too
+  noisy to trust a PROVEN flip).
+- Edge-proximity left as an LLM prose rule, not code (floor/ceiling are
+  judgment); add a helper only if soak shows drift.
+- Live edge remains UNPROVEN by design — the gate must earn PROVEN on real
+  resolved trades; it may instead resolve to STOP (a cheap, correct kill).
+
 ## 2026-06-17 — Regime classifier foundation (passive-mode Plan 1) + §7 gate
 
 **Summary:** Built the deterministic market-regime read (the missing "directional
@@ -23,9 +63,15 @@ does not change any verdict yet. Backtest-validated as the gate before Plan 2
   the latent negative-age fallback bug in uncommitted btcd code).
 
 **§7 GATE RESULT — PASS (qualified).** `--regime --coin HYPE --days 180` (4321×1h):
-- Direction correct: trending mean_abs_fwd 0.0215 vs ranging 0.0149 (1.44×);
-  signed drift trending +0.0068 vs ranging +0.0012 (5.7× — ranging mean-reverts,
-  trending continues). This is the result the fade thesis needs.
+- What it shows: ranging-labelled tape has LOW forward drift (trending
+  mean_abs_fwd 0.0215 vs ranging 0.0149; signed drift +0.0068 vs +0.0012). This
+  proves the NECESSARY-not-sufficient half — "ranging tape doesn't trend, so a
+  fade won't get steamrolled." It does NOT prove fades are profitable: low drift
+  ≠ mean-reversion (a random walk also has ~0 net drift). The backtest grouped
+  by regime label and measured forward-return magnitude; it never conditioned on
+  being AT an edge and measured return-to-mean (the actual fade edge). That edge
+  is unprovable from candles (no flow history) — the live expectancy gate is the
+  real arbiter.
 - Compression sweep 0.4→0.8: separation flat at ~0.0066 (robust plateau, not a
   spike) — but compression_quiet is nearly INERT; directionality does the work.
 - CAVEAT: structural gate is permissive — 80% of bars label "ranging" (n=3436)

@@ -542,13 +542,27 @@ Expected: PASS. (If a grep assertion fails, fix the WORDING in scalp-passive.md 
 - [ ] `/scalp passive <COIN>` routes to the module; `setup_family: passive-fade` flows into the audit log.
 - [ ] Skill-consistency tests pass; full suite green.
 
-## Phase 2C — Replay simulation for passive exits (OUTLINE; detail after 2B)
+## Phase 2C — Replay handling for passive entries (DONE — right-sized)
 
-Files (≤3): `replay.py`, `tests/test_replay.py`.
+**Decision (2026-06-18):** the originally-outlined full passive-replay simulator
+was dropped as over-engineering. Reasons: (1) passive trades resolve fast and
+MANUALLY (full exit to mean / time-stop), so counterfactual scoring largely
+duplicates real `/scalp resolve` results — and replay already skips resolved
+entries; (2) `SIT-OUT`/`WAIT` passive rows have no triggers to simulate; (3) the
+directional 50/50-ladder sim would actively MIS-score a full-exit-to-mean fade.
 
-Tasks:
-1. In `replay.py`, branch on `setup_family == "passive-fade"`: simulate ladder fill (touch of a ladder step), to-the-mean exit (target = mean), time-stop (flat after N bars), hard stop. Score R against the structural stop distance. Mirror long/short via the existing negation trick.
-2. Tests for: filled→mean (win), filled→stop (loss), filled→time-stop (scratch), never-filled (unfilled).
+Implemented instead — a correctness guard:
+- `replay.py` `apply_replay_to_entry`: returns `None` for
+  `setup_family == "passive-fade"` (skips replay scoring; manual resolution
+  feeds the expectancy gate). Non-action passive rows still get closed out of
+  list-open by `replay_open_entries`' existing non-action path.
+- `tests/test_replay.py`: passive-fade entry with a scoreable-looking trigger is
+  skipped (returns None); directional entries still scored (regression guard).
+- Full suite 136 passing.
+
+If live soak later shows a real need to score fired fades counterfactually before
+manual resolution, add a dedicated `simulate_passive_trigger` (fill → to-mean /
+hard-stop / time-stop) then — not before.
 
 ---
 

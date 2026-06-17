@@ -540,14 +540,17 @@ def assemble(coin, deep=False, now_ms=None):
 
     # 1d always included (365d) — needed for ATH / discovery state detection.
     # Payload stays small (~one row per day) so the cost is negligible.
-    spans = [("1d", 365 * _DAY), ("1h", 3 * _DAY), ("15m", 9000000), ("5m", 5400000)]
+    # 15m window = 12h (~48 bars): the regime classifier needs >=20 bars for
+    # range_compression and >=32 for btc_corr; the old 2.5h (~10 bars) left both
+    # None -> regime always "unknown" -> passive fade_ok never armed.
+    spans = [("1d", 365 * _DAY), ("1h", 3 * _DAY), ("15m", 43_200_000), ("5m", 5400000)]
     if deep:
         spans = spans[:1] + [("4h", 12 * _DAY)] + spans[1:]
     out["candles"] = {iv: fetch_candles(coin, iv, now_ms - span, now_ms)
                       for iv, span in spans}
     out["btc_candles"] = {iv: fetch_candles("BTC", iv, now_ms - span, now_ms)
                           for iv, span in (("4h", 12 * _DAY), ("1h", 3 * _DAY),
-                                           ("15m", 9000000))}
+                                           ("15m", 43_200_000))}
     out["book"] = fetch_l2(coin)
     out["ath_state"] = compute_ath_state(out["candles"].get("1d", []), out["ctx"]["mark"])
 
