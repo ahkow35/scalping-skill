@@ -151,6 +151,11 @@ it before any action verdict can show sizing.
 - Short: args contain `short` → load BOTH
   `/Users/nyanyk/Claude/research/scalp/scalp-core.md` and
   `/Users/nyanyk/Claude/research/scalp/scalp-short.md`.
+- Passive: args contain `passive` → load BOTH
+  `/Users/nyanyk/Claude/research/scalp/scalp-core.md` and
+  `/Users/nyanyk/Claude/research/scalp/scalp-passive.md`. (Overrides long/short:
+  passive mode fades both sides.) Invoked as `/scalp passive <COIN>` or
+  `/scalp tiny passive <COIN>`.
 
 `scalp-core.md` is the direction-neutral protocol (Steps 0,1,5,6,M, output
 and journal skeletons, /loop). The direction module supplies Steps 2–4 and
@@ -177,13 +182,15 @@ Follow `scalp-core.md` + the direction module exactly.
 - Default = QUICK (ENTRY) or MANAGE format.
 - `tiny` in args = TINY mode (one-line, ENTRY or MANAGE).
 - `deep` in args = DEEP mode (ENTRY only).
+- `passive` in args = PASSIVE mode (loads scalp-passive.md; both-sides fade).
 - `/loop` invocations default to TINY unless QUICK/DEEP is explicit.
 - Coin arg defaults to HYPE.
 - **Step 0 Behavioral preflight runs FIRST** (cooldown + R16 vibe check).
   Read cooldown/FOMO state from `python3 behavioral.py` (derived from the
   audit log — works under /loop with no conversation). Cooldown active →
-  NO-TRADE — BEHAVIORAL HALT, do not fetch data. R16 leaks → conviction
-  penalty + named warning; trade proceeds.
+  print `BEHAVIORAL WARNING: cooldown active (...) — informational only` and
+  PROCEED with full analysis (no halt, no verdict/conviction effect). R16
+  leaks → conviction penalty + named warning; trade proceeds.
 - Macro veto runs SECOND, from the direction module. Includes hard
   NO-TRADE on FOMC/CPI/NFP/PCE days + extreme funding (long: >+0.03%/8h;
   short: <-0.03%/8h).
@@ -196,6 +203,8 @@ Follow `scalp-core.md` + the direction module exactly.
 - JOURNAL STUB is shown for ACTION verdicts (LONG-NOW / SHORT-NOW) and
   MANAGE-action-required only. No-action outputs (WAIT/VETOED/NO-TRADE/HALT
   and compact MANAGE) are still audit-logged but suppress the stub.
+- Passive-mode entries set `setup_family: "passive-fade"` in the audit payload
+  (directional entries omit it / default "directional").
 - ALWAYS check `taker_delta.coverage_pct` — if <50%, call out the
   partial coverage and weight the signal accordingly.
 - Short module only: apply the weekend modifier when

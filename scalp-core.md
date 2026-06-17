@@ -79,6 +79,9 @@ Printing rule (silence-by-default):
   a leak line if R16 also leaks.
 - DEEP mode → always print the full 6/6 score even when clear, so the
   discipline check is visible in the detailed report.
+- Passive mode: also read `behavioral.passive_tilt`; if active, print
+  `PASSIVE TILT: <n> losses — informational` and prefer SIT-OUT (Step 2 gate 4
+  of scalp-passive.md).
 
 ## Step 1 — Fetch data (deterministic, never inline-curl)
 Run: `python3 /Users/nyanyk/Claude/research/scalp/fetch_market.py <COIN> [--deep]`
@@ -119,7 +122,8 @@ The output includes `session.weekend_window` — true Fri 20:00 → Sun 20:00 UT
 The short module uses it; the long module ignores it.
 
 After Step 1, hand off to the direction module: Step 2 (macro veto),
-Step 3 (structure), Step 4 (triggers). Then return here for Steps 5–6.
+Step 3 (structure), Step 4 (triggers) — or `scalp-passive.md` when `passive`
+is in args. Then return here for Steps 5–6.
 
 ## Step 5 — Session overlay (from session object)
 Warn if setup straddles asia_handoff_soon. If us_session_live and within

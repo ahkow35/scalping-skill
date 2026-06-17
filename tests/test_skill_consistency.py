@@ -60,3 +60,34 @@ def test_core_documents_regime_weather_line():
     assert "regime" in text.lower()
     assert "WEATHER" in text
     assert "fade_ok" in text
+
+
+def test_passive_module_documents_required_elements():
+    import os
+    path = os.path.join(os.path.dirname(__file__), "..", "scalp-passive.md")
+    with open(path) as f:
+        text = f.read()
+    # gates
+    assert "fade_ok" in text
+    assert "passive-expectancy" in text
+    assert "STOP" in text and "size_mult" in text
+    assert "passive_tilt" in text
+    # verdicts + triggers
+    for v in ("FADE-LONG-NOW", "FADE-SHORT-NOW", "SIT-OUT"):
+        assert v in text
+    assert "bid-ladder" in text and "ask-ladder" in text
+    # exit + invalidation
+    assert "to-the-mean" in text or "to the mean" in text
+    assert "quick-pull" in text.lower() or "quick pull" in text.lower()
+    assert "time-stop" in text.lower()
+    # audit tagging
+    assert "passive-fade" in text
+
+
+def test_skill_routes_passive_invocation():
+    import os
+    skill = os.path.join(os.path.dirname(__file__), "..", "SKILL.md")
+    with open(skill) as f:
+        text = f.read()
+    assert "scalp-passive.md" in text
+    assert "passive" in text.lower()
