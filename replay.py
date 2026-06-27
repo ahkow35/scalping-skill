@@ -7,9 +7,13 @@ onto the audit entry, which `audit_log.compute_summary` aggregates into
 gate-value stats (WAIT missed-R, VETO avoided-R, per-setup expectancy).
 
 Simulation conventions (deliberately simple, documented, conservative):
-  - Fill = candle touch of the trigger entry price; filled AT entry, no
-    slippage. Counterfactuals are therefore slightly optimistic on fills —
-    this is gate-tuning evidence, not proof of live P&L.
+  - Fill = candle touch of the trigger entry price. The fill price is exact
+    (no price slippage on the touch itself), but every FILLED trade is charged
+    a realistic ROUND-TRIP COST (taker fee + slippage), expressed in R — see
+    the cost-model block below. Per-trigger results carry both `r` (GROSS, the
+    pure fill logic) and `net_r` (after cost); `cost_r` records the charge.
+    The summary aggregates NET. Unfilled triggers pay nothing. This is still
+    gate-tuning evidence, not proof of live P&L.
   - Ladder per protocol: 50% out at T1, stop moves to breakeven; remaining
     50% out at T2 (the 20% trail is NOT simulated — T2 exit is the
     conservative stand-in). No T2 defined -> remainder scored at breakeven.
@@ -43,6 +47,34 @@ MAX_CANDLES_PER_REQ = 400
 
 NON_ACTION_VERDICTS = ("WAIT", "VETOED", "NO-TRADE", "HALT")
 
+# --- Cost model -----------------------------------------------------------
+# Counterfactuals are scored NET of trading costs. Costs are charged per fill
+# as a fraction of notional, then converted to R. The key dynamic: TIGHTER
+# STOPS COST MORE IN R — a stop 0.3% away pays far more R in fees than a stop
+# 1% away, because the same fixed % cost is divided by a smaller risk. This is
+# exactly why a "profitable" zero-cost scalp backtest can be net-negative live
+# (Varma: "your system is signal + entry + exit — model all three").
+# Defaults are deliberately conservative (taker fees on every fill +
+# slippage). Tune to your real Hyperliquid fee tier and order types.
+TAKER_FEE = 0.00045        # ~0.045% per fill (Hyperliquid base tier, approx — verify)
+SLIPPAGE_FRAC = 0.0002     # 2 bps assumed slippage per fill (spread + impact)
+COST_PER_FILL = TAKER_FEE + SLIPPAGE_FRAC
+# A round trip = one full-size entry + one full-size worth of exits (a 50/50
+# ladder is two half-size exit legs = 1.0 full-size-equivalent). ≈ 2 fills.
+ROUND_TRIP_FILLS = 2.0
+
+
+def round_trip_cost_r(lv):
+    """Round-trip trading cost for one trade, in R units.
+
+    cost_$ ≈ ROUND_TRIP_FILLS × entry_price × COST_PER_FILL × size
+    risk_$  = size × risk_price
+    cost_R  = cost_$ / risk_$ = ROUND_TRIP_FILLS × COST_PER_FILL × entry / risk
+    """
+    if lv["risk"] <= 0:
+        return 0.0
+    return ROUND_TRIP_FILLS * COST_PER_FILL * abs(lv["entry"]) / lv["risk"]
+
 
 # ---------------------------------------------------------------- pure core
 
@@ -56,7 +88,7 @@ def trigger_r_levels(trigger, side):
     r_t1 = abs(float(trigger["t1"]) - entry) / risk
     t2 = trigger.get("t2")
     r_t2 = abs(float(t2) - entry) / risk if t2 is not None else None
-    return {"risk": risk, "r_t1": r_t1, "r_t2": r_t2}
+    return {"risk": risk, "r_t1": r_t1, "r_t2": r_t2, "entry": entry}
 
 
 def _normalize(trigger, side, candles):
@@ -153,16 +185,24 @@ def simulate_trigger(trigger, side, candles, fetch_finer=None):
     conservatively.
     """
     lv = trigger_r_levels(trigger, side)
+    cost_r = round_trip_cost_r(lv)
     trig, cds = _normalize(trigger, side, candles)
     if not cds:
-        return {"status": "unfilled", "r": None, "ambiguous": False}
+        return {"status": "unfilled", "r": None, "net_r": None,
+                "cost_r": round(cost_r, 4), "ambiguous": False}
 
     interval_ms = (cds[1]["t"] - cds[0]["t"]) if len(cds) > 1 else SCAN_INTERVAL_MS
     phase, ambiguous = "PENDING", False
 
     def finish(status, r, amb):
+        # `r` is GROSS (pure fill logic, what the unit tests pin). Every filled
+        # outcome also pays the round-trip cost -> `net_r`. Unfilled => no cost.
+        gross = round(r, 4) if r is not None else None
+        net = round(r - cost_r, 4) if r is not None else None
         return {"status": status,
-                "r": round(r, 4) if r is not None else None,
+                "r": gross,
+                "net_r": net,
+                "cost_r": round(cost_r, 4),
                 "ambiguous": amb}
 
     for cd in cds:
@@ -243,12 +283,22 @@ def apply_replay_to_entry(entry, candles, window_h, fetch_finer=None):
                                               fetch_finer=fetch_finer)
 
     fired_rs = [t["r"] for t in per_trigger.values() if t["r"] is not None]
+    net_rs = [t["net_r"] for t in per_trigger.values()
+              if t.get("net_r") is not None]
     return {
         "window_h": window_h,
         "interval": SCAN_INTERVAL,
         "per_trigger": per_trigger,
         "unscoreable": sorted(set(live) - set(scoreable)),
-        "best_r": round(max(fired_rs), 4) if fired_rs else None,
+        "best_r": round(max(fired_rs), 4) if fired_rs else None,  # gross
+        "net_best_r": round(max(net_rs), 4) if net_rs else None,  # after cost
+        "cost_model": {
+            "taker_fee": TAKER_FEE,
+            "slippage_frac": SLIPPAGE_FRAC,
+            "round_trip_fills": ROUND_TRIP_FILLS,
+            "note": "net_r / net_best_r are GROSS minus round-trip cost; "
+                    "summary aggregates net.",
+        },
     }
 
 

@@ -260,17 +260,25 @@ def _counterfactual_stats(entries):
     wait.missed_r  — R the WAITs sat out (positive = the gate cost you)
     veto.avoided_r — R the VETOs dodged (negative = the gate saved you)
     by_setup       — counterfactual expectancy per `<side>-<trigger label>`
+
+    Aggregates are NET of trading costs: prefer the replay's `net_best_r` /
+    per-trigger `net_r` when present, falling back to gross `best_r` / `r` for
+    counterfactuals scored before the cost model existed (re-run
+    `replay.py --force` to upgrade them).
     """
     scored = [e for e in entries if e.get("counterfactual")]
 
+    def _best(cf):
+        v = cf.get("net_best_r")
+        return v if v is not None else cf.get("best_r")
+
     def bucket(verdicts):
         rows = [e for e in scored if e.get("verdict") in verdicts]
-        fired = [e for e in rows
-                 if e["counterfactual"].get("best_r") is not None]
+        fired = [e for e in rows if _best(e["counterfactual"]) is not None]
         return {
             "n": len(rows),
             "fired": len(fired),
-            "total_best_r": round(sum(e["counterfactual"]["best_r"]
+            "total_best_r": round(sum(_best(e["counterfactual"])
                                       for e in fired), 3),
         }
 
@@ -280,9 +288,10 @@ def _counterfactual_stats(entries):
     by_setup = {}
     for e in scored:
         for label, res in (e["counterfactual"].get("per_trigger") or {}).items():
-            if res.get("r") is None:
+            r = res.get("net_r") if res.get("net_r") is not None else res.get("r")
+            if r is None:
                 continue
-            by_setup.setdefault(f"{e.get('side')}-{label}", []).append(res["r"])
+            by_setup.setdefault(f"{e.get('side')}-{label}", []).append(r)
     setup_stats = {}
     for setup, rs in by_setup.items():
         setup_stats[setup] = {

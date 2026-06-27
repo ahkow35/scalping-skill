@@ -1,5 +1,29 @@
 # Changelog — scalp skill
 
+## 2026-06-28 — Realistic-cost counterfactuals (replay net of fees + slippage)
+
+**Summary:** Counterfactual replay now scores trades **net of trading costs**,
+closing the one gap that made expectancy untrustworthy (it previously filled at
+trigger price with zero cost — flagged in the [[samir-varma-react-to-risk-quant-trading]]
+review, Varma: "your system is signal + entry + exit — model all three").
+
+- **`replay.py`** — added a cost model: `TAKER_FEE` (0.045%) + `SLIPPAGE_FRAC`
+  (2 bps) per fill, `ROUND_TRIP_FILLS=2.0`, and `round_trip_cost_r(lv)` which
+  converts cost to R as `2 × COST_PER_FILL × entry/risk` — so **tighter stops
+  cost more in R**. `simulate_trigger` now returns `net_r` + `cost_r` alongside
+  gross `r` (gross is unchanged, so the fill-logic unit tests still pin it).
+  `apply_replay_to_entry` adds `net_best_r` + a `cost_model` block.
+- **`audit_log.py`** — `_counterfactual_stats` aggregates NET (`net_best_r` /
+  per-trigger `net_r`) with fallback to gross for pre-cost counterfactuals.
+- **Tests** — +6 (cost math, net-of-cost outcomes, unfilled pays nothing,
+  summary prefers net). Full suite **140 passed**.
+- **Re-scored the live log (`--force`):** 47 scored. Net result — cost drag
+  **0.108R/trade avg** (median 0.097R, max 0.197R), eating **~5R of ~24.5R
+  gross (≈20%)**. Edge survives in simulation (long-B +1.03R/n15, long-A
+  +0.70R/n13) but this is COUNTERFACTUAL, net, still optimistic on *whether*
+  limit fills happen — only **1 real resolved trade** exists. Prove with live
+  resolves before sizing up. Tune `TAKER_FEE`/`SLIPPAGE_FRAC` to real tier.
+
 ## 2026-06-18 — Passive flow-capture mode (Plan 2: 2A + 2B + 2C)
 
 **Summary:** Built `/scalp passive <COIN>` — a both-sides mean-reversion fade

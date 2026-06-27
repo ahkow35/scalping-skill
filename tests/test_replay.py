@@ -352,6 +352,51 @@ def test_passive_fade_entries_are_skipped_by_replay():
     assert replay.apply_replay_to_entry(entry, candles, 72) is None
 
 
+# ---------- cost model ----------
+
+def test_round_trip_cost_r_math():
+    lv = replay.trigger_r_levels(TRIG, "long")  # entry 100, risk 2
+    expected = replay.ROUND_TRIP_FILLS * replay.COST_PER_FILL * 100 / 2
+    assert replay.round_trip_cost_r(lv) == pytest.approx(expected)
+    # tighter stop -> higher cost in R
+    tight = replay.trigger_r_levels(
+        {"entry": 100.0, "stop": 99.5, "t1": 101.0}, "long")  # risk 0.5
+    assert replay.round_trip_cost_r(tight) > replay.round_trip_cost_r(lv)
+
+
+def test_filled_outcomes_are_net_of_cost():
+    cost = replay.round_trip_cost_r(replay.trigger_r_levels(TRIG, "long"))
+    # a stopped trade: gross -1.0, net = -1.0 - cost
+    candles = [c(T0, 101, 101.5, 99.9, 100.2),
+               c(T0 + M5, 100.2, 100.8, 97.9, 98.1)]
+    out = replay.simulate_trigger(TRIG, "long", candles)
+    assert out["r"] == -1.0                       # gross unchanged (tests pin it)
+    assert out["cost_r"] == pytest.approx(round(cost, 4))
+    assert out["net_r"] == pytest.approx(-1.0 - cost, abs=1e-4)
+
+
+def test_unfilled_pays_no_cost():
+    candles = [c(T0, 101, 102, 100.5, 101.5)]
+    out = replay.simulate_trigger(TRIG, "long", candles)
+    assert out["status"] == "unfilled"
+    assert out["r"] is None and out["net_r"] is None
+
+
+def test_summary_prefers_net_r_when_present(tmp_path):
+    p = str(tmp_path / "a.jsonl")
+    base = {"coin": "HYPE", "side": "long", "mode": "ENTRY"}
+    t1 = _write(p, {**base, "verdict": "WAIT"}, T0)
+    audit_log.attach_counterfactual(t1, {
+        "window_h": 72, "best_r": 2.5, "net_best_r": 2.435,
+        "per_trigger": {"A": {"status": "t1_t2", "r": 2.5, "net_r": 2.435,
+                              "cost_r": 0.065, "ambiguous": False}},
+    }, path=p)
+    s = audit_log.compute_summary(path=p)
+    cf = s["counterfactual"]
+    assert cf["wait"]["missed_r"] == pytest.approx(2.435)        # net, not 2.5
+    assert cf["by_setup"]["long-A"]["expectancy_r"] == pytest.approx(2.435)
+
+
 def test_directional_entry_still_scored_after_passive_guard():
     # Regression: the passive guard must not affect directional entries.
     entry = {
