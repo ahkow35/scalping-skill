@@ -121,9 +121,53 @@ the output noting directional edge is structurally low in this tape.
 The output includes `session.weekend_window` — true Fri 20:00 → Sun 20:00 UTC.
 The short module uses it; the long module ignores it.
 
-After Step 1, hand off to the direction module: Step 2 (macro veto),
+The output includes `flow` — a deterministic volume / order-flow read
+(`flow.py`, mirrors `regime`). Fields: `coverage_ok`, `max_coverage_pct`,
+`aggressor_bias` (buyers/sellers/balanced) + `avg_buy_share_pct`,
+`volume_climax` ({ratio, direction} or null), `delta_divergence`
+(bearish/bullish or null), `breakout_vol_ok`. It encodes Varma's "volume is
+the key" heuristics — applied in Step 1b.
+
+## Step 1b — Volume / flow confirmation gate (read `out['flow']`)
+
+Varma's rule: volume is the signal that confirms whether a price move is real
+([[samir-varma-react-to-risk-quant-trading]] §8a). The classifier states what
+flow is doing; this gate maps it to conviction. **It only ever CUTS conviction
+or sits you out — never raises it** (volume confirms an edge or it doesn't; it
+never manufactures one). Apply AFTER the direction module sets the base verdict
+and `side`; the final conviction = the LOWEST tier across the R16 check (0b)
+and this gate. Tiers: high → med → low.
+
+1. **Coverage — can you even see the flow?** `coverage_ok == false`
+   (max_coverage_pct < 50) → you're scalping half-blind: cap conviction at
+   **low** and flag `⚠ low coverage`. Re-run /scalp every ~5m to build the
+   trade cache before sizing up.
+2. **Aggressor bias must agree with `side`.** long wants `buyers`, short wants
+   `sellers`.
+   - `balanced` → no confirmation: cut **one** tier.
+   - OPPOSES the side (long into `sellers` / short into `buyers`) → cut **two**
+     tiers (→ low) + flag `flow opposes`; strongly prefer WAIT.
+3. **Delta divergence = exhaustion, don't chase.** long + `bearish` (price up
+   on selling) → cut one tier and do NOT take a fresh breakout long into it;
+   short + `bullish` (price down on buying) → cut one tier.
+4. **Volume climax** (`volume_climax.direction`): `down` = capitulation
+   (supports longs / covering shorts, warns against a fresh short); `up` =
+   blow-off (supports shorts / taking profit, warns against a fresh long). A
+   climax IN your entry direction = you're late → cut one tier. A climax
+   AGAINST the prior move (reversal in your favour) is a fade signal, not a cut.
+5. **Breakout entries need volume.** If the fired trigger is a breakout /
+   momentum entry and `breakout_vol_ok == false`, the breakout is unconfirmed →
+   cut one tier (a breakout on thin volume is suspect).
+
+Cuts stack (take the minimum tier). If the gate drives an ACTION verdict to low
+AND macro/regime is also weak, prefer **WAIT** over a low-conviction entry.
+Surface the result on the FLOW line of the output. If `flow` is a string
+(DATA UNAVAILABLE) or all fields null, treat as `coverage_ok == false`.
+
+After Step 1/1b, hand off to the direction module: Step 2 (macro veto),
 Step 3 (structure), Step 4 (triggers) — or `scalp-passive.md` when `passive`
-is in args. Then return here for Steps 5–6.
+is in args. Then return here for Steps 5–6. (Step 1b's conviction effect is
+applied once the direction module has set the base verdict and side.)
 
 ## Step 5 — Session overlay (from session object)
 Warn if setup straddles asia_handoff_soon. If us_session_live and within
@@ -397,6 +441,7 @@ WEATHER: <regime_label> (compression <x> | BTC-corr <x> | 2-sided <x> | fade_ok 
 [WEEKEND: size x0.5 — short + weekend only]
 Range <floor> – <ceiling> | now <mid> (<pos>)
 Flow: 5m <±$Xk> (<buy_share>%)  15m <±$Xk>  [cov <%>]
+FLOW-GATE: <bias> (<avg_buy_share>%) | cov <max>% | [climax <dir> ×<r>] [div <bearish|bullish>] [breakout-vol <ok|thin>] → conviction <unaffected | −1 | −2 | cap-low>
 Book: micro <px> vs mid <px> (dev <±X> bps)  spread <Y> bps
 Triggers:
   A <name>: <entry> / SL <stop> / T1 <px> T2 <px> (RR <r1>/<r2>)
@@ -426,8 +471,9 @@ SCALP — <COIN> <LONG|SHORT> | <sgt> | <utc>
 [BEHAVIORAL: <leak line> — omit if clear]
 VERDICT: <V>  MACRO: <CLEAR|VETO ...>  Conviction: <low|med|high>
 WEATHER: <regime_label> (compression <x> | BTC-corr <x> | 2-sided <x> | fade_ok <bool>)
+[FLOW: <bias> (<avg_buy_share>%) cov <max>% — include only when flow is the/a reason to wait]
 Watching: A <name> at <entry> | B <name> at <entry>  [C ... — short only]
-Reason: <one clause — why not now, cite the missing condition>
+Reason: <one clause — why not now, cite the missing condition (e.g. flow opposes / low coverage / unconfirmed breakout)>
 Next: <when to re-check — e.g. 14:00 UTC 1h close, or "on close above 73.4">
 ```
 

@@ -1,5 +1,27 @@
 # Changelog — scalp skill
 
+## 2026-06-28 — Volume / order-flow confirmation gate (Step 1b)
+
+**Summary:** Encoded Varma's "volume is the key signal" heuristics
+([[samir-varma-react-to-risk-quant-trading]] §8a) as a deterministic classifier
++ a conviction gate. Volume now has to CONFIRM a move or conviction is cut.
+
+- **`flow.py`** (new, mirrors `regime.py` — pure, never raises): from candles
+  (per-bar volume) + bucketed `taker_delta` it emits `coverage_ok`,
+  `aggressor_bias`, `volume_climax` (capitulation/blow-off), `delta_divergence`
+  (price-up-on-selling / price-down-on-buying = exhaustion), `breakout_vol_ok`.
+  Climax/breakout baselines **adapt to available bars** (fetch returns ~19 5m
+  bars) down to a `min_bars` floor.
+- **`fetch_market.py`** — attaches `out['flow']` next to `out['regime']`.
+- **`scalp-core.md` Step 1b** (new) — maps the flow read to conviction; it only
+  ever **cuts** (volume confirms an edge or it doesn't, never manufactures one):
+  low coverage → cap low; bias opposing the side → −2; balanced → −1; divergence
+  against side → −1; climax in your direction (you're late) → −1; unconfirmed
+  breakout → −1. Cuts stack; drives WAIT when low + weak macro. New FLOW-GATE
+  output line; optional FLOW line on WAITs. SKILL.md coverage note updated.
+- **Tests** — +11 (`test_flow.py`), incl. short-history adaptation. **151 passed.**
+- Live smoke test: gate computes end-to-end on HYPE.
+
 ## 2026-06-28 — Realistic-cost counterfactuals (replay net of fees + slippage)
 
 **Summary:** Counterfactual replay now scores trades **net of trading costs**,

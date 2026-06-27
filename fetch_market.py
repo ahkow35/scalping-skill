@@ -522,6 +522,7 @@ import sys
 import time as _time
 
 import regime as regime_mod
+import flow as flow_mod
 
 _NOW = lambda: int(_time.time() * 1000)
 _DAY = 86400000
@@ -570,6 +571,8 @@ def assemble(coin, deep=False, now_ms=None):
     out["regime"] = regime_mod.classify(
         out["candles"], out["btc_candles"],
         out.get("taker_delta"), out.get("book"))
+
+    out["flow"] = flow_mod.classify(out["candles"], out.get("taker_delta"))
 
     _live_exc = None
     parsed_btcd = None

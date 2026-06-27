@@ -205,8 +205,10 @@ Follow `scalp-core.md` + the direction module exactly.
   and compact MANAGE) are still audit-logged but suppress the stub.
 - Passive-mode entries set `setup_family: "passive-fade"` in the audit payload
   (directional entries omit it / default "directional").
-- ALWAYS check `taker_delta.coverage_pct` — if <50%, call out the
-  partial coverage and weight the signal accordingly.
+- ALWAYS run the Step 1b volume/flow gate from `out['flow']` (coverage,
+  aggressor bias vs side, climax, divergence, breakout-volume) — it can only
+  CUT conviction. `coverage_ok == false` (max coverage <50%) caps conviction
+  at low: you're scalping half-blind (Varma §8a).
 - Short module only: apply the weekend modifier when
   `session.weekend_window` is true (size ×0.5).
 - Never inline-curl; only use `fetch_market.py` output.
