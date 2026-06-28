@@ -22,12 +22,23 @@ plateau, not a spike (parameter sensitivity).
 
 This is a COMPONENT backtest: it validates the gate, never strategy P&L.
 
+Two robustness lenses:
+  - PARAMETER SWEEPS (ATR_SWEEP / FUNDING_SWEEP / regime_compression_sweep):
+    "is the chosen threshold on a plateau, not a spike?"
+  - NOISE INJECTION (--noise, Varma §7): "is the underlying edge even real?"
+    Perturb input prices with rising random noise; a real edge degrades
+    SMOOTHLY toward zero. Jagged / strengthening-under-noise = fitted to noise.
+    Reports per-level mean + std so a spike can be judged against rep variance.
+
 CLI:
-  python3 backtest_thresholds.py [--coin HYPE] [--days 365]
+  python3 backtest_thresholds.py [--coin HYPE] [--days 365]   # ATR/funding report
+  python3 backtest_thresholds.py --regime [--coin HYPE]       # regime gate backtest
+  python3 backtest_thresholds.py --noise  [--coin HYPE]       # noise-injection test
 """
 
 import argparse
 import json
+import random
 import sys
 import time
 
@@ -277,13 +288,148 @@ def regime_compression_sweep(primary_candles, btc_candles, horizon_bars=4,
     return rows
 
 
+# --------------------------------------------------- noise-injection robustness
+#
+# Varma's anti-overfit test (note §7): perturb the INPUT PRICES with random
+# noise of increasing magnitude and watch the edge metric. A REAL edge degrades
+# SMOOTHLY toward zero as noise grows. A jagged / non-monotone response — or an
+# edge that gets STRONGER under noise — means the signal was fitted to noise,
+# not to data. This complements the parameter sweeps above: a sweep asks "is the
+# threshold on a plateau?"; this asks "is the underlying edge even real?".
+
+NOISE_SIGMAS = (0.0, 0.0005, 0.001, 0.002, 0.004, 0.008)  # multiplicative, per bar
+NOISE_REPS = 8
+
+
+def add_noise(candles, sigma, rng):
+    """Return candles with each O/H/L/C multiplied by (1 + N(0, sigma)),
+    independently per field, then high/low re-fixed to bracket the bar.
+    sigma == 0 is the identity (single clean pass)."""
+    if sigma <= 0:
+        return candles
+    out = []
+    for cd in candles:
+        o = cd["o"] * (1.0 + rng.gauss(0.0, sigma))
+        h = cd["h"] * (1.0 + rng.gauss(0.0, sigma))
+        l = cd["l"] * (1.0 + rng.gauss(0.0, sigma))
+        c = cd["c"] * (1.0 + rng.gauss(0.0, sigma))
+        out.append({**cd, "o": o, "c": c, "h": max(o, h, l, c), "l": min(o, h, l, c)})
+    return out
+
+
+def atr_protective_edge(primary, btc, mult=2.0, horizon=4):
+    """Edge metric for the ATR veto: how much WORSE forward longs do on a
+    'down' veto flag vs baseline (positive = the veto is protective).
+    None if either bucket is empty."""
+    flags = atr_veto_flags(btc, mult=mult)
+    fwd = forward_stats(primary, horizon)
+    down = [fwd[i]["ret"] for i, f in enumerate(flags)
+            if f == "down" and fwd[i] is not None]
+    base = [fwd[i]["ret"] for i, f in enumerate(flags)
+            if f is None and fwd[i] is not None]
+    if not down or not base:
+        return None
+    return (sum(base) / len(base)) - (sum(down) / len(down))
+
+
+def regime_separation_edge(primary, btc, horizon=4):
+    """Edge metric for the regime gate: trending bars should precede LARGER
+    moves than ranging bars. Edge = trending_abs - ranging_abs (positive =
+    the classifier separates the two regimes). None if a bucket is missing."""
+    stats = regime_forward_stats(primary, btc, horizon_bars=horizon)
+    rang = stats.get("ranging", {}).get("mean_abs_fwd_ret")
+    trend = stats.get("trending", {}).get("mean_abs_fwd_ret")
+    if rang is None or trend is None:
+        return None
+    return trend - rang
+
+
+def noise_robustness(primary, btc, metric_fn, sigmas=NOISE_SIGMAS,
+                     reps=NOISE_REPS, seed=12345):
+    """Run metric_fn(primary, btc) across noise levels. At each sigma>0, average
+    over `reps` independent perturbations (deterministic via seed). Returns a
+    curve [{sigma, mean, n}]."""
+    rng = random.Random(seed)
+    curve = []
+    for s in sigmas:
+        r = 1 if s <= 0 else reps
+        vals = []
+        for _ in range(r):
+            m = metric_fn(add_noise(primary, s, rng), add_noise(btc, s, rng))
+            if m is not None:
+                vals.append(m)
+        mean = (sum(vals) / len(vals)) if vals else None
+        if len(vals) > 1:
+            std = (sum((x - mean) ** 2 for x in vals) / (len(vals) - 1)) ** 0.5
+        else:
+            std = (0.0 if vals else None)
+        curve.append({"sigma": s, "n": len(vals), "mean": mean,
+                      "std": round(std, 6) if std is not None else None})
+    return curve
+
+
+def degradation_verdict(curve):
+    """Smooth degradation toward zero = PASS; jagged / strengthening = SUSPECT.
+
+    Checks: (1) the magnitude is mostly non-increasing as noise grows,
+    (2) the noisiest level is no stronger than the clean level, (3) no
+    intermediate level spikes >10% above the clean magnitude (edge getting
+    STRONGER under noise is the classic fitted-to-noise tell)."""
+    pts = [c for c in curve if c["mean"] is not None]
+    if len(pts) < 3:
+        return {"verdict": "INSUFFICIENT", "reason": "fewer than 3 scored levels"}
+    mags = [abs(c["mean"]) for c in pts]
+    base, final = mags[0], mags[-1]
+    steps = len(mags) - 1
+    non_increasing = sum(1 for i in range(steps) if mags[i + 1] <= mags[i] + 1e-9)
+    degrade_ratio = non_increasing / steps
+    spike = any(m > base * 1.10 + 1e-12 for m in mags[1:])
+    smooth = degrade_ratio >= 0.6 and final <= base + 1e-12 and not spike
+    return {
+        "verdict": "PASS" if smooth else "SUSPECT",
+        "base_abs": round(base, 6),
+        "final_abs": round(final, 6),
+        "degrade_ratio": round(degrade_ratio, 3),
+        "spike_above_baseline": spike,
+        "_note": ("PASS = edge degrades smoothly toward 0 under input noise "
+                  "(real signal). SUSPECT = jagged/non-monotone or strengthens "
+                  "under noise (likely fitted to noise — Varma §7)."),
+    }
+
+
+def run_noise(coin="HYPE", days=365):
+    now_ms = int(time.time() * 1000)
+    start_ms = now_ms - days * 86_400_000
+    btc = fetch_candles("BTC", "1h", start_ms, now_ms)
+    primary = btc if coin == "BTC" else fetch_candles(coin, "1h", start_ms, now_ms)
+    btc_by_t = {cd["t"]: cd for cd in btc}
+    primary = [cd for cd in primary if cd["t"] in btc_by_t]
+    btc_aligned = [btc_by_t[cd["t"]] for cd in primary]
+
+    out = {"coin": coin, "days": days, "bars": len(primary),
+           "sigmas": list(NOISE_SIGMAS), "reps": NOISE_REPS, "tests": {}}
+    for name, fn in (("atr_protective_edge",
+                      lambda p, b: atr_protective_edge(p, b)),
+                     ("regime_separation_edge",
+                      lambda p, b: regime_separation_edge(p, b))):
+        curve = noise_robustness(primary, btc_aligned, fn)
+        out["tests"][name] = {"curve": curve,
+                              "verdict": degradation_verdict(curve)}
+    return out
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--coin", default="HYPE")
     ap.add_argument("--days", type=int, default=365)
     ap.add_argument("--regime", action="store_true",
                     help="Run regime threshold backtest instead of ATR/funding report.")
+    ap.add_argument("--noise", action="store_true",
+                    help="Run noise-injection robustness test (Varma §7).")
     args = ap.parse_args(argv[1:])
+    if args.noise:
+        print(json.dumps(run_noise(coin=args.coin, days=args.days), indent=2))
+        return 0
     if args.regime:
         now_ms = int(time.time() * 1000)
         start_ms = now_ms - args.days * 86_400_000

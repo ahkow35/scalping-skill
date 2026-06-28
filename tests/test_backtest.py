@@ -106,3 +106,59 @@ def test_regime_forward_outcomes_separates_ranging_from_trending():
     assert stats["ranging"]["n"] > 0
     assert stats["trending"]["n"] > 0
     assert stats["trending"]["mean_abs_fwd_ret"] > stats["ranging"]["mean_abs_fwd_ret"]
+
+
+# ---------- noise-injection robustness (Varma §7) ----------
+
+import random as _random
+
+
+def test_add_noise_identity_at_zero():
+    cs = [c(T0, 100, 101, 99, 100.5)]
+    assert bt.add_noise(cs, 0.0, _random.Random(1)) is cs
+
+
+def test_add_noise_preserves_high_low_bracket():
+    cs = [c(T0 + i * H1, 100, 101, 99, 100.5) for i in range(5)]
+    out = bt.add_noise(cs, 0.01, _random.Random(7))
+    for k in out:
+        assert k["h"] >= k["o"] and k["h"] >= k["c"] and k["h"] >= k["l"]
+        assert k["l"] <= k["o"] and k["l"] <= k["c"] and k["l"] <= k["h"]
+    # noise actually moved prices
+    assert any(out[i]["c"] != cs[i]["c"] for i in range(5))
+
+
+def test_add_noise_deterministic_with_seed():
+    cs = [c(T0 + i * H1, 100, 101, 99, 100.5) for i in range(5)]
+    a = bt.add_noise(cs, 0.01, _random.Random(42))
+    b = bt.add_noise(cs, 0.01, _random.Random(42))
+    assert [x["c"] for x in a] == [x["c"] for x in b]
+
+
+def test_noise_robustness_curve_shape():
+    cs = [c(T0 + i * H1, 100, 101, 99, 100.0) for i in range(50)]
+    # metric ignores inputs -> constant; curve should have one row per sigma
+    curve = bt.noise_robustness(cs, cs, lambda p, b: 1.0,
+                                sigmas=(0.0, 0.001, 0.002), reps=4)
+    assert [r["sigma"] for r in curve] == [0.0, 0.001, 0.002]
+    assert curve[0]["n"] == 1 and curve[1]["n"] == 4   # reps only when sigma>0
+    assert all(r["mean"] == 1.0 for r in curve)
+
+
+def test_degradation_verdict_pass_on_smooth_decay():
+    curve = [{"sigma": s, "mean": m, "n": 1}
+             for s, m in zip((0, 1, 2, 3), (1.0, 0.7, 0.4, 0.1))]
+    assert bt.degradation_verdict(curve)["verdict"] == "PASS"
+
+
+def test_degradation_verdict_suspect_on_spike():
+    # edge gets STRONGER under noise -> fitted-to-noise tell
+    curve = [{"sigma": s, "mean": m, "n": 1}
+             for s, m in zip((0, 1, 2, 3), (0.3, 0.9, 0.2, 0.25))]
+    v = bt.degradation_verdict(curve)
+    assert v["verdict"] == "SUSPECT" and v["spike_above_baseline"] is True
+
+
+def test_degradation_verdict_insufficient():
+    curve = [{"sigma": 0, "mean": 1.0, "n": 1}, {"sigma": 1, "mean": None, "n": 0}]
+    assert bt.degradation_verdict(curve)["verdict"] == "INSUFFICIENT"

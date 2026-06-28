@@ -1,5 +1,30 @@
 # Changelog — scalp skill
 
+## 2026-06-29 — Noise-injection robustness test (Varma §7)
+
+**Summary:** Added the input-noise robustness lens to `backtest_thresholds.py`
+— the complement to the existing parameter sweeps. A sweep asks "is the
+threshold on a plateau?"; this asks "is the edge even real?" by perturbing input
+prices with rising random noise and checking the edge metric degrades smoothly.
+
+- **`backtest_thresholds.py`** — `add_noise` (per-bar multiplicative O/H/L/C
+  noise, seeded/deterministic), `noise_robustness` (curve of edge vs sigma,
+  reps-averaged, with per-level std), `degradation_verdict` (PASS = smooth
+  decay toward 0; SUSPECT = jagged / strengthens under noise), and two edge
+  metrics: `atr_protective_edge`, `regime_separation_edge`. New `--noise` CLI.
+- **Tests** — +7 (`test_backtest.py`): identity at sigma 0, H/L bracket
+  preserved, determinism, curve shape, PASS/SUSPECT/INSUFFICIENT verdicts.
+  **158 passed.**
+- **Live run (HYPE, 365d, 5000 1h bars, 8 reps):**
+  - **regime gate** — separation real & stable at low noise (+0.0058,
+    std ~0.0004 at sigma≤0.001); SUSPECT flag is driven by a high-noise reading
+    within ~1 std (measurement variance, not a true spike). Read: **likely
+    robust, borderline** — don't curve-fit `compression_quiet`; more reps to
+    confirm.
+  - **ATR veto (long side)** — base effect tiny and WRONG-SIGNED (-0.0017):
+    **no robust long-protective edge on HYPE.** Actionable: the long-side ATR
+    veto isn't earning its keep here (may only protect shorts / needs rework).
+
 ## 2026-06-28 — Volume / order-flow confirmation gate (Step 1b)
 
 **Summary:** Encoded Varma's "volume is the key signal" heuristics
