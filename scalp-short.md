@@ -72,29 +72,30 @@ Positioning from funding+premium+OI+taker_delta (inverted read):
   quality.
 
 ## Step 4 — Triggers (short only)
-- A Failed-breakout (sweep-rejection): price sweeps above a tested ceiling
+Two triggers — the breakdown trigger (B) has been removed: counterfactual data
+showed negative expectancy (−0.28R over 4 entries) vs long-side setups
+(+0.70 to +1.03R). Short entries are limited to ceiling-rejection patterns.
+
+- **A Failed-breakout (sweep-rejection)**: price sweeps above a tested ceiling
   (runs short stops) -> fails to hold -> 5m closes back below the ceiling ->
   entry on the close or on a retest of the ceiling from below; stop above the
   sweep overshoot wick. Targets: T1 mid pivot, T2 floor.
-- B Breakdown (momentum-break down): 5m/15m close BELOW a tested floor on
-  expanding volume -> entry on the close or on a retest of the broken floor
-  from below; stop above the broken floor (now resistance) + structural
-  buffer. Targets: next structural level down, or measured-move down.
+- **B Lower-high rejection**: after a top, price rallies to a lower high vs the
+  prior swing high and rejects (wick + sell-dominant taker delta) -> entry on
+  rejection confirmation (5m close back down); stop above the lower high.
+  Targets: prior swing low / floor.
 
-  Confidence modifier from `taker_delta` in the breakdown window (NOT a gate —
-  do not skip an otherwise valid breakdown just because this is weak):
-  - sell_share_pct > 60% + coverage_pct sufficient → HIGH-conviction
-    breakdown, full size acceptable
+Confidence modifier from `taker_delta` in the breakdown window (NOT a gate —
+do not skip an otherwise valid entry just because this is weak):
+  - sell_share_pct > 60% + coverage_pct sufficient → HIGH-conviction,
+    full size acceptable
   - sell_share_pct 40–60% → standard; size normally
-  - sell_share_pct < 40% → WEAK breakdown (long-squeeze bounce risk);
+  - sell_share_pct < 40% → WEAK entry (long-squeeze bounce risk);
     cut size or wait for the retest before entering
   (sell_share_pct = 100 − buy_share_pct from taker_delta. If buy_share_pct is
   null — zero volume in the window — treat the modifier as indeterminate and
   lean on coverage_pct + candle evidence instead.)
-- C Lower-high rejection: after a top, price rallies to a lower high vs the
-  prior swing high and rejects (wick + sell-dominant taker delta) -> entry on
-  rejection confirmation (5m close back down); stop above the lower high.
-  Targets: prior swing low / floor.
+
 Each: entry / stop / targets / R:R from live levels.
 
 **Sweep stop rule (short)**: identify the next structural pool ABOVE entry
@@ -104,9 +105,13 @@ budget at full size, CUT SIZE — never tighten into noise.
 
 ## Output deltas (short)
 The ENTRY QUICK / DEEP and MANAGE skeletons come from `scalp-core.md`. Fill:
-- VERDICT vocabulary: `SHORT-NOW | WAIT | NO-TRADE | VETOED | HALT`
+- VERDICT vocabulary:
+  `SHORT-NOW | SHORT-CLOSE | SHORT-PROBE | WAIT | NO-TRADE | VETOED | HALT`
+  - `SHORT-NOW` (high conviction → 100% of cap)
+  - `SHORT-CLOSE` (med conviction → 50% of cap)
+  - `SHORT-PROBE` (low conviction → 25% of cap)
 - The counter-case line is **"Bull case"** — one clause on what kills the
   short in the next 1h (an upside surprise).
-- Triggers labelled A (failed-breakout) / B (breakdown) / C (lower-high).
+- Triggers labelled A (failed-breakout) / B (lower-high rejection).
 - Journal stub `side:` field = `short`.
 - Print the `WEEKEND: size x0.5` line whenever `session.weekend_window` is true.

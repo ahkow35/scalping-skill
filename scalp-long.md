@@ -85,7 +85,11 @@ budget at full size, CUT SIZE — never tighten into noise.
 
 ## Output deltas (long)
 The ENTRY QUICK / DEEP and MANAGE skeletons come from `scalp-core.md`. Fill:
-- VERDICT vocabulary: `LONG-NOW | WAIT | NO-TRADE | VETOED | HALT`
+- VERDICT vocabulary:
+  `LONG-NOW | LONG-CLOSE | LONG-PROBE | WAIT | NO-TRADE | VETOED | HALT`
+  - `LONG-NOW` (high conviction → 100% of cap)
+  - `LONG-CLOSE` (med conviction → 50% of cap)
+  - `LONG-PROBE` (low conviction → 25% of cap)
 - The counter-case line is **"Bear case"** — one clause on what kills the long
   in the next 1h.
 - Triggers labelled A (sweep-reclaim) / B (momentum-break). No trigger C.

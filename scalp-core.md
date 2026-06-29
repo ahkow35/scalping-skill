@@ -19,28 +19,25 @@ stated position (or args), and the matching direction module is loaded.
 
 ## Step 0 — Behavioral preflight (RUN FIRST, before any data fetch)
 
-Two checks, NEITHER of which halts the analysis. Both are surfaced in the
-output; the scalp read always proceeds to data fetch and a verdict.
-- Cooldown (0a): informational WARNING only — printed, but zero effect on
-  verdict or conviction.
-- R16 vibe check (0b): leaks cap conviction and are flagged, but do not stop
-  the trade.
-(Macro veto in the direction module is separate and DOES still hard-stop —
-behavioral preflight no longer produces a HALT.)
+Two checks, NEITHER of which halts the analysis:
+- **Loss cooldown (0a)**: informational WARNING only — printed, but zero effect
+  on verdict or conviction. Surfaces a 24h pause when the last resolved trade
+  lost > 0.7R.
+- **R16 vibe check (0b)**: leaks cap conviction and are flagged. At low
+  conviction the entry fires at PROBE size (25%) instead of full.
+(The macro veto in the direction module is separate and DOES still hard-stop.)
 
-### 0a. Cooldown check (ENTRY + MANAGE)
+### 0a. Loss cooldown check (ENTRY + MANAGE)
 Read state from the audit log — works under /loop with no conversation:
 ```bash
 python3 /Users/nyanyk/Claude/research/scalp/behavioral.py
 ```
-Returns `cooldown {active, until_utc, reasons}`, `fomo_streak`, `oop_this_week`.
-- `cooldown.active` true → 24h loss cooldown (last resolved trade lost >0.7R)
-  or 3-day FOMO cooldown (last 2 entries both leaked). Print a prominent
-  `BEHAVIORAL WARNING: cooldown active (<reasons>) — informational only` line
-  and PROCEED with the full analysis. The cooldown does NOT block the entry
-  and does NOT affect the verdict or conviction — it is a heads-up that the
-  recent decision pattern was poor, nothing more. (Changed 2026-06-14 at
-  operator request: cooldown demoted from hard HALT to FYI warning.)
+Returns `cooldown {active, until_utc, reasons}`, `oop_this_week`.
+- `cooldown.active` true → 24h loss cooldown (last resolved trade lost >0.7R).
+  Print a prominent `BEHAVIORAL WARNING: cooldown active (<reason>) —
+  informational only` line and PROCEED with the full analysis. The cooldown
+  does NOT block the entry and does NOT affect the verdict or conviction —
+  it is a heads-up that the last trade was a material loss, nothing more.
 - If the log is empty / fresh slate, the script returns all-clear — omit the
   warning entirely.
 
@@ -60,7 +57,7 @@ Applies identically to long and short entries.
 Scoring:
 - 6/6 edge → conviction = high (no penalty)
 - 4–5/6 edge → conviction capped at **med**; name the leak rows
-- ≤3/6 edge → conviction capped at **low**; name all leak rows; strongly consider sitting out
+- ≤3/6 edge → conviction capped at **low**; name all leak rows; fire at PROBE size (25% of cap)
 - Any leak in Timing or State → add one explicit sentence in output: "BEHAVIORAL CAUTION: <row> leaked — size accordingly"
 
 Out-of-plan flag: if thesis is NOT in this week's Saturday plan but row 1 still
@@ -159,15 +156,36 @@ and this gate. Tiers: high → med → low.
    momentum entry and `breakout_vol_ok == false`, the breakout is unconfirmed →
    cut one tier (a breakout on thin volume is suspect).
 
-Cuts stack (take the minimum tier). If the gate drives an ACTION verdict to low
-AND macro/regime is also weak, prefer **WAIT** over a low-conviction entry.
-Surface the result on the FLOW line of the output. If `flow` is a string
-(DATA UNAVAILABLE) or all fields null, treat as `coverage_ok == false`.
+Cuts stack (take the minimum tier). If the gate drives the final conviction to
+low AND macro/regime is also weak, prefer **PROBE** over WAIT; only go to WAIT
+if no trigger fires at all. Surface the result on the FLOW line of the output.
+If `flow` is a string (DATA UNAVAILABLE) or all fields null, treat as
+`coverage_ok == false`.
 
 After Step 1/1b, hand off to the direction module: Step 2 (macro veto),
 Step 3 (structure), Step 4 (triggers) — or `scalp-passive.md` when `passive`
-is in args. Then return here for Steps 5–6. (Step 1b's conviction effect is
+is in args. Then return here for Steps 4b–6. (Step 1b's conviction effect is
 applied once the direction module has set the base verdict and side.)
+
+## Step 4b — Conviction-to-size verdict mapping
+
+Once triggers are defined (direction module Step 4) and the final conviction is
+set (the LOWEST tier across the R16 check and the flow gate), map to the
+verdict and size:
+
+| Final conviction | Verdict (long) | Verdict (short) | Size (% of cap) |
+|---|---|---|---|
+| high | LONG-NOW | SHORT-NOW | 100% |
+| med | LONG-CLOSE | SHORT-CLOSE | 50% |
+| low | LONG-PROBE | SHORT-PROBE | 25% |
+
+All six are **action verdicts** — they produce a JOURNAL STUB and are fired live.
+Only go to WAIT when no trigger fires. If the macro veto blocks, the verdict is
+VETOED / NO-TRADE regardless of conviction.
+
+The conviction tier shown on the VERDICT line reflects the **final** conviction
+after all cuts. The verdict name tells the user what size to use; the sizing
+math in Step 6b applies the verdict's multiplier.
 
 ## Step 5 — Session overlay (from session object)
 Warn if setup straddles asia_handoff_soon. If us_session_live and within
@@ -192,19 +210,28 @@ Returns `{equity, phase}`. Default cap follows phase:
   override, declared inline — not stored).
 - **2.0%** — Phase 2 cap (only if `phase` == 2).
 
+The verdict tier applies a multiplier to the cap:
+- NOW (high conviction): ×1.0 — full cap.
+- CLOSE (med conviction): ×0.5 — half cap.
+- PROBE (low conviction): ×0.25 — quarter cap.
+
 If `equity` is null, ask once and offer to save:
 `/scalp profile set equity <amount>`. Do NOT guess equity — without it, no
 action verdict can print sizing. Flag the cap in output only when non-default.
+Always state the verdict tier on the SIZE line so the multiplier is explicit.
 
 ### 6b. Sizing math (required in every trigger block — one inline)
-Single line per trigger, all values explicit:
+Single line per trigger, all values explicit. SIZE line includes the verdict
+tier multiplier:
 ```
-SIZE: $<E> × <C>% = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
+SIZE (NOW): $<E> × <C>% = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
+SIZE (CLOSE 50%): $<E> × <C>% × 0.5 = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
+SIZE (PROBE 25%): $<E> × <C>% × 0.25 = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
 ```
-Leverage is the OUTPUT (coins × entry / E), never an INPUT. Submit hard SL
-to Hyperliquid at entry — no mental stops, no widening (tightening is fine).
-The formula is direction-neutral: for a short, stop is above entry;
-`|entry − stop|` is unchanged.
+Show only the line matching the verdict tier. Leverage is the OUTPUT (coins ×
+entry / E), never an INPUT. Submit hard SL to Hyperliquid at entry — no mental
+stops, no widening (tightening is fine). The formula is direction-neutral: for
+a short, stop is above entry; `|entry − stop|` is unchanged.
 
 ### 6c. Discipline rules
 - Structural stop only — never noise-tight.
@@ -419,7 +446,8 @@ label (Bear case for long / Bull case for short), and the trigger labels.
 Fill the `<...>` slots accordingly.
 
 **Two QUICK shapes, selected by verdict:**
-- **Action verdict** (`LONG-NOW` / `SHORT-NOW`) → full block, JOURNAL STUB included.
+- **Action verdict** (`LONG-NOW` / `LONG-CLOSE` / `LONG-PROBE` / `SHORT-NOW` /
+  `SHORT-CLOSE` / `SHORT-PROBE`) → full block, JOURNAL STUB included.
 - **No-action verdict** (`WAIT` / `NO-TRADE` / `VETOED` / `HALT`) → compact
   block, JOURNAL STUB **suppressed** (no trade firing = nothing to journal yet).
 
@@ -431,7 +459,7 @@ Rules that apply to BOTH shapes:
 - Time header: `<sgt> | <utc>`. Append the US-session clause **only** when within
   1h of `us_open` or `us_close` (decision-relevant); omit otherwise.
 
-### QUICK — action verdict (LONG-NOW / SHORT-NOW)
+### QUICK — action verdict (NOW / CLOSE / PROBE)
 
 ```
 SCALP — <COIN> <LONG|SHORT> | <sgt> | <utc>  [US open in Xh | US close in Xh]
@@ -445,10 +473,9 @@ FLOW-GATE: <bias> (<avg_buy_share>%) | cov <max>% | [climax <dir> ×<r>] [div <b
 Book: micro <px> vs mid <px> (dev <±X> bps)  spread <Y> bps
 Triggers:
   A <name>: <entry> / SL <stop> / T1 <px> T2 <px> (RR <r1>/<r2>)
-    SIZE: $<E> × <C>% = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
-  B <name>: <entry> / SL <stop> / T1 <px> T2 <px> (RR <r1>/<r2>)
-    SIZE: $<E> × <C>% = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
-  [C <name>: ... — short module only]
+    SIZE (<TIER <N>%>): $<E> × <C>% × <mult> = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
+  [B <name>: <entry> / SL <stop> / T1 <px> T2 <px> (RR <r1>/<r2>)
+    SIZE (<TIER <N>%>): $<E> × <C>% × <mult> = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev]
 Invalidation: <one line>
 <Bear case|Bull case>: <one clause>
 Next: <e.g. 14:00 UTC 1h close — confirms by closing > X>
@@ -500,6 +527,10 @@ Examples:
 - `HYPE WAIT | med | 72.5↔73.4 @ 72.9 | dev −0.2bps | next 14:00 UTC`
 - `HYPE LONG-NOW | high | A 72.55 SL 72.20 RR 1.6 | size 28.6 @ 1.0x | dev +4bps`
   (when an entry is firing, swap the range field for the firing trigger detail)
+- `HYPE LONG-CLOSE | med | A 72.55 SL 72.20 RR 1.6 | size 14.3 @ 0.5x | dev +4bps`
+  (CLOSE = 50% of cap, med conviction)
+- `HYPE LONG-PROBE | low | A 69.50 SL 68.80 RR 2.1 | size 7.1 @ 0.25x | dev -2bps`
+  (PROBE = 25% of cap, low conviction)
 - `HYPE VETOED | n/a | reason: BTC −2.1% on rising vol | next 14:00`
 
 **TINY — MANAGE mode** (position open):
@@ -522,7 +553,11 @@ Rules for TINY:
   liveness heartbeat.)
 
 ## /loop usage (hands-off monitoring)
-**Default to TINY in `/loop`.** Examples:
+**Default to TINY in `/loop`.** Run `/loop 5m /scalp <COIN>` continuously to
+catch setups as they form — the audit log shows 1-12h gaps between entries
+without it, which means setups are being missed. The trade cache also builds
+meaningful taker-delta coverage (~30 min for 5m/15m windows) only under
+sustained /loop. Examples:
 - `/loop 5m /scalp HYPE` → TINY ENTRY every 5 min
 - `/loop 5m /scalp short HYPE` → TINY ENTRY short every 5 min
 - `/loop 5m /scalp manage HYPE 72.55` → TINY MANAGE every 5 min
@@ -535,6 +570,6 @@ so the user knows the loop is alive. The trade cache fills on every run
 whether or not output is emitted.
 
 Escalate to QUICK automatically on state change to an action verdict
-(`LONG-NOW` / `SHORT-NOW`) or any MANAGE event requiring a decision
+(`*-NOW` / `*-CLOSE` / `*-PROBE`) or any MANAGE event requiring a decision
 (STOP move, T1/T2 hit, TAPE flip, invalidation triggered). One QUICK on
 the transition, then back to TINY for the steady state.

@@ -25,7 +25,6 @@ def _entry(p, ts, verdict="WAIT", leaks=None, mode="ENTRY", plan_status=None):
 def test_empty_log_all_clear(tmp_path):
     st = behavioral.compute_behavioral_state(now_ms=NOW, path=_p(tmp_path))
     assert st["cooldown"]["active"] is False
-    assert st["fomo_streak"] == 0
     assert st["oop_this_week"] == 0
 
 
@@ -67,43 +66,6 @@ def test_win_no_cooldown(tmp_path):
     assert st["cooldown"]["active"] is False
 
 
-def test_fomo_cooldown_last_two_entries_leak(tmp_path):
-    p = _p(tmp_path)
-    _entry(p, NOW - 5 * HOUR, leaks=["timing"])
-    _entry(p, NOW - 2 * HOUR, leaks=["timing", "state"])
-    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
-    assert st["cooldown"]["active"] is True
-    assert st["cooldown"]["until_ms"] == NOW - 2 * HOUR + 3 * DAY
-    assert any("FOMO" in r for r in st["cooldown"]["reasons"])
-
-
-def test_fomo_needs_two_consecutive(tmp_path):
-    p = _p(tmp_path)
-    _entry(p, NOW - 5 * HOUR, leaks=[])          # clean
-    _entry(p, NOW - 2 * HOUR, leaks=["timing"])  # only latest leaks
-    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
-    assert st["cooldown"]["active"] is False
-    assert st["fomo_streak"] == 1
-
-
-def test_fomo_streak_counts_trailing_only(tmp_path):
-    p = _p(tmp_path)
-    _entry(p, NOW - 9 * HOUR, leaks=["timing"])
-    _entry(p, NOW - 6 * HOUR, leaks=[])          # breaks the streak
-    _entry(p, NOW - 3 * HOUR, leaks=["state"])
-    _entry(p, NOW - 1 * HOUR, leaks=["timing"])
-    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
-    assert st["fomo_streak"] == 2
-
-
-def test_manage_entries_ignored_for_fomo(tmp_path):
-    p = _p(tmp_path)
-    _entry(p, NOW - 5 * HOUR, leaks=["timing"])
-    _entry(p, NOW - 2 * HOUR, leaks=[], mode="MANAGE")  # not an ENTRY
-    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
-    assert st["fomo_streak"] == 1
-
-
 def test_oop_this_week_count(tmp_path):
     p = _p(tmp_path)
     _entry(p, NOW - 1 * HOUR, plan_status="OOP-1")    # this week
@@ -111,44 +73,6 @@ def test_oop_this_week_count(tmp_path):
     _entry(p, NOW - 2 * HOUR, plan_status="in-plan")  # not OOP
     st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
     assert st["oop_this_week"] == 1
-
-
-def test_combined_cooldown_takes_latest_window(tmp_path):
-    p = _p(tmp_path)
-    # loss cooldown ends sooner; fomo cooldown ends later -> report fomo end
-    tid = _entry(p, NOW - 5 * HOUR, leaks=["timing"])
-    audit_log.resolve_audit_entry(tid, -1.0, "stop",
-                                  resolved_at_ms=NOW - 4 * HOUR, path=p)
-    _entry(p, NOW - 2 * HOUR, leaks=["state"])
-    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
-    assert st["cooldown"]["active"] is True
-    assert st["cooldown"]["until_ms"] == NOW - 2 * HOUR + 3 * DAY
-    assert len(st["cooldown"]["reasons"]) == 2
-
-
-def _sfentry(p, family, leaks, ts, mode="ENTRY"):
-    """Helper for setup_family-aware entry tests."""
-    audit_log.write_audit_entry(
-        {"coin": "HYPE", "side": "long", "mode": mode, "verdict": "WAIT",
-         "setup_family": family, "behavioral": {"leaks": leaks}},
-        ts_ms=ts, path=p)
-
-
-def test_passive_entries_excluded_from_fomo_streak(tmp_path):
-    p = str(tmp_path / "a.jsonl")
-    _sfentry(p, "passive-fade", ["Timing"], 1779102720000)
-    _sfentry(p, "passive-fade", ["Timing"], 1779102730000)
-    st = behavioral.compute_behavioral_state(now_ms=1779102740000, path=p)
-    assert st["fomo_streak"] == 0
-    assert st["cooldown"]["active"] is False
-
-
-def test_directional_entries_still_build_fomo_streak(tmp_path):
-    p = str(tmp_path / "a.jsonl")
-    _sfentry(p, "directional", ["Timing"], 1779102720000)
-    _sfentry(p, "directional", ["Timing"], 1779102730000)
-    st = behavioral.compute_behavioral_state(now_ms=1779102740000, path=p)
-    assert st["fomo_streak"] == 2
 
 
 def test_passive_tilt_active_after_three_consecutive_losses(tmp_path):

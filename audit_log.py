@@ -140,7 +140,10 @@ def resolve_audit_entry(trade_id, outcome_r, exit_reason, lesson=None,
     return False
 
 
-ACTION_VERDICTS = ("LONG-NOW", "SHORT-NOW")
+ACTION_VERDICTS = (
+    "LONG-NOW", "LONG-CLOSE", "LONG-PROBE",
+    "SHORT-NOW", "SHORT-CLOSE", "SHORT-PROBE",
+)
 
 
 def attach_counterfactual(trade_id, counterfactual, path=None, force=False):
