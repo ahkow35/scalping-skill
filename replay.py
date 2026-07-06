@@ -38,6 +38,13 @@ import sys
 import time
 
 import audit_log
+from costs import (
+    COST_PER_FILL,
+    ROUND_TRIP_FILLS,
+    SLIPPAGE_FRAC,
+    TAKER_FEE,
+    round_trip_cost_r,
+)
 from fetch_market import _post_json, HL_INFO, iso_utc
 
 SCAN_INTERVAL = "5m"
@@ -56,26 +63,6 @@ NON_ACTION_VERDICTS = ("WAIT", "VETOED", "NO-TRADE", "HALT")
 # (Varma: "your system is signal + entry + exit — model all three").
 # Defaults are deliberately conservative (taker fees on every fill +
 # slippage). Tune to your real Hyperliquid fee tier and order types.
-TAKER_FEE = 0.00045        # ~0.045% per fill (Hyperliquid base tier, approx — verify)
-SLIPPAGE_FRAC = 0.0002     # 2 bps assumed slippage per fill (spread + impact)
-COST_PER_FILL = TAKER_FEE + SLIPPAGE_FRAC
-# A round trip = one full-size entry + one full-size worth of exits (a 50/50
-# ladder is two half-size exit legs = 1.0 full-size-equivalent). ≈ 2 fills.
-ROUND_TRIP_FILLS = 2.0
-
-
-def round_trip_cost_r(lv):
-    """Round-trip trading cost for one trade, in R units.
-
-    cost_$ ≈ ROUND_TRIP_FILLS × entry_price × COST_PER_FILL × size
-    risk_$  = size × risk_price
-    cost_R  = cost_$ / risk_$ = ROUND_TRIP_FILLS × COST_PER_FILL × entry / risk
-    """
-    if lv["risk"] <= 0:
-        return 0.0
-    return ROUND_TRIP_FILLS * COST_PER_FILL * abs(lv["entry"]) / lv["risk"]
-
-
 # ---------------------------------------------------------------- pure core
 
 def trigger_r_levels(trigger, side):

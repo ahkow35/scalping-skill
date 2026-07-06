@@ -56,6 +56,17 @@ def test_band_aggregate_buckets_usdc_depth():
     assert out[46.05] == 460.3
 
 
+def test_top_depth_sums_first_three_levels():
+    levels = [
+        {"px": "10.0", "sz": "1.0"},
+        {"px": "11.0", "sz": "2.0"},
+        {"px": "12.0", "sz": "3.0"},
+        {"px": "13.0", "sz": "100.0"},
+    ]
+    out = fm.top_depth(levels, n=3)
+    assert out == {"levels": 3, "sz": 6.0, "usdc": 68.0}
+
+
 import pytest
 
 
@@ -164,9 +175,23 @@ def test_data_unavailable_raises_named_error():
 
 
 def test_assemble_marks_macro_unavailable_when_btcd_fails(monkeypatch):
-    monkeypatch.setattr(fm, "fetch_ctx", lambda c, dex=None: {"coin": c, "mark": 46.0})
+    monkeypatch.setattr(fm, "fetch_core_meta", lambda: [
+        {"universe": [{"name": "HYPE"}, {"name": "BTC"}]},
+        [
+            {"markPx": "46.0", "oraclePx": "46.0", "midPx": "46.0",
+             "funding": "0", "premium": "0", "openInterest": "0",
+             "prevDayPx": "46.0", "dayNtlVlm": "0"},
+            {"markPx": "100000.0", "oraclePx": "100000.0", "midPx": "100000.0",
+             "funding": "0", "premium": "0", "openInterest": "0",
+             "prevDayPx": "100000.0", "dayNtlVlm": "0"},
+        ],
+    ])
     monkeypatch.setattr(fm, "fetch_candles", lambda *a: [])
     monkeypatch.setattr(fm, "fetch_l2", lambda c: {"asks": {}, "bids": {}})
+    # Isolate the taker-delta path too: without these, the test makes a live
+    # recentTrades call AND writes real trades into .trade_cache/.
+    monkeypatch.setattr(fm, "fetch_recent_trades", lambda coin: [])
+    monkeypatch.setattr(fm, "merge_trade_cache", lambda c, f, n: [])
 
     def boom():
         raise fm.DataUnavailable("DATA UNAVAILABLE: coingecko (down)")
@@ -385,10 +410,17 @@ def test_assemble_attaches_regime_block(monkeypatch):
 
     osc = fake_series([100, 101, 100, 101, 100, 101] * 8)
 
-    monkeypatch.setattr(fm, "fetch_ctx", lambda coin, dex=None: {
-        "coin": coin, "mark": 100.0, "oracle": 100.0, "mid": 100.0,
-        "funding": 0.0, "premium": 0.0, "oi_usdc": 0.0,
-        "prev_day_px": 100.0, "day_vol_usdc": 0.0})
+    monkeypatch.setattr(fm, "fetch_core_meta", lambda: [
+        {"universe": [{"name": "HYPE"}, {"name": "BTC"}]},
+        [
+            {"markPx": "100.0", "oraclePx": "100.0", "midPx": "100.0",
+             "funding": "0", "premium": "0", "openInterest": "0",
+             "prevDayPx": "100.0", "dayNtlVlm": "0"},
+            {"markPx": "100.0", "oraclePx": "100.0", "midPx": "100.0",
+             "funding": "0", "premium": "0", "openInterest": "0",
+             "prevDayPx": "100.0", "dayNtlVlm": "0"},
+        ],
+    ])
     monkeypatch.setattr(fm, "fetch_candles",
                         lambda coin, interval, s, e: osc)
     monkeypatch.setattr(fm, "fetch_l2", lambda coin: {

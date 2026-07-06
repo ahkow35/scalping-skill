@@ -96,7 +96,7 @@ do not skip an otherwise valid entry just because this is weak):
   null — zero volume in the window — treat the modifier as indeterminate and
   lean on coverage_pct + candle evidence instead.)
 
-Each: entry / stop / targets / R:R from live levels.
+Each: entry / stop / targets / gross R:R and net R:R from live levels.
 
 **Sweep stop rule (short)**: identify the next structural pool ABOVE entry
 (prior swing high, broken support, round-number magnet). Stop goes above

@@ -19,20 +19,33 @@ stated position (or args), and the matching direction module is loaded.
 
 ## Step 0 — Behavioral preflight (RUN FIRST, before any data fetch)
 
-Two checks, NEITHER of which halts the analysis:
-- **Loss cooldown (0a)**: informational WARNING only — printed, but zero effect
+Three checks:
+- **Daily stop (0a)**: HARD ENTRY gate. If active, emit `HALT (daily stop)`
+  and do not fetch market data. MANAGE still proceeds.
+- **Loss cooldown (0b)**: informational WARNING only — printed, but zero effect
   on verdict or conviction. Surfaces a 24h pause when the last resolved trade
   lost > 0.7R.
-- **R16 vibe check (0b)**: leaks cap conviction and are flagged. At low
+- **R16 vibe check (0c)**: leaks cap conviction and are flagged. At low
   conviction the entry fires at PROBE size (25%) instead of full.
 (The macro veto in the direction module is separate and DOES still hard-stop.)
 
-### 0a. Loss cooldown check (ENTRY + MANAGE)
+### 0a. Behavioral state + daily stop (ENTRY + MANAGE)
 Read state from the audit log — works under /loop with no conversation:
 ```bash
 python3 /Users/nyanyk/Claude/research/scalp/behavioral.py
 ```
-Returns `cooldown {active, until_utc, reasons}`, `oop_this_week`.
+Returns `daily_stop {active, until_utc, realized_r_24h, reason}`,
+`cooldown {active, until_utc, reasons}`, `oop_this_week`.
+- `daily_stop.active` true in ENTRY mode → HARD `HALT (daily stop)`.
+  Do not fetch market data, do not produce an action verdict, and do not let
+  R16/flow/macro override it. Print:
+  `BEHAVIORAL HALT: daily stop active (<reason>) until <until_utc> —
+  resolve stale open action entries if this looks wrong`.
+  Then emit the no-action HALT shape and audit-log it with
+  `behavioral.daily_stop` in the payload. This gate is keyed off
+  `resolved_at_ms`, so stale unresolved action entries can blunt it.
+- `daily_stop.active` true in MANAGE mode → print the same warning but PROCEED.
+  Managing an open position is never blocked.
 - `cooldown.active` true → 24h loss cooldown (last resolved trade lost >0.7R).
   Print a prominent `BEHAVIORAL WARNING: cooldown active (<reason>) —
   informational only` line and PROCEED with the full analysis. The cooldown
@@ -41,7 +54,7 @@ Returns `cooldown {active, until_utc, reasons}`, `oop_this_week`.
 - If the log is empty / fresh slate, the script returns all-clear — omit the
   warning entirely.
 
-### 0b. R16 vibe check (ENTRY only — skip in MANAGE)
+### 0c. R16 vibe check (ENTRY only — skip in MANAGE)
 One line per row. Leaks reduce conviction and are flagged — they do NOT halt the trade.
 Applies identically to long and short entries.
 
@@ -67,8 +80,11 @@ refuse a second OOP entry this week. Log `plan_status: "OOP-1"` so the count
 holds across /loop runs.
 
 Printing rule (silence-by-default):
-- CLEAR (cooldown ok, R16 6/6) → **omit the BEHAVIORAL line entirely**. The
+- CLEAR (daily stop clear, cooldown ok, R16 6/6) → **omit the BEHAVIORAL line entirely**. The
   default state does not need to be repeated every run.
+- Daily stop active → print `BEHAVIORAL HALT: daily stop active (<reason>)
+  until <until_utc> — resolve stale open action entries if this looks wrong`.
+  ENTRY emits `HALT (daily stop)` and stops before market fetch; MANAGE proceeds.
 - Any leak → print `BEHAVIORAL: <N>/6 edge — leaks: <row names> — conviction
   capped at <low|med>` and apply the conviction cap.
 - Cooldown active → print `BEHAVIORAL WARNING: cooldown active (<reason>) —
@@ -236,7 +252,10 @@ a short, stop is above entry; `|entry − stop|` is unchanged.
 ### 6c. Discipline rules
 - Structural stop only — never noise-tight.
 - If stop distance × required size > risk cap -> CUT SIZE, never tighten.
-- Skip any setup with R:R < 2:1 on T1 AND R:R-weighted-across-scales < 2.5:1.
+- Skip any setup with NET R:R < 2:1 on T1 AND NET
+  R:R-weighted-across-scales < 2.5:1. Net means gross R:R minus the shared
+  `costs.py` round-trip cost model (`TAKER_FEE + SLIPPAGE_FRAC`, two fills)
+  converted into R from the trigger's entry/stop distance.
 - One line: "what invalidates this".
 - **Add/pyramid rule**: adds require ALL of (a) better R:R than original
   entry, (b) smaller size than original (≤50%), (c) blended stop keeps
@@ -264,6 +283,25 @@ Once a trigger fires, choose market vs limit using `book.execution`:
   of fair value removes most adverse-selection on aggressive fills. This rule
   is execution-layer, not thesis-layer; it sharpens fills, it does not change
   what we trade.
+
+### 6e. Spread / slippage / depth guard (PROVISIONAL thresholds)
+
+Use `costs.execution_cost_r(entry, stop, spread_bps)` and `book.depth` when L2
+is present. Missing/suspect book falls through to Step 6d's current fallback;
+never block a fired trigger solely because book data is unavailable.
+
+- If live execution `cost_r > 0.20R` → maker-only entry: post limit, never
+  market-take. The setup can still fire, but do not pay taker into a cost-heavy
+  book.
+- If live execution `cost_r > 0.35R` → additionally downgrade one conviction
+  tier and flag `⚠ cost-heavy`. This can turn NOW → CLOSE or CLOSE → PROBE.
+- Depth cap: intended size must be ≤25% of visible top-3 depth on the entry
+  side. Longs consume ask depth (`book.depth.ask_top3.sz`); shorts consume bid
+  depth (`book.depth.bid_top3.sz`). If intended size is larger, cut size to the
+  cap and flag `DEPTH: size capped to 25% top-3`.
+
+These thresholds are provisional. Revisit after 20 resolved trades carry live
+cost/depth data.
 
 ## Step 7 — Audit logging (HARD, always when emitting QUICK / DEEP / MANAGE-action-required)
 
@@ -302,7 +340,7 @@ python3 /Users/nyanyk/Claude/research/scalp/audit_log.py log <<'JSON'
     "taker_delta_5m": {"delta_usdc": 5152, "buy_share_pct": 94.0, "coverage_pct": 0.1}
   },
   "triggers": {
-    "A": {"entry": 73.55, "stop": 72.30, "t1": 75.0, "t2": 75.83, "rr_t1": 1.16, "rr_t2": 1.82},
+    "A": {"entry": 73.55, "stop": 72.30, "t1": 75.0, "t2": 75.83, "rr_t1": 1.16, "rr_t2": 1.82, "net_rr_t1": 1.08, "net_rr_t2": 1.74},
     "B": null
   },
   "trigger_used": null,
@@ -470,11 +508,11 @@ WEATHER: <regime_label> (compression <x> | BTC-corr <x> | 2-sided <x> | fade_ok 
 Range <floor> – <ceiling> | now <mid> (<pos>)
 Flow: 5m <±$Xk> (<buy_share>%)  15m <±$Xk>  [cov <%>]
 FLOW-GATE: <bias> (<avg_buy_share>%) | cov <max>% | [climax <dir> ×<r>] [div <bearish|bullish>] [breakout-vol <ok|thin>] → conviction <unaffected | −1 | −2 | cap-low>
-Book: micro <px> vs mid <px> (dev <±X> bps)  spread <Y> bps
+Book: micro <px> vs mid <px> (dev <±X> bps)  spread <Y> bps  depth top3 bid/ask <B>/<A> <COIN>
 Triggers:
-  A <name>: <entry> / SL <stop> / T1 <px> T2 <px> (RR <r1>/<r2>)
+  A <name>: <entry> / SL <stop> / T1 <px> T2 <px> (RR <r1>/<r2>, net <n1>/<n2>)
     SIZE (<TIER <N>%>): $<E> × <C>% × <mult> = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
-  [B <name>: <entry> / SL <stop> / T1 <px> T2 <px> (RR <r1>/<r2>)
+  [B <name>: <entry> / SL <stop> / T1 <px> T2 <px> (RR <r1>/<r2>, net <n1>/<n2>)
     SIZE (<TIER <N>%>): $<E> × <C>% × <mult> = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev]
 Invalidation: <one line>
 <Bear case|Bull case>: <one clause>
@@ -532,6 +570,7 @@ Examples:
 - `HYPE LONG-PROBE | low | A 69.50 SL 68.80 RR 2.1 | size 7.1 @ 0.25x | dev -2bps`
   (PROBE = 25% of cap, low conviction)
 - `HYPE VETOED | n/a | reason: BTC −2.1% on rising vol | next 14:00`
+- `HYPE HALT | daily stop -2.1R (until 2026-07-07 03:20 UTC) | resolve stale opens if wrong`
 
 **TINY — MANAGE mode** (position open):
 ```
@@ -544,7 +583,10 @@ Examples:
 
 Rules for TINY:
 - Output the line and stop. No headers, no follow-up sentence, no "let me know".
-- On HALT: `<COIN> HALT | <reason>` — single line, no other fields.
+- TINY may show gross `RR` only for brevity, but the decision to fire or wait
+  still uses the NET R:R floor from Step 6c.
+- On daily-stop HALT: `<COIN> HALT | daily stop <±X.X>R (until <T>) | resolve stale opens if wrong`.
+- On other HALT: `<COIN> HALT | <reason>` — single line, no other fields.
 - On data-unavailable: `<COIN> DATA-UNAVAILABLE | <source>` and stop.
 - State-change discipline: in `/loop` TINY, **suppress output entirely** when
   the verdict, TAPE state, MACRO veto, conviction tier, and STOP/T1/T2/ADD

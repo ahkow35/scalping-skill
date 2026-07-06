@@ -76,7 +76,7 @@ Positioning from funding+premium+OI+taker_delta:
   - buy_share_pct 40–60% → standard; size normally
   - buy_share_pct < 40% → WEAK break (short-covering, not real buying);
     cut size or wait for the retest before entering
-Each: entry / stop / targets / R:R from live levels.
+Each: entry / stop / targets / gross R:R and net R:R from live levels.
 
 **Sweep stop rule**: identify the next structural pool below entry (prior
 swing low, broken resistance, round-number magnet). Stop goes below THAT,

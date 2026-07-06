@@ -1,5 +1,24 @@
 # Changelog — scalp skill
 
+## 2026-07-06 — Hardening: daily stop, net R:R, spread/depth guard
+
+**Summary:** Closed the top risk gaps from the July reviews.
+
+- **Test isolation:** factored core-perps `metaAndAssetCtxs` into
+  `fetch_core_meta()` so assemble tests patch the network boundary instead of
+  hitting live Hyperliquid DNS.
+- **Daily stop:** `behavioral.py` now emits `daily_stop`, active on trailing
+  24h realized R ≤ -2.0R or two consecutive directional losses ≤ -0.7R. The
+  skill treats it as a hard ENTRY `HALT (daily stop)` while MANAGE remains
+  allowed. Backtest against the current audit log found only 1 resolved trade,
+  so thresholds are conservative and not yet tunable.
+- **Net R:R:** added shared `costs.py`; replay imports the same fee/slippage
+  constants as live admission. Directional trigger admission is now net of
+  trading costs, and audit trigger payloads include `net_rr_t1` / `net_rr_t2`.
+- **Spread/depth:** fetcher now exposes top-3 L2 depth. Step 6e adds provisional
+  cost-heavy execution rules and a 25% top-3 depth size cap.
+- **Tests:** full suite green at 160 passing.
+
 ## 2026-06-29 — Noise-injection robustness test (Varma §7)
 
 **Summary:** Added the input-noise robustness lens to `backtest_thresholds.py`

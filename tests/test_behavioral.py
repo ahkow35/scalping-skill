@@ -66,6 +66,59 @@ def test_win_no_cooldown(tmp_path):
     assert st["cooldown"]["active"] is False
 
 
+def test_daily_stop_active_on_trailing_24h_realized_loss(tmp_path):
+    p = _p(tmp_path)
+    tid1 = _entry(p, NOW - 10 * HOUR)
+    audit_log.resolve_audit_entry(tid1, -1.2, "stop",
+                                  resolved_at_ms=NOW - 3 * HOUR, path=p)
+    tid2 = _entry(p, NOW - 9 * HOUR)
+    audit_log.resolve_audit_entry(tid2, -0.9, "stop",
+                                  resolved_at_ms=NOW - HOUR, path=p)
+    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
+    assert st["daily_stop"]["active"] is True
+    assert st["daily_stop"]["realized_r_24h"] == -2.1
+    assert "realized" in st["daily_stop"]["reason"]
+    assert st["daily_stop"]["until_ms"] == NOW - HOUR + DAY
+
+
+def test_daily_stop_uses_resolve_timestamp_not_entry_timestamp(tmp_path):
+    p = _p(tmp_path)
+    tid = _entry(p, NOW - 4 * DAY)
+    audit_log.resolve_audit_entry(tid, -2.1, "stop",
+                                  resolved_at_ms=NOW - HOUR, path=p)
+    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
+    assert st["daily_stop"]["active"] is True
+    assert st["daily_stop"]["realized_r_24h"] == -2.1
+
+
+def test_daily_stop_active_on_two_consecutive_directional_losses(tmp_path):
+    p = _p(tmp_path)
+    tid1 = _entry(p, NOW - 4 * HOUR, verdict="LONG-NOW")
+    audit_log.resolve_audit_entry(tid1, -0.8, "stop",
+                                  resolved_at_ms=NOW - 3 * HOUR, path=p)
+    tid2 = _entry(p, NOW - 2 * HOUR, verdict="SHORT-NOW")
+    audit_log.resolve_audit_entry(tid2, -0.7, "stop",
+                                  resolved_at_ms=NOW - HOUR, path=p)
+    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
+    assert st["daily_stop"]["active"] is True
+    assert "consecutive directional losses" in st["daily_stop"]["reason"]
+
+
+def test_daily_stop_consecutive_losses_ignores_passive_fades(tmp_path):
+    p = _p(tmp_path)
+    tid1 = _entry(p, NOW - 4 * HOUR, verdict="LONG-NOW")
+    audit_log.resolve_audit_entry(tid1, -0.8, "stop",
+                                  resolved_at_ms=NOW - 3 * HOUR, path=p)
+    tid2 = audit_log.write_audit_entry(
+        {"coin": "HYPE", "side": "long", "mode": "ENTRY", "verdict": "FADE-LONG-NOW",
+         "setup_family": "passive-fade"}, ts_ms=NOW - 2 * HOUR, path=p)
+    audit_log.resolve_audit_entry(tid2, -0.8, "stop",
+                                  resolved_at_ms=NOW - HOUR, path=p)
+    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
+    assert st["daily_stop"]["active"] is False
+    assert st["daily_stop"]["realized_r_24h"] == -1.6
+
+
 def test_oop_this_week_count(tmp_path):
     p = _p(tmp_path)
     _entry(p, NOW - 1 * HOUR, plan_status="OOP-1")    # this week

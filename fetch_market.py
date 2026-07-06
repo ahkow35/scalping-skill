@@ -124,9 +124,28 @@ def compute_microprice(bids, asks):
     }
 
 
+def top_depth(levels, n=3):
+    """Visible depth across the first n L2 levels, in coin units and USDC."""
+    rows = levels[:n] if levels else []
+    sz = 0.0
+    usdc = 0.0
+    for lv in rows:
+        p = float(lv["px"])
+        q = float(lv["sz"])
+        sz += q
+        usdc += p * q
+    return {"levels": len(rows), "sz": round(sz, 6), "usdc": round(usdc, 2)}
+
+
 import json
 import os
 import urllib.request
+
+try:
+    import requests as _requests
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
 
 HL_INFO = "https://api.hyperliquid.xyz/info"
 CG_GLOBAL = "https://api.coingecko.com/api/v3/global"
@@ -137,12 +156,19 @@ class DataUnavailable(Exception):
 
 
 def _post_json(url, payload, source):
+    # 2026-06-30: urllib mishandles HL's chunked responses (IncompleteRead at ~42KB).
+    # requests handles them correctly. Fall back to urllib only if requests unavailable.
     try:
-        req = urllib.request.Request(
-            url, data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.loads(r.read())
+        if _HAS_REQUESTS:
+            r = _requests.post(url, json=payload, timeout=20)
+            r.raise_for_status()
+            return r.json()
+        else:
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return json.loads(r.read())
     except Exception as exc:
         raise DataUnavailable(f"DATA UNAVAILABLE: {source} ({exc})")
 
@@ -352,6 +378,15 @@ def fetch_ctx(coin, dex=None):
     raise DataUnavailable(f"DATA UNAVAILABLE: hyperliquid (coin {coin} not found in {where})")
 
 
+def fetch_core_meta():
+    """Fetch the full core-perps meta/context payload once.
+
+    This is factored out so assemble() keeps its single-call optimization while
+    unit tests can replace the network boundary directly.
+    """
+    return _post_json(HL_INFO, {"type": "metaAndAssetCtxs"}, "hyperliquid")
+
+
 def fetch_candles(coin, interval, start_ms, end_ms):
     rows = _post_json(HL_INFO, {"type": "candleSnapshot", "req": {
         "coin": coin, "interval": interval,
@@ -401,6 +436,10 @@ def fetch_l2(coin):
     return {
         "asks": band_aggregate(asks),
         "bids": band_aggregate(bids),
+        "depth": {
+            "bid_top3": top_depth(bids, 3),
+            "ask_top3": top_depth(asks, 3),
+        },
         "execution": compute_microprice(bids, asks),
     }
 
@@ -536,21 +575,42 @@ def assemble(coin, deep=False, now_ms=None):
     _, primary_dex = parse_coin_arg(coin) if isinstance(coin, str) else (coin, None)
     out = {"session": build_session(now_ms), "primary": coin, "primary_dex": primary_dex}
 
-    out["ctx"] = fetch_ctx(coin, dex=primary_dex)
-    out["btc_ctx"] = fetch_ctx("BTC")
+    # Single metaAndAssetCtxs call for both primary coin and BTC — avoids two 71KB hits.
+    # HIP-3 dex coins still need a separate dex= call (not in core universe).
+    if primary_dex is None:
+        _meta = fetch_core_meta()
+        def _extract(c):
+            for i, u in enumerate(_meta[0]["universe"]):
+                if u["name"] == c:
+                    x = _meta[1][i]
+                    return {"coin": c, "mark": float(x["markPx"]),
+                            "oracle": float(x["oraclePx"]), "mid": float(x["midPx"]),
+                            "funding": float(x["funding"]), "premium": float(x["premium"]),
+                            "oi_usdc": float(x["openInterest"]) * float(x["markPx"]),
+                            "prev_day_px": float(x["prevDayPx"]),
+                            "day_vol_usdc": float(x["dayNtlVlm"])}
+            raise DataUnavailable(f"DATA UNAVAILABLE: hyperliquid (coin {c} not found in core perps)")
+        out["ctx"] = _extract(coin)
+        out["btc_ctx"] = _extract("BTC")
+    else:
+        out["ctx"] = fetch_ctx(coin, dex=primary_dex)
+        out["btc_ctx"] = fetch_ctx("BTC")
 
     # 1d always included (365d) — needed for ATH / discovery state detection.
     # Payload stays small (~one row per day) so the cost is negligible.
     # 15m window = 12h (~48 bars): the regime classifier needs >=20 bars for
     # range_compression and >=32 for btc_corr; the old 2.5h (~10 bars) left both
     # None -> regime always "unknown" -> passive fade_ok never armed.
-    spans = [("1d", 365 * _DAY), ("1h", 3 * _DAY), ("15m", 43_200_000), ("5m", 5400000)]
+    # 2026-06-30: HL candle API is truncating large payloads (IncompleteRead /
+    # RemoteDisconnected). Safe ceilings found empirically: 1d≤50d, 1h≤2d, 4h≤7d.
+    # ATH detection limited to 50d lookback until HL fixes. Restore originals when OK.
+    spans = [("1d", 50 * _DAY), ("1h", 2 * _DAY), ("15m", 43_200_000), ("5m", 5400000)]
     if deep:
-        spans = spans[:1] + [("4h", 12 * _DAY)] + spans[1:]
+        spans = spans[:1] + [("4h", 7 * _DAY)] + spans[1:]
     out["candles"] = {iv: fetch_candles(coin, iv, now_ms - span, now_ms)
                       for iv, span in spans}
     out["btc_candles"] = {iv: fetch_candles("BTC", iv, now_ms - span, now_ms)
-                          for iv, span in (("4h", 12 * _DAY), ("1h", 3 * _DAY),
+                          for iv, span in (("4h", 7 * _DAY), ("1h", 2 * _DAY),
                                            ("15m", 43_200_000))}
     out["book"] = fetch_l2(coin)
     out["ath_state"] = compute_ath_state(out["candles"].get("1d", []), out["ctx"]["mark"])

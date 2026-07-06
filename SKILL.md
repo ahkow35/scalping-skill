@@ -185,12 +185,13 @@ Follow `scalp-core.md` + the direction module exactly.
 - `passive` in args = PASSIVE mode (loads scalp-passive.md; both-sides fade).
 - `/loop` invocations default to TINY unless QUICK/DEEP is explicit.
 - Coin arg defaults to HYPE.
-- **Step 0 Behavioral preflight runs FIRST** (cooldown + R16 vibe check).
-  Read cooldown/FOMO state from `python3 behavioral.py` (derived from the
-  audit log — works under /loop with no conversation). Cooldown active →
-  print `BEHAVIORAL WARNING: cooldown active (...) — informational only` and
-  PROCEED with full analysis (no halt, no verdict/conviction effect). R16
-  leaks → conviction penalty + named warning; trade proceeds.
+- **Step 0 Behavioral preflight runs FIRST** (daily stop + cooldown + R16 vibe
+  check). Read state from `python3 behavioral.py` (derived from the audit log —
+  works under /loop with no conversation). `daily_stop.active` in ENTRY mode →
+  HARD `HALT (daily stop)` before market fetch; MANAGE still proceeds. Cooldown
+  active → print `BEHAVIORAL WARNING: cooldown active (...) — informational
+  only` and PROCEED with full analysis (no halt, no verdict/conviction effect).
+  R16 leaks → conviction penalty + named warning; trade proceeds.
 - Macro veto runs SECOND, from the direction module. Includes hard
   NO-TRADE on FOMC/CPI/NFP/PCE days + extreme funding (long: >+0.03%/8h;
   short: <-0.03%/8h).
@@ -200,6 +201,8 @@ Follow `scalp-core.md` + the direction module exactly.
   declared inline. Flag the cap when non-default.
 - Every trigger block shows the sizing math (equity × cap = $risk;
   $risk ÷ stop_distance = position size; leverage derived, not chosen).
+- Directional triggers must pass the NET R:R floor from `costs.py`; show gross
+  and net R:R in QUICK/DEEP trigger blocks.
 - JOURNAL STUB is shown for ACTION verdicts (LONG-NOW / SHORT-NOW) and
   MANAGE-action-required only. No-action outputs (WAIT/VETOED/NO-TRADE/HALT
   and compact MANAGE) are still audit-logged but suppress the stub.
@@ -209,6 +212,9 @@ Follow `scalp-core.md` + the direction module exactly.
   aggressor bias vs side, climax, divergence, breakout-volume) — it can only
   CUT conviction. `coverage_ok == false` (max coverage <50%) caps conviction
   at low: you're scalping half-blind (Varma §8a).
+- Apply Step 6e spread/depth guard when L2 is available: cost-heavy books force
+  maker-only or conviction downgrade; intended size is capped to 25% of visible
+  top-3 entry-side depth. Missing book data does not block a fired trigger.
 - Short module only: apply the weekend modifier when
   `session.weekend_window` is true (size ×0.5).
 - Never inline-curl; only use `fetch_market.py` output.
