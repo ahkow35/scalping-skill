@@ -48,6 +48,23 @@ Positioning from funding+premium+OI+taker_delta:
 - Funding ~0 or negative + premium negative + low buy_share = NOT crowded
 - Funding rising positive + premium positive + buy_share extreme = crowded long
 
+**OI×price read** (from `out['oi']` — READ-ONLY Phase 1, context only, no
+verdict/conviction effect):
+- `new-longs` (price↑ OI↑) — fresh longs entering; trend-supportive for a
+  momentum-break (trigger B).
+- `short-covering` (price↑ OI↓) — the rally is positions CLOSING, not new
+  money; corroborates the WEAK-break read below (buy_share < 40%). Say so
+  when both agree.
+- `long-unwind` (price↓ OI↓) — capitulation-prone; the flush that feeds a
+  sweep-reclaim (trigger A).
+- `new-shorts` (price↓ OI↑) — fresh supply; don't knife-catch the low.
+- `read: null` = cache warming — note `OI: warming` and move on.
+
+**VWAP bias** (from `out['vwap']` — READ-ONLY Phase 1): mid above the UTC-day
+VWAP = intraday long bias confirmed. Entering a long with mid BELOW VWAP →
+add the flag `fighting VWAP` to the trigger line (context only — no
+conviction effect until backtested).
+
 **ATH / discovery state** (read `ath_state` from fetch — it's already computed):
 - `below_ath` — standard structure analysis; ceiling = recent prior resistance.
 - `approaching_ath` (within 5% of ATH) — ATH is the dominant magnet AND the

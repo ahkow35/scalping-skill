@@ -215,6 +215,10 @@ Follow `scalp-core.md` + the direction module exactly.
 - Apply Step 6e spread/depth guard when L2 is available: cost-heavy books force
   maker-only or conviction downgrade; intended size is capped to 25% of visible
   top-3 entry-side depth. Missing book data does not block a fired trigger.
+- Surface the VWAP and OI context lines from `out['vwap']` / `out['oi']`
+  (READ-ONLY Phase 1 — they never change verdicts or conviction; `fighting
+  VWAP` and the OI×price read are context flags only). Passive mode uses
+  `out['vwap'].vwap` as its deterministic mean.
 - Short module only: apply the weekend modifier when
   `session.weekend_window` is true (size ×0.5).
 - Never inline-curl; only use `fetch_market.py` output.

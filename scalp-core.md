@@ -131,6 +131,21 @@ order-flow insight that directional edge is poor in `quiet` / `correlated-chop`
 tape: when `regime_label` is `quiet` or `correlated-chop`, add one sentence to
 the output noting directional edge is structurally low in this tape.
 
+The output includes `vwap` — a deterministic UTC-day-anchored VWAP (1h
+hlc3×volume), with `side` (mid above/below) and `dev_bps`. **Phase 1:
+READ-ONLY** — it does NOT change verdicts or conviction. Surface it on the
+Range line; the direction modules say how to read it (bias context + a
+`fighting VWAP` flag). `None` = no volume yet today (just after UTC
+midnight). Passive mode uses it as the deterministic mean.
+
+The output includes `oi` — open-interest change over 1h/24h windows from a
+local rolling cache (`.oi_cache.jsonl`; Hyperliquid only exposes current OI,
+so the change signal builds across repeated /scalp calls, same as BTC.D).
+Each window carries `oi_chg_pct`, `price_chg_pct` (window-aligned, from the
+same cached sample) and a `read` ∈ {new-longs, short-covering, new-shorts,
+long-unwind, flat, None}. **Phase 1: READ-ONLY** — context only; `read: None`
+= cache warming for that window; say so instead of estimating.
+
 The output includes `session.weekend_window` — true Fri 20:00 → Sun 20:00 UTC.
 The short module uses it; the long module ignores it.
 
@@ -494,6 +509,9 @@ Rules that apply to BOTH shapes:
 - Omit the `WEEKEND:` line unless `session.weekend_window=true` AND direction=short.
 - Omit the `Risk cap:` line when it's the 0.5% default; flag it only when 1% / 2%
   is in play. Otherwise include it on the VERDICT line as `Risk: <X%>`.
+- VWAP + OI are READ-ONLY context (Phase 1): they never change the verdict or
+  conviction. Omit the VWAP segment when `vwap` is null; print the OI line as
+  `OI: warming (<coverage_h>h)` while both window reads are null.
 - Time header: `<sgt> | <utc>`. Append the US-session clause **only** when within
   1h of `us_open` or `us_close` (decision-relevant); omit otherwise.
 
@@ -505,9 +523,10 @@ SCALP — <COIN> <LONG|SHORT> | <sgt> | <utc>  [US open in Xh | US close in Xh]
 VERDICT: <V>  MACRO: <CLEAR|VETO ...>  Conviction: <low|med|high>  [Risk: <X%> if non-default]
 WEATHER: <regime_label> (compression <x> | BTC-corr <x> | 2-sided <x> | fade_ok <bool>)
 [WEEKEND: size x0.5 — short + weekend only]
-Range <floor> – <ceiling> | now <mid> (<pos>)
+Range <floor> – <ceiling> | now <mid> (<pos>) | VWAP <px> (<above|below> <±X>bps)
 Flow: 5m <±$Xk> (<buy_share>%)  15m <±$Xk>  [cov <%>]
 FLOW-GATE: <bias> (<avg_buy_share>%) | cov <max>% | [climax <dir> ×<r>] [div <bearish|bullish>] [breakout-vol <ok|thin>] → conviction <unaffected | −1 | −2 | cap-low>
+OI: $<X>M | 1h <±%> → <read> | 24h <±%> → <read>   (or "warming <h>h" when read is null)
 Book: micro <px> vs mid <px> (dev <±X> bps)  spread <Y> bps  depth top3 bid/ask <B>/<A> <COIN>
 Triggers:
   A <name>: <entry> / SL <stop> / T1 <px> T2 <px> (RR <r1>/<r2>, net <n1>/<n2>)

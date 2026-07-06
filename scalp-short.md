@@ -62,6 +62,24 @@ Positioning from funding+premium+OI+taker_delta (inverted read):
 - Funding negative + premium negative + sell_share extreme = crowded short =
   AVOID (no fuel, squeeze risk)
 
+**OI×price read** (from `out['oi']` — READ-ONLY Phase 1, context only, no
+verdict/conviction effect):
+- `new-shorts` (price↓ OI↑) — fresh supply; downtrend-supportive, but note
+  crowding risk if funding is already deeply negative.
+- `long-unwind` (price↓ OI↓) — the decline is longs CLOSING; it can exhaust
+  into a bounce — prefer the retest entry over chasing the low.
+- `short-covering` (price↑ OI↓) — squeeze in progress; the bounce is fuel
+  burning off, not new demand — supportive of a lower-high rejection
+  (trigger B) once it stalls.
+- `new-longs` (price↑ OI↑) — fresh longs entering; anti-short, don't fade
+  real demand.
+- `read: null` = cache warming — note `OI: warming` and move on.
+
+**VWAP bias** (from `out['vwap']` — READ-ONLY Phase 1): mid below the UTC-day
+VWAP = intraday short bias confirmed. Entering a short with mid ABOVE VWAP →
+add the flag `fighting VWAP` to the trigger line (context only — no
+conviction effect until backtested).
+
 **ATH / discovery state** (read `ath_state` from fetch — it's already computed):
 - `below_ath` — standard structure analysis; ceiling = recent prior resistance.
 - `approaching_ath` / `at_ath_zone` — PRIME short zone, but ONLY if the first

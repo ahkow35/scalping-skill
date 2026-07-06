@@ -1,5 +1,25 @@
 # Changelog — scalp skill
 
+## 2026-07-07 — VWAP + OI context (READ-ONLY Phase 1)
+
+**Summary:** The two top deferred-backlog items from the July reviews, landed
+read-only per the regime-classifier precedent — context only, zero
+verdict/conviction effect until backtested.
+
+- **VWAP:** `compute_vwap()` — deterministic UTC-day-anchored VWAP (1h
+  hlc3×volume) in `out['vwap']` with side + dev_bps. Shown on the Range line;
+  direction modules flag `fighting VWAP` entries as context. Passive mode's
+  mean is now this value instead of LLM-computed prose.
+- **OI:** new rolling `.oi_cache.jsonl` (btcd-cache pattern — Hyperliquid only
+  exposes current OI). `out['oi']` carries 1h/24h OI + window-aligned price
+  change and a classic OI×price read (new-longs / short-covering / new-shorts /
+  long-unwind / flat; noise thresholds provisional). Direction modules document
+  the doctrine per side. `read: null` = cache warming.
+- **Tests:** VWAP/OI unit tests + assemble isolation for the new cache write +
+  consistency-lint guards. Suite green at 169 passing, no network.
+- **Files:** fetch_market.py, scalp-core.md, scalp-long.md, scalp-short.md,
+  scalp-passive.md, SKILL.md, .gitignore, tests.
+
 ## 2026-07-06 — Hardening: daily stop, net R:R, spread/depth guard
 
 **Summary:** Closed the top risk gaps from the July reviews.

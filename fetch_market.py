@@ -337,6 +337,130 @@ def compute_btcd_24h_change(rows, now_ms, current_btcd):
             "btc_d_coverage_h": coverage_h}
 
 
+def compute_vwap(candles, now_ms):
+    """UTC-day-anchored VWAP from candles (hlc3 × volume).
+
+    Anchor = 00:00 UTC of the current day. Candle `t` is an ISO-UTC string,
+    which orders lexicographically, so the day filter is a string compare.
+    Bars are the granularity limit: the bar spanning midnight is excluded
+    whole. Returns {vwap, bars, anchor} or None when no volume traded yet.
+    READ-ONLY Phase 1: context only, no verdict effect.
+    """
+    anchor_iso = iso_utc(now_ms - (now_ms % 86_400_000))
+    pv = 0.0
+    vol = 0.0
+    bars = 0
+    for k in candles or []:
+        if k["t"] < anchor_iso:
+            continue
+        typical = (k["h"] + k["l"] + k["c"]) / 3.0
+        pv += typical * k["v"]
+        vol += k["v"]
+        bars += 1
+    if vol <= 0:
+        return None
+    return {"vwap": round(pv / vol, 6), "bars": bars, "anchor": anchor_iso}
+
+
+OI_CACHE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ".oi_cache.jsonl")
+OI_CACHE_MAX_AGE_MS = 48 * 60 * 60 * 1000            # keep 48h of snapshots
+# (window name, lookback, tolerance around the lookback mark)
+OI_WINDOWS = (("1h", 3_600_000, 15 * 60 * 1000),
+              ("24h", 86_400_000, 90 * 60 * 1000))
+OI_FLAT_PCT = 0.5      # |ΔOI| below this = flat (PROVISIONAL — revisit w/ data)
+OI_PRICE_FLAT_PCT = 0.3  # |Δprice| below this = flat (PROVISIONAL)
+
+
+def update_oi_cache(coin, oi_usdc, mark, now_ms, path=None):
+    """Append the current OI snapshot to the local rolling multi-coin cache.
+
+    Hyperliquid only exposes CURRENT open interest — like BTC.D, the change
+    signal is built ourselves across repeated /scalp calls. Cache is JSONL:
+    one `{"ts", "coin", "oi_usdc", "mark"}` per line; rows older than
+    OI_CACHE_MAX_AGE_MS are dropped on write.
+
+    Returns this coin's on-disk history (sorted ascending by ts).
+    """
+    path = path or OI_CACHE_PATH
+    cutoff = now_ms - OI_CACHE_MAX_AGE_MS
+    rows = []
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if int(r.get("ts", 0)) < cutoff:
+                        continue
+                    rows.append(r)
+        except OSError:
+            pass
+
+    rows.append({"ts": int(now_ms), "coin": coin,
+                 "oi_usdc": float(oi_usdc), "mark": float(mark)})
+    rows.sort(key=lambda r: int(r["ts"]))
+
+    tmp = path + ".tmp"
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(tmp, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    os.replace(tmp, path)
+    return [r for r in rows if r.get("coin") == coin]
+
+
+def compute_oi_change(rows, now_ms, current_oi, current_mark,
+                      lookback_ms, tol_ms):
+    """OI and price change vs the cached sample nearest (now − lookback).
+
+    Price change uses the SAME cached sample's mark, so the two deltas are
+    window-aligned by construction. None values = cache still warming for
+    this window — callers surface that instead of estimating.
+    """
+    target = now_ms - lookback_ms
+    in_window = [r for r in rows
+                 if target - tol_ms <= int(r["ts"]) <= target + tol_ms]
+    empty = {"oi_chg_pct": None, "price_chg_pct": None, "sample_age_min": None}
+    if not in_window:
+        return empty
+    sample = min(in_window, key=lambda r: abs(int(r["ts"]) - target))
+    base_oi = float(sample["oi_usdc"])
+    base_px = float(sample["mark"])
+    if base_oi <= 0 or base_px <= 0:
+        return empty
+    return {
+        "oi_chg_pct": round((float(current_oi) - base_oi) / base_oi * 100, 2),
+        "price_chg_pct": round(
+            (float(current_mark) - base_px) / base_px * 100, 2),
+        "sample_age_min": round((now_ms - int(sample["ts"])) / 60_000, 1),
+    }
+
+
+def classify_oi_read(price_chg_pct, oi_chg_pct):
+    """Classic OI×price matrix. 'flat' when either move is inside noise.
+
+    new-longs      price↑ OI↑  — fresh longs, trend-supportive
+    short-covering price↑ OI↓  — rally on position closing, suspect
+    new-shorts     price↓ OI↑  — fresh supply, downtrend-supportive
+    long-unwind    price↓ OI↓  — capitulation-prone, decline may exhaust
+    """
+    if price_chg_pct is None or oi_chg_pct is None:
+        return None
+    if abs(oi_chg_pct) < OI_FLAT_PCT or abs(price_chg_pct) < OI_PRICE_FLAT_PCT:
+        return "flat"
+    if price_chg_pct > 0:
+        return "new-longs" if oi_chg_pct > 0 else "short-covering"
+    return "new-shorts" if oi_chg_pct > 0 else "long-unwind"
+
+
 def parse_coin_arg(raw):
     """Parse a coin string into (canonical_coin, dex_or_None).
 
@@ -633,6 +757,36 @@ def assemble(coin, deep=False, now_ms=None):
         out.get("taker_delta"), out.get("book"))
 
     out["flow"] = flow_mod.classify(out["candles"], out.get("taker_delta"))
+
+    # VWAP — UTC-day anchored, from 1h candles. READ-ONLY Phase 1.
+    vw = compute_vwap(out["candles"].get("1h", []), now_ms)
+    if vw is not None:
+        mid = out["ctx"]["mid"]
+        vw["side"] = "above" if mid >= vw["vwap"] else "below"
+        vw["dev_bps"] = round((mid - vw["vwap"]) / vw["vwap"] * 10_000, 1)
+        vw["_note"] = ("UTC-day anchored VWAP (1h hlc3×vol). READ-ONLY "
+                       "context — no verdict/conviction effect (Phase 1).")
+    out["vwap"] = vw  # None = no volume/candles yet today
+
+    # OI change — from the local rolling cache (HL only exposes current OI).
+    # READ-ONLY Phase 1. None values = cache warming for that window.
+    oi_rows = update_oi_cache(
+        coin, out["ctx"]["oi_usdc"], out["ctx"]["mark"], now_ms)
+    oi = {
+        "oi_usdc": out["ctx"]["oi_usdc"],
+        "coverage_h": (round((now_ms - int(oi_rows[0]["ts"])) / 3_600_000, 1)
+                       if oi_rows else 0.0),
+    }
+    for wname, lookback, tol in OI_WINDOWS:
+        chg = compute_oi_change(oi_rows, now_ms, out["ctx"]["oi_usdc"],
+                                out["ctx"]["mark"], lookback, tol)
+        chg["read"] = classify_oi_read(
+            chg["price_chg_pct"], chg["oi_chg_pct"])
+        oi[wname] = chg
+    oi["_note"] = ("OI×price read from local rolling cache (fed by repeated "
+                   "/scalp calls). READ-ONLY context — no verdict/conviction "
+                   "effect (Phase 1). read=None = cache warming.")
+    out["oi"] = oi
 
     _live_exc = None
     parsed_btcd = None

@@ -91,3 +91,35 @@ def test_skill_routes_passive_invocation():
         text = f.read()
     assert "scalp-passive.md" in text
     assert "passive" in text.lower()
+
+
+def test_core_documents_vwap_and_oi_context_lines():
+    core = os.path.join(os.path.dirname(__file__), "..", "scalp-core.md")
+    with open(core) as f:
+        text = f.read()
+    # data contract
+    assert "out['vwap']" in text or "`vwap`" in text
+    assert "`oi`" in text or "out['oi']" in text
+    # output template lines
+    assert "VWAP" in text
+    assert "OI:" in text
+    # Phase-1 read-only promise must be stated for both
+    assert text.count("READ-ONLY") >= 3  # regime + vwap + oi
+
+
+def test_direction_modules_document_oi_read_and_vwap_bias():
+    for name in ("scalp-long.md", "scalp-short.md"):
+        path = os.path.join(os.path.dirname(__file__), "..", name)
+        with open(path) as f:
+            text = f.read()
+        for read in ("new-longs", "short-covering", "new-shorts",
+                     "long-unwind"):
+            assert read in text, f"{name} missing OI read '{read}'"
+        assert "fighting VWAP" in text, f"{name} missing VWAP bias flag"
+
+
+def test_passive_mean_is_deterministic_vwap():
+    path = os.path.join(os.path.dirname(__file__), "..", "scalp-passive.md")
+    with open(path) as f:
+        text = f.read()
+    assert "out['vwap']" in text

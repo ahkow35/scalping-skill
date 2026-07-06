@@ -95,9 +95,28 @@ check. Step 6d explicitly never blocks on missing microprice (keep that).
 - [x] All three thresholds marked PROVISIONAL in the md — revisit after 20
       resolved trades carry cost data.
 
+## Phase 4 — VWAP + OI context (added 2026-07-07)
+
+Both land READ-ONLY (regime-classifier precedent): surfaced as context,
+zero verdict/conviction effect until backtested.
+
+- [x] `compute_vwap()` — UTC-day-anchored VWAP from 1h hlc3×vol candles;
+      `out['vwap']` with side/dev_bps. Passive mode's mean is now this
+      deterministic value (was LLM-computed prose).
+- [x] OI history cache `.oi_cache.jsonl` (btcd-cache pattern — HL only
+      exposes current OI): `update_oi_cache` / `compute_oi_change` (1h ±15m,
+      24h ±90m tolerance; price change window-aligned from the same cached
+      sample) / `classify_oi_read` (new-longs, short-covering, new-shorts,
+      long-unwind, flat; noise thresholds 0.5% OI / 0.3% price PROVISIONAL).
+- [x] Output: VWAP on the Range line, OI line after FLOW-GATE, warming
+      forms; direction modules document the OI×price doctrine + `fighting
+      VWAP` flag; consistency lint extended to guard all of it.
+- [x] Promotion criterion: backtest VWAP-side and OI-read conditioning once
+      candle-history depth allows (HL API currently truncates long windows);
+      only then may either signal cut conviction.
+
 ## Deferred backlog (explicitly NOT this run)
 
-VWAP line in directional modules; OI-delta rules (price/OI divergence);
 HTF-alignment check in QUICK; re-entry-after-stop cap; directional
 trades-per-day soft cap; default directional time-stop; token-unlock /
 crypto-native event calendar.

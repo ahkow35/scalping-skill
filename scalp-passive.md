@@ -31,7 +31,9 @@ edge price is currently AT.
 ## Step 3 — Structure (passive)
 
 From candles: **floor** (≥2 tested lows), **ceiling** (≥2 tested highs),
-**mean** (session VWAP; fallback range-mid = (floor+ceiling)/2). The `ranging`
+**mean** (deterministic: `out['vwap'].vwap` — UTC-day-anchored session VWAP
+from the fetch; fallback range-mid = (floor+ceiling)/2 when `vwap` is null,
+e.g. just after UTC midnight). The `ranging`
 regime label already implies a real range, not a coiling breakout. Define the
 **edge zones** = the outer third of the range nearest each boundary. Price
 between the inner thirds is mid-range → **WAIT** (no fade arms mid-range).
@@ -71,7 +73,8 @@ target / R per step.
 
 ## Exit (passive) — to-the-mean
 
-Target = the mean (session VWAP / range-mid). On fill, post a limit at the mean.
+Target = the mean (`out['vwap'].vwap`; fallback range-mid). On fill, post a
+limit at the mean.
 Default = full exit at the mean (small R, high turnover — the MM-inspired core).
 Optional: leave a small runner a touch beyond the mean only if flow strongly
 supports; default is flat at mean.
