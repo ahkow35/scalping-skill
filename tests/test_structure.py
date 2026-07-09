@@ -162,3 +162,20 @@ def test_classify_structure_flags_ceiling_sweep_rejection():
     series.append(c(0, 113.0, 108.0, 108.5, t="sweep"))
     out = structure.classify_structure(series, price=108.5)
     assert out["sweep_rejection"] is True
+
+
+def test_with_entry_sweeps_recomputes_on_finer_tf():
+    s15 = {"ceiling_above": {"price": 110.0}, "floor_below": {"price": 100.0},
+           "sweep_reclaim": False, "sweep_rejection": False}
+    # a 5m bar wicks below the 100 floor and closes back above -> reclaim
+    s = structure.with_entry_sweeps(s15, [c(0, 99.5, 98.5, 100.5)])
+    assert s["sweep_reclaim"] is True
+    assert s["sweep_rejection"] is False
+    # original untouched (shallow copy)
+    assert s15["sweep_reclaim"] is False
+
+
+def test_with_entry_sweeps_handles_missing_levels():
+    s = structure.with_entry_sweeps({"ceiling_above": None, "floor_below": None},
+                                    [c(0, 101, 99, 100)])
+    assert s["sweep_reclaim"] is False and s["sweep_rejection"] is False

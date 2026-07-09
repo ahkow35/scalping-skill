@@ -104,6 +104,21 @@ def detect_sweep(candles, level_price, kind, lookback=3):
     return False
 
 
+def with_entry_sweeps(structure_out, entry_candles, *, lookback=3):
+    """Two-timeframe helper: take a structure read whose LEVELS came from a
+    higher timeframe (e.g. 15m) and recompute the sweep_reclaim / sweep_rejection
+    flags on a FINER entry timeframe (e.g. 5m) against those same levels. This
+    is what lets the scalp enter on a fast 5m sweep of a slow 15m level. Returns
+    a shallow copy; never raises."""
+    s = dict(structure_out) if isinstance(structure_out, dict) else {}
+    ca, fb = s.get("ceiling_above"), s.get("floor_below")
+    s["sweep_rejection"] = (detect_sweep(entry_candles, ca["price"], "ceiling", lookback)
+                            if ca else False)
+    s["sweep_reclaim"] = (detect_sweep(entry_candles, fb["price"], "floor", lookback)
+                          if fb else False)
+    return s
+
+
 def _trend(pivots, n):
     """'up' if the last n+1 swing highs are strictly rising AND the last n+1
     swing lows are strictly rising; 'down' for the mirror; else None."""

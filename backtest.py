@@ -104,6 +104,51 @@ def run(side, candles, *, warmup=40, horizon=48, cooldown=4,
     return trades
 
 
+DAY_MS = 86_400_000
+
+
+def run_intraday(side, c5, c15, *, warmup5=60, cooldown=6, horizon_cap=288,
+                 struct_params=None, trig_params=None, allow=("A", "B")):
+    """Faithful scalp walk-forward: LEVELS from 15m structure, SWEEP + ENTRY on
+    5m closes, and a same-UTC-day time-stop (never carry past 00:00 UTC). Shares
+    structure.with_entry_sweeps with the live engine so backtest == live. Pure;
+    takes candles, no network. No look-ahead: 15m levels use only bars fully
+    closed before the 5m entry bar's close; the fill sim sees only later 5m bars.
+    """
+    trades = []
+    last_fire = -10**9
+    allow = set(allow)
+    for i in range(warmup5, len(c5) - 1):
+        if i - last_fire < cooldown:
+            continue
+        t5_close = c5[i]["t"] + _MS["5m"]
+        w15 = [c for c in c15 if c["t"] + _MS["15m"] <= t5_close][-200:]
+        if len(w15) < 30:
+            continue
+        px = c5[i]["c"]
+        s15 = structure.classify_structure(w15, price=px, params=struct_params)
+        s = structure.with_entry_sweeps(s15, c5[max(0, i - 3):i + 1])
+        s["price"] = px
+        trig = triggers.evaluate(side, s, c5[max(0, i - 6):i + 1], params=trig_params)
+        trig = {k: v for k, v in trig.items() if k in allow}
+        _, block = decide._pick_trigger(trig)
+        if not block:
+            continue
+        day_end = (c5[i]["t"] // DAY_MS + 1) * DAY_MS
+        synth = {"t": c5[i]["t"], "o": px, "h": px, "l": px, "c": px, "v": 0.0}
+        fwd = [synth] + [c for c in c5[i + 1:] if c["t"] < day_end][:horizon_cap]
+        res = replay.simulate_trigger(block, side, fwd)
+        if res["status"] == "unfilled":
+            continue
+        last_fire = i
+        trades.append({
+            "i": i, "t": c5[i]["t"], "trigger": block["trigger"],
+            "net_r": res["net_r"], "gross_r": res["r"],
+            "status": res["status"], "ambiguous": res["ambiguous"],
+        })
+    return trades
+
+
 def summarize(trades):
     by = {}
     for t in trades:
