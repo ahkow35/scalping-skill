@@ -35,6 +35,36 @@ Open decision: iterate the triggers using the now-existing harness (best lead:
 a historically-computable regime filter — `regime.py` is candle-only for
 compression/directionality/BTC-corr), or shelve.
 
+## Final verdict (2026-07-10) — SHELVE. No generalizable edge.
+
+Two diagnostics ran after the first NO-GO:
+1. **R:R floor sweep** (0→3.0): loosening the floor does NOT help — taking
+   everything loses catastrophically (−359R/−259R over 766/879 trades). Win
+   rates never climb enough as targets come in (34–39% peak, need >50%). The
+   problem is **entry timing, not risk management**. No R:R setting rescues it.
+2. **Timeframe correction** (the 15m/12h test was wrong — a swing system, not a
+   scalp). On the faithful **15m-levels / 5m-entry / same-day-close** path,
+   `long_A` (flush-reclaim) flipped from never-fires to positive on HYPE
+   (+0.40R, n9) — a lead worth validating.
+
+**Out-of-sample validation KILLED the lead.** long_A across 4 coins (60–90d
+intraday):
+- HYPE (in-sample): +0.40R (n9)
+- SOL −1.58R (n3), INJ −1.03R (n6), NEAR −0.03R (n14)
+- pooled fresh coins: **−0.49R (n23)**; all-four pooled **~−0.24R (n32)**
+
+long_A was positive on exactly the one coin it was found on → overfitting, not
+edge. Every trigger is net-negative to breakeven on every fresh coin.
+
+**DECISION: shelve the live bot.** The deterministic triggers as specified have
+no generalizable edge; automating them would systematically lose money. Phases
+4–5 are cancelled. What survives as reusable IP: `structure.py`, `triggers.py`,
+`decide.py`, `backtest.py` (+ intraday), and — most valuable — a validated
+methodology that caught the overfit BEFORE any capital was risked. The skill's
+real value was always the GATING (macro veto, behavioral discipline, R:R floor,
+sizing) that keeps you OUT of bad trades, not alpha generation. The backtest
+proves it: unfiltered trading (floor 0) loses ~10× more than the gated system.
+
 ## Goal
 
 Run the scalp analysis unattended all day, and get pushed a notification the
