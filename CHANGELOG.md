@@ -1,5 +1,34 @@
 # Changelog — scalp skill
 
+## 2026-07-10 — Deterministic live-bot investigation → SHELVED (no edge)
+
+**Summary:** Investigated turning the skill into an unattended deterministic
+bot (VPS loop + Telegram alerts, no LLM in the decision path, alert-only).
+Built the full engine + backtest harness, then the go/no-go gate returned a
+robust NO-GO: the triggers have no generalizable edge. Not deployed.
+
+- **New modules:** `structure.py` (fractal pivots → ATR-clustered tested
+  levels + sweep flags), `triggers.py` (the 4 setups as pure functions with
+  gross/net R:R + geometry guards; close-vs-retest entry variants),
+  `decide.py` (behavioral → macro veto → structure/triggers → flow cuts →
+  sizing → verdict), `backtest.py` (walk-forward + intraday 15m-levels/5m-entry
+  same-day path, reusing `replay.py`'s fill simulator; param-sweep + noise
+  lenses). `structure.with_entry_sweeps` shares the two-timeframe logic so
+  backtest == live. +37 tests → 222 green.
+- **Result:** every trigger net-negative to breakeven OOS across HYPE/SOL/INJ/
+  NEAR, both entry modes. The one apparent lead (HYPE long_A +0.40R) was a
+  stop-placement bug artifact — collapsed to n1/−1.40R once fixed.
+- **External review** corrected 3 port mis-specs (long_B ceilings-only; long_A
+  structural-pool stop or skip; retest entries); the rerun *strengthened* the
+  veto (commit `889d733`).
+- **Decision:** SHELVE the live bot. Engine + harness + methodology retained as
+  reusable tooling. The skill's value is its discipline/gating layer, not entry
+  alpha (unfiltered trading loses ~10× more than the gated system).
+- **Docs:** `PLAN-live-bot-2026-07-09.md`, `FINDINGS-live-bot-2026-07-10.md`
+  (reviewer-facing), `analysis_rr_sweep.py`, `analysis_intraday_oos.py`.
+- **Branch:** `feat/deterministic-live-bot` (PR #1) — not merged; alert-only,
+  never executes orders.
+
 ## 2026-07-07 — VWAP + OI context (READ-ONLY Phase 1)
 
 **Summary:** The two top deferred-backlog items from the July reviews, landed
