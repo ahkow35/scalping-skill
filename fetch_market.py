@@ -124,9 +124,28 @@ def compute_microprice(bids, asks):
     }
 
 
+def top_depth(levels, n=3):
+    """Visible depth across the first n L2 levels, in coin units and USDC."""
+    rows = levels[:n] if levels else []
+    sz = 0.0
+    usdc = 0.0
+    for lv in rows:
+        p = float(lv["px"])
+        q = float(lv["sz"])
+        sz += q
+        usdc += p * q
+    return {"levels": len(rows), "sz": round(sz, 6), "usdc": round(usdc, 2)}
+
+
 import json
 import os
 import urllib.request
+
+try:
+    import requests as _requests
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
 
 HL_INFO = "https://api.hyperliquid.xyz/info"
 CG_GLOBAL = "https://api.coingecko.com/api/v3/global"
@@ -137,12 +156,19 @@ class DataUnavailable(Exception):
 
 
 def _post_json(url, payload, source):
+    # 2026-06-30: urllib mishandles HL's chunked responses (IncompleteRead at ~42KB).
+    # requests handles them correctly. Fall back to urllib only if requests unavailable.
     try:
-        req = urllib.request.Request(
-            url, data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.loads(r.read())
+        if _HAS_REQUESTS:
+            r = _requests.post(url, json=payload, timeout=20)
+            r.raise_for_status()
+            return r.json()
+        else:
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return json.loads(r.read())
     except Exception as exc:
         raise DataUnavailable(f"DATA UNAVAILABLE: {source} ({exc})")
 
@@ -153,6 +179,22 @@ def _get_json(url, source):
             return json.loads(r.read())
     except Exception as exc:
         raise DataUnavailable(f"DATA UNAVAILABLE: {source} ({exc})")
+
+
+_CG_HEADERS = {"User-Agent": "scalp-tool/1.0 (personal trading script)"}
+
+
+def _cg_get_json(url, source):
+    """CoinGecko GET with User-Agent header and 2 retries at 8s each."""
+    last_exc = None
+    for _ in range(2):
+        try:
+            req = urllib.request.Request(url, headers=_CG_HEADERS)
+            with urllib.request.urlopen(req, timeout=8) as r:
+                return json.loads(r.read())
+        except Exception as exc:
+            last_exc = exc
+    raise DataUnavailable(f"DATA UNAVAILABLE: {source} (<{last_exc}>)")
 
 
 def parse_btc_dominance(payload):
@@ -174,7 +216,7 @@ def parse_btc_dominance(payload):
 
 
 def fetch_btc_dominance():
-    return parse_btc_dominance(_get_json(CG_GLOBAL, "coingecko"))
+    return parse_btc_dominance(_cg_get_json(CG_GLOBAL, "coingecko"))
 
 
 BTCD_CACHE_PATH = os.path.join(
@@ -182,6 +224,7 @@ BTCD_CACHE_PATH = os.path.join(
 BTCD_CACHE_MAX_AGE_MS = 48 * 60 * 60 * 1000          # keep 48h of snapshots
 BTCD_TARGET_LOOKBACK_MS = 24 * 60 * 60 * 1000        # 24h target lookback
 BTCD_TARGET_TOLERANCE_MS = 90 * 60 * 1000            # ±90min around the 24h mark
+BTCD_STALE_FALLBACK_MS = 2 * 60 * 60 * 1000          # use cache as fallback if < 2h stale
 
 
 def update_btcd_cache(btc_d, now_ms, path=None):
@@ -228,6 +271,31 @@ def update_btcd_cache(btc_d, now_ms, path=None):
     return rows
 
 
+def _read_latest_btcd(path=None):
+    """Return the most recent cached BTC.D row {ts, btc_d}, or raise DataUnavailable."""
+    path = path or BTCD_CACHE_PATH
+    if not os.path.exists(path):
+        raise DataUnavailable("DATA UNAVAILABLE: coingecko (no cache on disk)")
+    best = None
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                    if best is None or int(r.get("ts", 0)) > int(best.get("ts", 0)):
+                        best = r
+                except json.JSONDecodeError:
+                    continue
+    except OSError as exc:
+        raise DataUnavailable(f"DATA UNAVAILABLE: coingecko (cache read error: {exc})")
+    if best is None:
+        raise DataUnavailable("DATA UNAVAILABLE: coingecko (cache empty)")
+    return best
+
+
 def compute_btcd_24h_change(rows, now_ms, current_btcd):
     """Compute the BTC.D 24h change from cached snapshots.
 
@@ -269,6 +337,130 @@ def compute_btcd_24h_change(rows, now_ms, current_btcd):
             "btc_d_coverage_h": coverage_h}
 
 
+def compute_vwap(candles, now_ms):
+    """UTC-day-anchored VWAP from candles (hlc3 × volume).
+
+    Anchor = 00:00 UTC of the current day. Candle `t` is an ISO-UTC string,
+    which orders lexicographically, so the day filter is a string compare.
+    Bars are the granularity limit: the bar spanning midnight is excluded
+    whole. Returns {vwap, bars, anchor} or None when no volume traded yet.
+    READ-ONLY Phase 1: context only, no verdict effect.
+    """
+    anchor_iso = iso_utc(now_ms - (now_ms % 86_400_000))
+    pv = 0.0
+    vol = 0.0
+    bars = 0
+    for k in candles or []:
+        if k["t"] < anchor_iso:
+            continue
+        typical = (k["h"] + k["l"] + k["c"]) / 3.0
+        pv += typical * k["v"]
+        vol += k["v"]
+        bars += 1
+    if vol <= 0:
+        return None
+    return {"vwap": round(pv / vol, 6), "bars": bars, "anchor": anchor_iso}
+
+
+OI_CACHE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ".oi_cache.jsonl")
+OI_CACHE_MAX_AGE_MS = 48 * 60 * 60 * 1000            # keep 48h of snapshots
+# (window name, lookback, tolerance around the lookback mark)
+OI_WINDOWS = (("1h", 3_600_000, 15 * 60 * 1000),
+              ("24h", 86_400_000, 90 * 60 * 1000))
+OI_FLAT_PCT = 0.5      # |ΔOI| below this = flat (PROVISIONAL — revisit w/ data)
+OI_PRICE_FLAT_PCT = 0.3  # |Δprice| below this = flat (PROVISIONAL)
+
+
+def update_oi_cache(coin, oi_usdc, mark, now_ms, path=None):
+    """Append the current OI snapshot to the local rolling multi-coin cache.
+
+    Hyperliquid only exposes CURRENT open interest — like BTC.D, the change
+    signal is built ourselves across repeated /scalp calls. Cache is JSONL:
+    one `{"ts", "coin", "oi_usdc", "mark"}` per line; rows older than
+    OI_CACHE_MAX_AGE_MS are dropped on write.
+
+    Returns this coin's on-disk history (sorted ascending by ts).
+    """
+    path = path or OI_CACHE_PATH
+    cutoff = now_ms - OI_CACHE_MAX_AGE_MS
+    rows = []
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if int(r.get("ts", 0)) < cutoff:
+                        continue
+                    rows.append(r)
+        except OSError:
+            pass
+
+    rows.append({"ts": int(now_ms), "coin": coin,
+                 "oi_usdc": float(oi_usdc), "mark": float(mark)})
+    rows.sort(key=lambda r: int(r["ts"]))
+
+    tmp = path + ".tmp"
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(tmp, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    os.replace(tmp, path)
+    return [r for r in rows if r.get("coin") == coin]
+
+
+def compute_oi_change(rows, now_ms, current_oi, current_mark,
+                      lookback_ms, tol_ms):
+    """OI and price change vs the cached sample nearest (now − lookback).
+
+    Price change uses the SAME cached sample's mark, so the two deltas are
+    window-aligned by construction. None values = cache still warming for
+    this window — callers surface that instead of estimating.
+    """
+    target = now_ms - lookback_ms
+    in_window = [r for r in rows
+                 if target - tol_ms <= int(r["ts"]) <= target + tol_ms]
+    empty = {"oi_chg_pct": None, "price_chg_pct": None, "sample_age_min": None}
+    if not in_window:
+        return empty
+    sample = min(in_window, key=lambda r: abs(int(r["ts"]) - target))
+    base_oi = float(sample["oi_usdc"])
+    base_px = float(sample["mark"])
+    if base_oi <= 0 or base_px <= 0:
+        return empty
+    return {
+        "oi_chg_pct": round((float(current_oi) - base_oi) / base_oi * 100, 2),
+        "price_chg_pct": round(
+            (float(current_mark) - base_px) / base_px * 100, 2),
+        "sample_age_min": round((now_ms - int(sample["ts"])) / 60_000, 1),
+    }
+
+
+def classify_oi_read(price_chg_pct, oi_chg_pct):
+    """Classic OI×price matrix. 'flat' when either move is inside noise.
+
+    new-longs      price↑ OI↑  — fresh longs, trend-supportive
+    short-covering price↑ OI↓  — rally on position closing, suspect
+    new-shorts     price↓ OI↑  — fresh supply, downtrend-supportive
+    long-unwind    price↓ OI↓  — capitulation-prone, decline may exhaust
+    """
+    if price_chg_pct is None or oi_chg_pct is None:
+        return None
+    if abs(oi_chg_pct) < OI_FLAT_PCT or abs(price_chg_pct) < OI_PRICE_FLAT_PCT:
+        return "flat"
+    if price_chg_pct > 0:
+        return "new-longs" if oi_chg_pct > 0 else "short-covering"
+    return "new-shorts" if oi_chg_pct > 0 else "long-unwind"
+
+
 def parse_coin_arg(raw):
     """Parse a coin string into (canonical_coin, dex_or_None).
 
@@ -308,6 +500,15 @@ def fetch_ctx(coin, dex=None):
             }
     where = f"dex={dex!r}" if dex else "core perps"
     raise DataUnavailable(f"DATA UNAVAILABLE: hyperliquid (coin {coin} not found in {where})")
+
+
+def fetch_core_meta():
+    """Fetch the full core-perps meta/context payload once.
+
+    This is factored out so assemble() keeps its single-call optimization while
+    unit tests can replace the network boundary directly.
+    """
+    return _post_json(HL_INFO, {"type": "metaAndAssetCtxs"}, "hyperliquid")
 
 
 def fetch_candles(coin, interval, start_ms, end_ms):
@@ -359,6 +560,10 @@ def fetch_l2(coin):
     return {
         "asks": band_aggregate(asks),
         "bids": band_aggregate(bids),
+        "depth": {
+            "bid_top3": top_depth(bids, 3),
+            "ask_top3": top_depth(asks, 3),
+        },
         "execution": compute_microprice(bids, asks),
     }
 
@@ -479,6 +684,9 @@ def bucket_taker_delta(trades, now_ms,
 import sys
 import time as _time
 
+import regime as regime_mod
+import flow as flow_mod
+
 _NOW = lambda: int(_time.time() * 1000)
 _DAY = 86400000
 
@@ -491,18 +699,43 @@ def assemble(coin, deep=False, now_ms=None):
     _, primary_dex = parse_coin_arg(coin) if isinstance(coin, str) else (coin, None)
     out = {"session": build_session(now_ms), "primary": coin, "primary_dex": primary_dex}
 
-    out["ctx"] = fetch_ctx(coin, dex=primary_dex)
-    out["btc_ctx"] = fetch_ctx("BTC")
+    # Single metaAndAssetCtxs call for both primary coin and BTC — avoids two 71KB hits.
+    # HIP-3 dex coins still need a separate dex= call (not in core universe).
+    if primary_dex is None:
+        _meta = fetch_core_meta()
+        def _extract(c):
+            for i, u in enumerate(_meta[0]["universe"]):
+                if u["name"] == c:
+                    x = _meta[1][i]
+                    return {"coin": c, "mark": float(x["markPx"]),
+                            "oracle": float(x["oraclePx"]), "mid": float(x["midPx"]),
+                            "funding": float(x["funding"]), "premium": float(x["premium"]),
+                            "oi_usdc": float(x["openInterest"]) * float(x["markPx"]),
+                            "prev_day_px": float(x["prevDayPx"]),
+                            "day_vol_usdc": float(x["dayNtlVlm"])}
+            raise DataUnavailable(f"DATA UNAVAILABLE: hyperliquid (coin {c} not found in core perps)")
+        out["ctx"] = _extract(coin)
+        out["btc_ctx"] = _extract("BTC")
+    else:
+        out["ctx"] = fetch_ctx(coin, dex=primary_dex)
+        out["btc_ctx"] = fetch_ctx("BTC")
 
     # 1d always included (365d) — needed for ATH / discovery state detection.
     # Payload stays small (~one row per day) so the cost is negligible.
-    spans = [("1d", 365 * _DAY), ("1h", 3 * _DAY), ("15m", 9000000), ("5m", 5400000)]
+    # 15m window = 12h (~48 bars): the regime classifier needs >=20 bars for
+    # range_compression and >=32 for btc_corr; the old 2.5h (~10 bars) left both
+    # None -> regime always "unknown" -> passive fade_ok never armed.
+    # 2026-06-30: HL candle API is truncating large payloads (IncompleteRead /
+    # RemoteDisconnected). Safe ceilings found empirically: 1d≤50d, 1h≤2d, 4h≤7d.
+    # ATH detection limited to 50d lookback until HL fixes. Restore originals when OK.
+    spans = [("1d", 50 * _DAY), ("1h", 2 * _DAY), ("15m", 43_200_000), ("5m", 5400000)]
     if deep:
-        spans = spans[:1] + [("4h", 12 * _DAY)] + spans[1:]
+        spans = spans[:1] + [("4h", 7 * _DAY)] + spans[1:]
     out["candles"] = {iv: fetch_candles(coin, iv, now_ms - span, now_ms)
                       for iv, span in spans}
     out["btc_candles"] = {iv: fetch_candles("BTC", iv, now_ms - span, now_ms)
-                          for iv, span in (("4h", 12 * _DAY), ("1h", 3 * _DAY))}
+                          for iv, span in (("4h", 7 * _DAY), ("1h", 2 * _DAY),
+                                           ("15m", 43_200_000))}
     out["book"] = fetch_l2(coin)
     out["ath_state"] = compute_ath_state(out["candles"].get("1d", []), out["ctx"]["mark"])
 
@@ -519,12 +752,68 @@ def assemble(coin, deep=False, now_ms=None):
     except DataUnavailable as exc:
         out["taker_delta"] = str(exc)
 
+    out["regime"] = regime_mod.classify(
+        out["candles"], out["btc_candles"],
+        out.get("taker_delta"), out.get("book"))
+
+    out["flow"] = flow_mod.classify(out["candles"], out.get("taker_delta"))
+
+    # VWAP — UTC-day anchored, from 1h candles. READ-ONLY Phase 1.
+    vw = compute_vwap(out["candles"].get("1h", []), now_ms)
+    if vw is not None:
+        mid = out["ctx"]["mid"]
+        vw["side"] = "above" if mid >= vw["vwap"] else "below"
+        vw["dev_bps"] = round((mid - vw["vwap"]) / vw["vwap"] * 10_000, 1)
+        vw["_note"] = ("UTC-day anchored VWAP (1h hlc3×vol). READ-ONLY "
+                       "context — no verdict/conviction effect (Phase 1).")
+    out["vwap"] = vw  # None = no volume/candles yet today
+
+    # OI change — from the local rolling cache (HL only exposes current OI).
+    # READ-ONLY Phase 1. None values = cache warming for that window.
+    oi_rows = update_oi_cache(
+        coin, out["ctx"]["oi_usdc"], out["ctx"]["mark"], now_ms)
+    oi = {
+        "oi_usdc": out["ctx"]["oi_usdc"],
+        "coverage_h": (round((now_ms - int(oi_rows[0]["ts"])) / 3_600_000, 1)
+                       if oi_rows else 0.0),
+    }
+    for wname, lookback, tol in OI_WINDOWS:
+        chg = compute_oi_change(oi_rows, now_ms, out["ctx"]["oi_usdc"],
+                                out["ctx"]["mark"], lookback, tol)
+        chg["read"] = classify_oi_read(
+            chg["price_chg_pct"], chg["oi_chg_pct"])
+        oi[wname] = chg
+    oi["_note"] = ("OI×price read from local rolling cache (fed by repeated "
+                   "/scalp calls). READ-ONLY context — no verdict/conviction "
+                   "effect (Phase 1). read=None = cache warming.")
+    out["oi"] = oi
+
+    _live_exc = None
+    parsed_btcd = None
+    btcd_source = "live"
     try:
-        parsed = fetch_btc_dominance()
-        rows = update_btcd_cache(parsed["btc_d"], now_ms)
-        delta = compute_btcd_24h_change(rows, now_ms, parsed["btc_d"])
+        parsed_btcd = fetch_btc_dominance()
+    except DataUnavailable as exc:
+        _live_exc = exc
+        # Fallback: use the most recent cached snapshot if < 2h stale
+        try:
+            cached = _read_latest_btcd()
+            age_ms = now_ms - int(cached["ts"])
+            if age_ms > BTCD_STALE_FALLBACK_MS:
+                raise DataUnavailable(
+                    f"DATA UNAVAILABLE: coingecko (cache {round(age_ms/3_600_000, 1)}h stale)"
+                )
+            parsed_btcd = {"btc_d": float(cached["btc_d"])}
+            btcd_source = f"cache ({round(age_ms / 60_000)}min old — live: {_live_exc})"
+        except DataUnavailable:
+            pass
+
+    if parsed_btcd is not None:
+        rows = update_btcd_cache(parsed_btcd["btc_d"], now_ms)
+        delta = compute_btcd_24h_change(rows, now_ms, parsed_btcd["btc_d"])
         out["btc_dominance"] = {
-            "btc_d": parsed["btc_d"],
+            "btc_d": parsed_btcd["btc_d"],
+            "source": btcd_source,
             **delta,
             "_note": ("btc_d_24h_chg is derived from a LOCAL ROLLING CACHE of "
                       "BTC.D snapshots — CoinGecko's /global endpoint does not "
@@ -536,8 +825,8 @@ def assemble(coin, deep=False, now_ms=None):
                       "the age of the oldest sample in cache."),
         }
         out["macro_can_clear"] = True
-    except DataUnavailable as exc:
-        out["btc_dominance"] = str(exc)
+    else:
+        out["btc_dominance"] = str(_live_exc)
         out["macro_can_clear"] = False
     return out
 

@@ -9,13 +9,14 @@ VETO LONGS if any:
 - BTC broke a defined structural level (prior swing low / range floor) to the
   downside on rising volume within the trade horizon; OR
 - btc_d_24h_chg >= +1.5 and BTC.D rising; OR
-- BTC 1h range >= 2x its trailing 20-bar average range, directional down; OR
 - **Binary US econ event today**: FOMC decision, FOMC minutes, CPI, NFP,
   PCE — NO-TRADE for the day regardless of setup quality. Ask user once
   if the calendar is unclear; default to VETO if uncertain on a known
   event date; OR
-- **Funding extreme positive**: this perp's funding > +0.05% per 8h
-  (annualized >55%) — crowded long, NO new long entries; MANAGE only.
+- **Funding extreme positive**: this perp's funding > +0.03% per 8h
+  (annualized >33%) — crowded long, NO new long entries; MANAGE only.
+  (Tightened from 0.05 on 2026-06-10: backtest showed clear negative
+  forward drift already at 0.03%/8h — 24h mean −1.85% vs +0.38% baseline.)
 If `macro_can_clear` is false (BTC.D snapshot unavailable) -> veto CANNOT
 clear -> verdict NO-TRADE on any long bias.
 
@@ -30,6 +31,12 @@ is partial.
 Otherwise macro is a size modifier:
 - BTC.D falling + BTC bid -> tailwind, full size
 - BTC.D rising + BTC up -> headwind, half size, tighter targets
+- **BTC volatility spike** (BTC 1h range >= 2x trailing 20-bar avg, either
+  direction): half size + widen the structural stop (cut size, never
+  tighten) + tighter time-box. NOT a veto — demoted 2026-06-10: backtest
+  showed down-spikes preceded BETTER 24h returns (capitulation bounce,
+  +1.13% vs +0.29%) but WORSE 4h adverse excursion (−1.84% vs −1.54%).
+  The spike marks stop-out risk, not continuation.
 - chop -> neutral
 Always print: `MACRO: CLEAR` or `MACRO: VETO (reason)`. Note trajectory if
 you can infer it from BTC.D 24h chg sign + recent movement.
@@ -40,6 +47,23 @@ highs), mid pivot. Classify: range / breakout / breakdown / trend.
 Positioning from funding+premium+OI+taker_delta:
 - Funding ~0 or negative + premium negative + low buy_share = NOT crowded
 - Funding rising positive + premium positive + buy_share extreme = crowded long
+
+**OI×price read** (from `out['oi']` — READ-ONLY Phase 1, context only, no
+verdict/conviction effect):
+- `new-longs` (price↑ OI↑) — fresh longs entering; trend-supportive for a
+  momentum-break (trigger B).
+- `short-covering` (price↑ OI↓) — the rally is positions CLOSING, not new
+  money; corroborates the WEAK-break read below (buy_share < 40%). Say so
+  when both agree.
+- `long-unwind` (price↓ OI↓) — capitulation-prone; the flush that feeds a
+  sweep-reclaim (trigger A).
+- `new-shorts` (price↓ OI↑) — fresh supply; don't knife-catch the low.
+- `read: null` = cache warming — note `OI: warming` and move on.
+
+**VWAP bias** (from `out['vwap']` — READ-ONLY Phase 1): mid above the UTC-day
+VWAP = intraday long bias confirmed. Entering a long with mid BELOW VWAP →
+add the flag `fighting VWAP` to the trigger line (context only — no
+conviction effect until backtested).
 
 **ATH / discovery state** (read `ath_state` from fetch — it's already computed):
 - `below_ath` — standard structure analysis; ceiling = recent prior resistance.
@@ -69,7 +93,7 @@ Positioning from funding+premium+OI+taker_delta:
   - buy_share_pct 40–60% → standard; size normally
   - buy_share_pct < 40% → WEAK break (short-covering, not real buying);
     cut size or wait for the retest before entering
-Each: entry / stop / targets / R:R from live levels.
+Each: entry / stop / targets / gross R:R and net R:R from live levels.
 
 **Sweep stop rule**: identify the next structural pool below entry (prior
 swing low, broken resistance, round-number magnet). Stop goes below THAT,
@@ -78,7 +102,11 @@ budget at full size, CUT SIZE — never tighten into noise.
 
 ## Output deltas (long)
 The ENTRY QUICK / DEEP and MANAGE skeletons come from `scalp-core.md`. Fill:
-- VERDICT vocabulary: `LONG-NOW | WAIT | NO-TRADE | VETOED | HALT`
+- VERDICT vocabulary:
+  `LONG-NOW | LONG-CLOSE | LONG-PROBE | WAIT | NO-TRADE | VETOED | HALT`
+  - `LONG-NOW` (high conviction → 100% of cap)
+  - `LONG-CLOSE` (med conviction → 50% of cap)
+  - `LONG-PROBE` (low conviction → 25% of cap)
 - The counter-case line is **"Bear case"** — one clause on what kills the long
   in the next 1h.
 - Triggers labelled A (sweep-reclaim) / B (momentum-break). No trigger C.

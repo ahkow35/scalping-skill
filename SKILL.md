@@ -7,13 +7,16 @@ description: >
   Long AND short setups, each with its own protocol module. Three output sizes —
   TINY (one-line pulse, default for /loop), QUICK (standard), DEEP (full).
   Two modes — ENTRY (fresh thesis) and MANAGE (review open position).
-  Plus three admin commands — `summary` (audit log aggregate stats),
+  Plus five admin commands — `summary` (audit log aggregate stats),
   `resolve` (close out an open trade with outcome), `list-open` (list unresolved
-  entries). Trigger phrases: "/scalp", "/scalp <COIN>", "/scalp tiny <COIN>",
+  entries), `replay` (counterfactual scoring of logged decisions), `profile`
+  (set account equity / phase for sizing). Trigger phrases: "/scalp",
+  "/scalp <COIN>", "/scalp tiny <COIN>", "/scalp quick <COIN>",
   "/scalp deep <COIN>", "/scalp short <COIN>", "/scalp tiny short <COIN>",
   "/scalp deep short <COIN>", "/scalp manage [short] <COIN> <entry>",
   "/scalp tiny manage [short] <COIN> <entry>", "/scalp summary [--since-days N]",
   "/scalp resolve <trade_id> <R> <exit_reason> [lesson]", "/scalp list-open",
+  "/scalp replay [--window-h N] [--force]", "/scalp profile [set <field> <value>]",
   "scalp read", "scalp thesis", "scalp the tape", "review my <COIN> long",
   "review my <COIN> short", "manage my position",
   "what's the move now" (when a position is open).
@@ -56,6 +59,14 @@ Performance by setup (resolved only):
   ... sorted by total_r desc
   (if no resolved trades yet: "No resolved trades yet — log outcomes via /scalp resolve")
 
+GATE VALUE (counterfactual replay, <scored> scored):
+  WAITs:  <n> scored, <fired> would have filled — missed <±R>R
+  VETOs:  <n> scored, <fired> would have filled — blocked <±R>R
+          (negative = the gate saved you; positive = the gate cost you)
+  By setup (simulated): <side>-<label>: n <n>, win <pct>%, expectancy <±R>R
+  ... sorted by total_r desc; omit whole block if scored == 0
+  [if unscored open non-action entries exist: "→ run /scalp replay to score <K> new entries"]
+
 Open entries: <open_count> unresolved.
   [if any stale >72h on action verdicts: "⚠ <K> stale action entries — see /scalp list-open"]
 ```
@@ -78,6 +89,26 @@ If the script returns 0, confirm to the user with the trade_id and outcome.
 If it returns 1 (not found / already resolved), say so plainly and offer to
 list open entries.
 
+### `/scalp replay [--window-h N] [--force]`
+
+Counterfactual scorer — replays every open logged decision against the candles
+that followed it: did the trigger fill, and did the stop or targets get hit
+first? Run:
+```bash
+python3 /Users/nyanyk/Claude/research/scalp/replay.py [--window-h N] [--force]
+```
+
+Returns JSON `{scored: [...], skipped: [...]}`. Render one line per scored
+entry: `<trade_id>  <verdict>  best_r <±R>  (<per-trigger statuses>)`, then
+the skipped list compactly. After rendering, run `/scalp summary` mechanics
+to show the updated GATE VALUE block. Conventions (state them if asked): fills
+at trigger price with no slippage — slightly optimistic; same-candle
+stop/target conflicts drill to 1m and otherwise resolve conservatively as
+stop-first with `ambiguous: true`; 50% out at T1 → stop to breakeven, 50% at
+T2 (the 20% trail is approximated by the T2 exit); window default 72h,
+mark-to-market if still open at window end. Real `/scalp resolve` outcomes
+always take precedence — replay never touches resolved entries.
+
 ### `/scalp list-open`
 
 Run:
@@ -99,6 +130,19 @@ and remind the user to resolve.
 
 If the list is empty: `No open audit entries — everything's closed out.`
 
+### `/scalp profile [set <field> <value>]`
+
+Account state the sizing math needs but cannot infer (equity, phase). With no
+args, show current profile:
+```bash
+python3 /Users/nyanyk/Claude/research/scalp/profile.py get
+```
+To update: `python3 .../profile.py set equity 5000` or `set phase 2`. Fields:
+`equity` (USDC, > 0), `phase` (1 → 0.5% default cap, 2 → 2.0%). Render the
+returned JSON as one line: `equity $<E> | phase <N> (default cap <X>%)`. If
+equity is null, say so and prompt the user to set it — the trading flow needs
+it before any action verdict can show sizing.
+
 ## Step 1 — Determine direction, then load the protocol
 
 - Long (default): args do NOT contain `short` → load BOTH
@@ -107,6 +151,11 @@ If the list is empty: `No open audit entries — everything's closed out.`
 - Short: args contain `short` → load BOTH
   `/Users/nyanyk/Claude/research/scalp/scalp-core.md` and
   `/Users/nyanyk/Claude/research/scalp/scalp-short.md`.
+- Passive: args contain `passive` → load BOTH
+  `/Users/nyanyk/Claude/research/scalp/scalp-core.md` and
+  `/Users/nyanyk/Claude/research/scalp/scalp-passive.md`. (Overrides long/short:
+  passive mode fades both sides.) Invoked as `/scalp passive <COIN>` or
+  `/scalp tiny passive <COIN>`.
 
 `scalp-core.md` is the direction-neutral protocol (Steps 0,1,5,6,M, output
 and journal skeletons, /loop). The direction module supplies Steps 2–4 and
@@ -133,21 +182,43 @@ Follow `scalp-core.md` + the direction module exactly.
 - Default = QUICK (ENTRY) or MANAGE format.
 - `tiny` in args = TINY mode (one-line, ENTRY or MANAGE).
 - `deep` in args = DEEP mode (ENTRY only).
+- `passive` in args = PASSIVE mode (loads scalp-passive.md; both-sides fade).
 - `/loop` invocations default to TINY unless QUICK/DEEP is explicit.
 - Coin arg defaults to HYPE.
-- **Step 0 Behavioral preflight runs FIRST** (cooldown + R16 vibe check).
-  Cooldown fail → NO-TRADE — BEHAVIORAL HALT, do not fetch data.
+- **Step 0 Behavioral preflight runs FIRST** (daily stop + cooldown + R16 vibe
+  check). Read state from `python3 behavioral.py` (derived from the audit log —
+  works under /loop with no conversation). `daily_stop.active` in ENTRY mode →
+  HARD `HALT (daily stop)` before market fetch; MANAGE still proceeds. Cooldown
+  active → print `BEHAVIORAL WARNING: cooldown active (...) — informational
+  only` and PROCEED with full analysis (no halt, no verdict/conviction effect).
   R16 leaks → conviction penalty + named warning; trade proceeds.
 - Macro veto runs SECOND, from the direction module. Includes hard
-  NO-TRADE on FOMC/CPI/NFP/PCE days + extreme funding (long: >+0.05%/8h;
-  short: <-0.05%/8h).
-- User must declare active risk cap (0.5% / 1% / 2%) before triggers;
-  default 0.5% and flag it.
+  NO-TRADE on FOMC/CPI/NFP/PCE days + extreme funding (long: >+0.03%/8h;
+  short: <-0.03%/8h).
+- Risk cap + equity come from `python3 profile.py get` (equity, phase →
+  default cap). If equity is null, ask once and offer to save via
+  `/scalp profile set equity <amt>`; a per-trade A+ override to 1% is still
+  declared inline. Flag the cap when non-default.
 - Every trigger block shows the sizing math (equity × cap = $risk;
   $risk ÷ stop_distance = position size; leverage derived, not chosen).
-- Output must include a JOURNAL STUB block (ENTRY + MANAGE).
-- ALWAYS check `taker_delta.coverage_pct` — if <50%, call out the
-  partial coverage and weight the signal accordingly.
+- Directional triggers must pass the NET R:R floor from `costs.py`; show gross
+  and net R:R in QUICK/DEEP trigger blocks.
+- JOURNAL STUB is shown for ACTION verdicts (LONG-NOW / SHORT-NOW) and
+  MANAGE-action-required only. No-action outputs (WAIT/VETOED/NO-TRADE/HALT
+  and compact MANAGE) are still audit-logged but suppress the stub.
+- Passive-mode entries set `setup_family: "passive-fade"` in the audit payload
+  (directional entries omit it / default "directional").
+- ALWAYS run the Step 1b volume/flow gate from `out['flow']` (coverage,
+  aggressor bias vs side, climax, divergence, breakout-volume) — it can only
+  CUT conviction. `coverage_ok == false` (max coverage <50%) caps conviction
+  at low: you're scalping half-blind (Varma §8a).
+- Apply Step 6e spread/depth guard when L2 is available: cost-heavy books force
+  maker-only or conviction downgrade; intended size is capped to 25% of visible
+  top-3 entry-side depth. Missing book data does not block a fired trigger.
+- Surface the VWAP and OI context lines from `out['vwap']` / `out['oi']`
+  (READ-ONLY Phase 1 — they never change verdicts or conviction; `fighting
+  VWAP` and the OI×price read are context flags only). Passive mode uses
+  `out['vwap'].vwap` as its deterministic mean.
 - Short module only: apply the weekend modifier when
   `session.weekend_window` is true (size ×0.5).
 - Never inline-curl; only use `fetch_market.py` output.

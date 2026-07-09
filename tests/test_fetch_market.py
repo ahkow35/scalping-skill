@@ -56,6 +56,17 @@ def test_band_aggregate_buckets_usdc_depth():
     assert out[46.05] == 460.3
 
 
+def test_top_depth_sums_first_three_levels():
+    levels = [
+        {"px": "10.0", "sz": "1.0"},
+        {"px": "11.0", "sz": "2.0"},
+        {"px": "12.0", "sz": "3.0"},
+        {"px": "13.0", "sz": "100.0"},
+    ]
+    out = fm.top_depth(levels, n=3)
+    assert out == {"levels": 3, "sz": 6.0, "usdc": 68.0}
+
+
 import pytest
 
 
@@ -164,13 +175,35 @@ def test_data_unavailable_raises_named_error():
 
 
 def test_assemble_marks_macro_unavailable_when_btcd_fails(monkeypatch):
-    monkeypatch.setattr(fm, "fetch_ctx", lambda c, dex=None: {"coin": c, "mark": 46.0})
+    monkeypatch.setattr(fm, "fetch_core_meta", lambda: [
+        {"universe": [{"name": "HYPE"}, {"name": "BTC"}]},
+        [
+            {"markPx": "46.0", "oraclePx": "46.0", "midPx": "46.0",
+             "funding": "0", "premium": "0", "openInterest": "0",
+             "prevDayPx": "46.0", "dayNtlVlm": "0"},
+            {"markPx": "100000.0", "oraclePx": "100000.0", "midPx": "100000.0",
+             "funding": "0", "premium": "0", "openInterest": "0",
+             "prevDayPx": "100000.0", "dayNtlVlm": "0"},
+        ],
+    ])
     monkeypatch.setattr(fm, "fetch_candles", lambda *a: [])
     monkeypatch.setattr(fm, "fetch_l2", lambda c: {"asks": {}, "bids": {}})
+    # Isolate the taker-delta path too: without these, the test makes a live
+    # recentTrades call AND writes real trades into .trade_cache/.
+    monkeypatch.setattr(fm, "fetch_recent_trades", lambda coin: [])
+    monkeypatch.setattr(fm, "merge_trade_cache", lambda c, f, n: [])
+    monkeypatch.setattr(fm, "update_oi_cache", lambda *a, **k: [])
 
     def boom():
         raise fm.DataUnavailable("DATA UNAVAILABLE: coingecko (down)")
     monkeypatch.setattr(fm, "fetch_btc_dominance", boom)
+
+    # Isolate from the real on-disk BTC.D cache: with the live fetch down, the
+    # fallback reads the cache; force that to fail too so this test deterministically
+    # exercises the fully-unavailable path (not whatever snapshot is on disk).
+    def no_cache(*a, **k):
+        raise fm.DataUnavailable("DATA UNAVAILABLE: coingecko (no cache)")
+    monkeypatch.setattr(fm, "_read_latest_btcd", no_cache)
 
     out = fm.assemble("HYPE", deep=False, now_ms=1779102720000)
     assert out["btc_dominance"] == "DATA UNAVAILABLE: coingecko (down)"
@@ -367,3 +400,128 @@ def test_fetch_ctx_error_message_distinguishes_hip3_vs_core():
         with pytest.raises(fm.DataUnavailable) as e:
             fm.fetch_ctx("NOPE")
         assert "core perps" in str(e.value)
+
+
+def test_assemble_attaches_regime_block(monkeypatch):
+    import fetch_market as fm
+
+    def fake_series(closes):
+        return [{"t": "x", "o": x, "h": x + 0.5, "l": x - 0.5, "c": x, "v": 1.0}
+                for x in closes]
+
+    osc = fake_series([100, 101, 100, 101, 100, 101] * 8)
+
+    monkeypatch.setattr(fm, "fetch_core_meta", lambda: [
+        {"universe": [{"name": "HYPE"}, {"name": "BTC"}]},
+        [
+            {"markPx": "100.0", "oraclePx": "100.0", "midPx": "100.0",
+             "funding": "0", "premium": "0", "openInterest": "0",
+             "prevDayPx": "100.0", "dayNtlVlm": "0"},
+            {"markPx": "100.0", "oraclePx": "100.0", "midPx": "100.0",
+             "funding": "0", "premium": "0", "openInterest": "0",
+             "prevDayPx": "100.0", "dayNtlVlm": "0"},
+        ],
+    ])
+    monkeypatch.setattr(fm, "fetch_candles",
+                        lambda coin, interval, s, e: osc)
+    monkeypatch.setattr(fm, "fetch_l2", lambda coin: {
+        "asks": {}, "bids": {},
+        "execution": {"microprice_dev_bps": 0.1, "microprice": 100.0}})
+    monkeypatch.setattr(fm, "fetch_recent_trades", lambda coin: [])
+    monkeypatch.setattr(fm, "merge_trade_cache", lambda c, f, n: [])
+    monkeypatch.setattr(fm, "bucket_taker_delta", lambda t, n: {
+        "5m": {"buy_share_pct": 50.0}, "15m": {"buy_share_pct": 50.0},
+        "1h": {"buy_share_pct": 50.0}})
+    monkeypatch.setattr(fm, "fetch_btc_dominance", lambda: {"btc_d": 55.0})
+    monkeypatch.setattr(fm, "update_btcd_cache", lambda d, n: [])
+    monkeypatch.setattr(fm, "compute_btcd_24h_change", lambda r, n, d: {
+        "btc_d_24h_chg": None, "btc_d_sample_age_min": None, "btc_d_coverage_h": 0.0})
+    monkeypatch.setattr(fm, "update_oi_cache", lambda *a, **k: [])
+
+    out = fm.assemble("HYPE", now_ms=1_750_000_000_000)
+    assert "regime" in out
+    assert out["regime"]["regime_label"] in {
+        "trending", "ranging", "quiet", "correlated-chop", "unknown"}
+    assert "15m" in out["btc_candles"]
+    # VWAP + OI blocks are always present (READ-ONLY Phase 1 context)
+    assert "vwap" in out
+    assert out["oi"]["1h"]["read"] is None  # empty cache = warming
+    assert out["oi"]["coverage_h"] == 0.0
+
+
+# ── VWAP (UTC-day anchored) ─────────────────────────────────────────────
+
+DAY_MS = 86_400_000
+_MIDNIGHT = (1_750_000_000_000 // DAY_MS) * DAY_MS  # a UTC midnight
+HOUR_MS = 3_600_000
+
+
+def _bar(ts_ms, px, vol):
+    return {"t": fm.iso_utc(ts_ms), "o": px, "h": px, "l": px, "c": px,
+            "v": vol}
+
+
+def test_compute_vwap_excludes_bars_before_utc_midnight():
+    candles = [
+        _bar(_MIDNIGHT - HOUR_MS, 999.0, 100.0),   # yesterday — excluded
+        _bar(_MIDNIGHT, 10.0, 1.0),
+        _bar(_MIDNIGHT + HOUR_MS, 20.0, 1.0),
+    ]
+    out = fm.compute_vwap(candles, _MIDNIGHT + 2 * HOUR_MS)
+    assert out["bars"] == 2
+    assert out["vwap"] == pytest.approx(15.0)
+
+
+def test_compute_vwap_is_volume_weighted_hlc3():
+    candles = [
+        {"t": fm.iso_utc(_MIDNIGHT), "o": 0.0, "h": 12.0, "l": 9.0, "c": 9.0,
+         "v": 3.0},   # hlc3 = 10, weight 3
+        {"t": fm.iso_utc(_MIDNIGHT + HOUR_MS), "o": 0.0, "h": 21.0, "l": 19.0,
+         "c": 20.0, "v": 1.0},  # hlc3 = 20, weight 1
+    ]
+    out = fm.compute_vwap(candles, _MIDNIGHT + 2 * HOUR_MS)
+    assert out["vwap"] == pytest.approx((10.0 * 3 + 20.0 * 1) / 4)
+
+
+def test_compute_vwap_none_on_zero_volume_or_empty():
+    assert fm.compute_vwap([], _MIDNIGHT) is None
+    assert fm.compute_vwap([_bar(_MIDNIGHT, 10.0, 0.0)], _MIDNIGHT + 1) is None
+
+
+# ── OI cache + OI×price read ────────────────────────────────────────────
+
+
+def test_update_oi_cache_appends_prunes_and_filters_by_coin(tmp_path):
+    path = str(tmp_path / "oi.jsonl")
+    now = _MIDNIGHT
+    fm.update_oi_cache("HYPE", 100.0, 10.0, now - 49 * HOUR_MS, path=path)
+    fm.update_oi_cache("BTC", 555.0, 90.0, now - HOUR_MS, path=path)
+    rows = fm.update_oi_cache("HYPE", 120.0, 11.0, now, path=path)
+    # 49h-old row pruned; BTC row filtered out of the return
+    assert [r["oi_usdc"] for r in rows] == [120.0]
+    with open(path) as f:
+        on_disk = [line for line in f if line.strip()]
+    assert len(on_disk) == 2  # BTC + fresh HYPE survive on disk
+
+
+def test_compute_oi_change_uses_aligned_sample_and_tolerance():
+    now = _MIDNIGHT
+    rows = [{"ts": now - HOUR_MS - 5 * 60_000, "coin": "HYPE",
+             "oi_usdc": 100.0, "mark": 10.0}]
+    out = fm.compute_oi_change(rows, now, 110.0, 10.5, HOUR_MS, 15 * 60_000)
+    assert out["oi_chg_pct"] == pytest.approx(10.0)
+    assert out["price_chg_pct"] == pytest.approx(5.0)
+    # outside tolerance → warming
+    far = fm.compute_oi_change(rows, now, 110.0, 10.5, HOUR_MS, 60_000)
+    assert far == {"oi_chg_pct": None, "price_chg_pct": None,
+                   "sample_age_min": None}
+
+
+def test_classify_oi_read_matrix():
+    assert fm.classify_oi_read(1.0, 2.0) == "new-longs"
+    assert fm.classify_oi_read(1.0, -2.0) == "short-covering"
+    assert fm.classify_oi_read(-1.0, 2.0) == "new-shorts"
+    assert fm.classify_oi_read(-1.0, -2.0) == "long-unwind"
+    assert fm.classify_oi_read(0.1, 5.0) == "flat"    # price inside noise
+    assert fm.classify_oi_read(1.0, 0.2) == "flat"    # OI inside noise
+    assert fm.classify_oi_read(None, 2.0) is None     # cache warming
