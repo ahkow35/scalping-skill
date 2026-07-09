@@ -160,3 +160,39 @@ def test_no_target_reports_clear_reason():
     b = triggers.evaluate("short", s, candles)["B"]
     assert b["fired"] is False
     assert "no structural target" in b["reason"]
+
+
+# ---- reviewer faithfulness patch ----
+
+def test_long_b_ignores_floor_recapture():
+    # fresh close above a FLOOR (support recapture) must NOT fire momentum-break
+    s = {"price": 101.0, "atr": 1.0, "mid": 103.0, "floor_below": _lvl(100.0),
+         "ceiling_above": _lvl(108.0, kind="ceiling"),
+         "floors": [_lvl(100.0)], "ceilings": [_lvl(108.0, kind="ceiling")],
+         "sweep_reclaim": False, "sweep_rejection": False}
+    candles = [c(0, 101, 99, 99.0), c(0, 102, 100, 101.0)]  # prev 99<=100<101 across the floor
+    assert triggers.evaluate("long", s, candles)["B"]["fired"] is False
+
+
+def test_long_a_skips_when_no_structural_pool():
+    # sweep-reclaim present but nothing below the floor to place a structural stop
+    s = {"price": 100.5, "atr": 1.0, "mid": 103.0, "floor_below": _lvl(100.0),
+         "ceiling_above": _lvl(105.0, kind="ceiling"),
+         "floors": [_lvl(100.0)], "ceilings": [_lvl(105.0, kind="ceiling")],
+         "sweep_reclaim": True, "sweep_rejection": False}
+    a = triggers.evaluate("long", s, [c(0, 101, 98, 100.5)])["A"]
+    assert a["fired"] is False
+    assert "no structural pool" in a["reason"]
+
+
+def test_retest_entry_uses_the_level_not_the_close():
+    s = {"price": 104.5, "atr": 1.0, "mid": 103.0,
+         "floor_below": _lvl(100.0), "ceiling_above": _lvl(105.0, kind="ceiling"),
+         "floors": [_lvl(100.0), _lvl(97.0)], "ceilings": [_lvl(105.0, kind="ceiling")],
+         "sweep_reclaim": False, "sweep_rejection": True}
+    candles = [c(0, 107, 104, 104.5)]
+    close = triggers.evaluate("short", s, candles)["A"]
+    retest = triggers.evaluate("short", s, candles, params={"entry_mode": "retest"})["A"]
+    assert close["entry_mode"] == "close" and close["entry"] == 104.5
+    assert retest["entry_mode"] == "retest" and retest["entry"] == 105.0  # the ceiling
+    assert retest["t1"] < retest["entry"] < retest["stop"]  # geometry holds

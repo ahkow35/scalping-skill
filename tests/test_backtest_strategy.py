@@ -84,8 +84,9 @@ def test_rigor_lenses_execute():
 
 
 def _aligned():
-    """Aligned 5m+15m: 15m range (floor ~100 / ceiling ~110) then a 5m flush
-    below the floor, reclaim, and a rise toward mid."""
+    """Aligned 5m+15m: 15m range (floor ~100 / ceiling ~110); on 5m price spikes
+    above the ceiling and closes back below (failed breakout), then declines
+    through the mid — a short_A setup."""
     c15 = []
     for k in range(80):
         ph = k % 20
@@ -99,25 +100,31 @@ def _aligned():
         base = 100 + (ph if ph <= 10 else 20 - ph)
         p = base + (0.1 * (k // 20) if base >= 110 else 0.0)
         c5.append(c(round(p + 0.3, 3), round(p - 0.3, 3), round(p, 3), m * 300_000))
-    tail = [(99.5, 98.8, 99.0), (100.6, 98.5, 100.5), (101, 100.2, 100.8),
-            (102, 100.5, 101.8), (103, 101.5, 102.8), (104, 102.5, 103.8),
-            (105, 103.5, 104.8), (105.5, 104.5, 105.2)]
+    tail = [(111.0, 108.5, 109.5), (109, 107, 108.0), (108, 105.5, 106.0),
+            (106, 104, 104.5), (105, 103, 103.5), (104, 102, 103.0)]
     for j, (h, l, cl) in enumerate(tail):
-        idx = 240 - 8 + j
+        idx = 240 - len(tail) + j
         c5[idx] = c(h, l, cl, idx * 300_000)
     return c5, c15
 
 
 def test_run_intraday_finds_trade():
     c5, c15 = _aligned()
-    trades = backtest.run_intraday("long", c5, c15, warmup5=200, cooldown=2)
+    trades = backtest.run_intraday("short", c5, c15, warmup5=200, cooldown=2)
     assert len(trades) >= 1
 
 
 def test_run_intraday_allow_filter_restricts_triggers():
     c5, c15 = _aligned()
-    trades = backtest.run_intraday("long", c5, c15, warmup5=200, cooldown=2, allow=("A",))
-    assert all(t["trigger"] == "long_A" for t in trades)
+    trades = backtest.run_intraday("short", c5, c15, warmup5=200, cooldown=2, allow=("A",))
+    assert all(t["trigger"] == "short_A" for t in trades)
+
+
+def test_run_intraday_retest_mode_runs():
+    c5, c15 = _aligned()
+    trades = backtest.run_intraday("short", c5, c15, warmup5=200, cooldown=2,
+                                   allow=("A",), trig_params={"entry_mode": "retest"})
+    assert all(t["trigger"] == "short_A" for t in trades)
 
 
 def test_run_intraday_empty_on_flat():

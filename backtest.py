@@ -90,8 +90,12 @@ def run(side, candles, *, warmup=40, horizon=48, cooldown=4,
         _, block = decide._pick_trigger(trig)
         if not block:
             continue
-        synth = {"t": window[-1]["t"], "o": px, "h": px, "l": px, "c": px, "v": 0.0}
-        fwd = [synth] + candles[i + 1:i + 1 + horizon]
+        tail = candles[i + 1:i + 1 + horizon]
+        if block.get("entry_mode", "close") == "close":
+            synth = {"t": window[-1]["t"], "o": px, "h": px, "l": px, "c": px, "v": 0.0}
+            fwd = [synth] + tail
+        else:  # retest: no synthetic fill — PENDING waits for price to return
+            fwd = tail
         res = replay.simulate_trigger(block, side, fwd)
         if res["status"] == "unfilled":
             continue
@@ -135,8 +139,12 @@ def run_intraday(side, c5, c15, *, warmup5=60, cooldown=6, horizon_cap=288,
         if not block:
             continue
         day_end = (c5[i]["t"] // DAY_MS + 1) * DAY_MS
-        synth = {"t": c5[i]["t"], "o": px, "h": px, "l": px, "c": px, "v": 0.0}
-        fwd = [synth] + [c for c in c5[i + 1:] if c["t"] < day_end][:horizon_cap]
+        tail = [c for c in c5[i + 1:] if c["t"] < day_end][:horizon_cap]
+        if block.get("entry_mode", "close") == "close":
+            synth = {"t": c5[i]["t"], "o": px, "h": px, "l": px, "c": px, "v": 0.0}
+            fwd = [synth] + tail
+        else:  # retest: no synthetic fill — PENDING waits for price to return
+            fwd = tail
         res = replay.simulate_trigger(block, side, fwd)
         if res["status"] == "unfilled":
             continue

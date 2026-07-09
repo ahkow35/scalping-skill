@@ -26,6 +26,8 @@ DEFAULT_PARAMS = {
     "min_net_rr_t1": 2.0,     # Step 6c net-R:R floor on T1
     "sweep_lookback": 3,      # recent bars scanned for the sweep wick
     "confirm_close": True,    # require the latest close to confirm the pattern
+    "entry_mode": "close",    # "close" = market at signal-bar close;
+                              # "retest" = limit at the level (fills only on retest)
 }
 
 
@@ -80,12 +82,13 @@ def _prev_close(candles):
     return float(candles[-2]["c"]) if len(candles) >= 2 else _last_close(candles)
 
 
-def _mk(side, name, entry, stop, t1, t2, reason, p, fired):
+def _mk(side, name, entry, stop, t1, t2, reason, p, fired, entry_mode="close"):
     """Build a trigger result, validating trade geometry and R:R."""
     blank = {
         "trigger": name, "fired": False, "entry": entry, "stop": stop,
         "t1": t1, "t2": t2, "rr_t1": 0.0, "rr_t2": 0.0,
-        "net_rr_t1": 0.0, "net_rr_t2": 0.0, "passes_rr": False, "reason": reason,
+        "net_rr_t1": 0.0, "net_rr_t2": 0.0, "passes_rr": False,
+        "entry_mode": entry_mode, "reason": reason,
     }
     if fired and t1 is None and entry is not None and stop is not None:
         blank["reason"] = "pattern present but no structural target beyond entry"
@@ -106,8 +109,14 @@ def _mk(side, name, entry, stop, t1, t2, reason, p, fired):
         "rr_t1": round(rr_t1, 2), "rr_t2": round(rr_t2, 2),
         "net_rr_t1": round(net_t1, 2), "net_rr_t2": round(net_t2, 2),
         "passes_rr": net_t1 >= p["min_net_rr_t1"],
-        "reason": reason,
+        "entry_mode": entry_mode, "reason": reason,
     }
+
+
+def _entry(p, px, level):
+    """close-mode enters at the signal-bar close; retest-mode enters at the
+    structural level (a limit that only fills if price returns to it)."""
+    return px if p["entry_mode"] == "close" else level
 
 
 # ---- long triggers ----
@@ -119,27 +128,33 @@ def long_a_sweep_reclaim(s, candles, p):
     px = s["price"]
     if p["confirm_close"] and _last_close(candles) <= floor["price"]:
         return _mk("long", "long_A", None, None, None, None, "close not back above floor", p, False)
-    pool = _nearest_below(_floors(s), floor["price"])
-    lows = [float(k["l"]) for k in candles[-p["sweep_lookback"]:]]
-    ref = pool["price"] if pool else (min(lows) if lows else floor["price"])
-    stop = ref - _buffer(s, p)
+    # Faithful stop: BELOW the next structural pool below the swept floor (any
+    # tested level). No pool -> no structural stop -> skip (never noise-tight).
+    pool = _nearest_below(_all_levels(s), floor["price"])
+    if not pool:
+        return _mk("long", "long_A", None, None, None, None,
+                   "no structural pool below floor for stop", p, False)
+    stop = pool["price"] - _buffer(s, p)
     t1, t2 = _targets("long", s, px)
-    return _mk("long", "long_A", px, stop, t1, t2,
-               "sweep+reclaim of tested floor", p, True)
+    entry = _entry(p, px, floor["price"])  # retest = the reclaimed floor
+    return _mk("long", "long_A", entry, stop, t1, t2,
+               "sweep+reclaim of tested floor", p, True, entry_mode=p["entry_mode"])
 
 
 def long_b_momentum_break(s, candles, p):
     px = s["price"]
-    broken = _nearest_below(_all_levels(s), px)
+    # Momentum-break is a CEILING break only (a floor recapture is not a break).
+    broken = _nearest_below(_ceilings(s), px)
     if not broken:
-        return _mk("long", "long_B", None, None, None, None, "no level below to break", p, False)
+        return _mk("long", "long_B", None, None, None, None, "no tested ceiling below to break", p, False)
     fresh = _prev_close(candles) <= broken["price"] < _last_close(candles)
     if not fresh:
         return _mk("long", "long_B", None, None, None, None, "no fresh close above ceiling", p, False)
     stop = broken["price"] - _buffer(s, p)
     t1, t2 = _targets("long", s, px)
-    return _mk("long", "long_B", px, stop, t1, t2,
-               "fresh close above tested ceiling", p, True)
+    entry = _entry(p, px, broken["price"])  # retest = broken ceiling as support
+    return _mk("long", "long_B", entry, stop, t1, t2,
+               "fresh close above tested ceiling", p, True, entry_mode=p["entry_mode"])
 
 
 # ---- short triggers ----
@@ -155,8 +170,9 @@ def short_a_failed_breakout(s, candles, p):
     ref = max(highs) if highs else ceil["price"]
     stop = ref + _buffer(s, p)
     t1, t2 = _targets("short", s, px)
-    return _mk("short", "short_A", px, stop, t1, t2,
-               "sweep+rejection of tested ceiling", p, True)
+    entry = _entry(p, px, ceil["price"])  # retest = the rejected ceiling from below
+    return _mk("short", "short_A", entry, stop, t1, t2,
+               "sweep+rejection of tested ceiling", p, True, entry_mode=p["entry_mode"])
 
 
 def short_b_lower_high(s, candles, p):
@@ -172,8 +188,9 @@ def short_b_lower_high(s, candles, p):
         return _mk("short", "short_B", None, None, None, None, "no rejection below lower high", p, False)
     stop = lower_high["price"] + _buffer(s, p)
     t1, t2 = _targets("short", s, px)
-    return _mk("short", "short_B", px, stop, t1, t2,
-               "rejection at lower swing high", p, True)
+    entry = _entry(p, px, lower_high["price"])  # retest = back up to the lower high
+    return _mk("short", "short_B", entry, stop, t1, t2,
+               "rejection at lower swing high", p, True, entry_mode=p["entry_mode"])
 
 
 def evaluate(side, structure_out, candles, *, params=None):
