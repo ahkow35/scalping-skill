@@ -14,6 +14,27 @@ Status: APPROVED — decisions locked · 2026-07-09 · repo `ahkow35/scalping-sk
 Net effect vs. the original draft: v1 is Phases 0–4 only; no dashboard, no
 external state store, no Site Data write to verify.
 
+## Phase 3 result (2026-07-09) — NO-GO
+
+The backtest gate FAILED. Over 90 days of real HYPE 15m, every deterministic
+trigger is net-negative (raw expectancy, the conservative lower bound):
+- `long_B` momentum-break: n=31, win 25.8%, **-0.48R**
+- `short_A` failed-breakout: n=12, win 16.7%, **-0.75R**
+- `short_B` lower-high reject: n=13, win 15.4%, **-0.54R**
+- `long_A` sweep-reclaim: never qualified in 90d (R:R floor too strict, or the
+  pattern is genuinely rare — flagged for review).
+
+Robustness lenses confirm the negative is real, not a tuning artefact: widening
+the stop only walks the loss toward zero from below (trade-less-lose-less, not a
+positive plateau), and noise injection degrades expectancy smoothly from a
+negative baseline. **Phase 4 (VPS deploy) is BLOCKED** — deploying a
+negative-expectancy signal would lose money. The engine + harness remain valid,
+reusable IP; the triggers-as-specified do not have demonstrable edge on HYPE.
+
+Open decision: iterate the triggers using the now-existing harness (best lead:
+a historically-computable regime filter — `regime.py` is candle-only for
+compression/directionality/BTC-corr), or shelve.
+
 ## Goal
 
 Run the scalp analysis unattended all day, and get pushed a notification the
