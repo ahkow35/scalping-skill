@@ -66,13 +66,16 @@ The backtest measures **raw trigger expectancy** — it does *not* apply the
 live-only gates (flow/taker-delta, behavioral state, regime) because those
 caches only build live and cannot be reconstructed historically.
 
-**Assumption (challengeable — see §6.2):** the live gates only ever *cut* or
-*shrink* trades, never add them, so raw expectancy bounds the gated system's
-*exposure*. Precise statement: a negative raw expectancy is not automatically
-fatal *iff* the untestable flow/regime selection has strong skill at removing
-losers — but that is an unfalsifiable rescue, and (per §5) the signal fails to
-generalize across coins even before gating, which coin-agnostic gates could not
-repair.
+**Assumption (fair statement, per reviewer #4):** the backtest omits the live
+gates because their inputs can't be reconstructed. The gates reduce *exposure*
+(fewer/smaller trades) — but "they only cut trades" does NOT prove they cannot
+improve expectancy: a gate that *preferentially cuts losers* would raise it. The
+honest position is therefore: **we have no historical proof the gates select
+winners, so deploying on the hope that they do would be faith-based.** What the
+data does show (§4, §4b) is that the underlying signal is negative *and fails to
+generalize across coins* even before gating — and the gates are coin-agnostic
+selection layers, so it is implausible (though not strictly proven) that they
+would manufacture coin-generalizable edge from a coin-specific negative signal.
 
 ### 3.4 Fixed parameters (not exhaustively swept — see §6.3)
 pivot window 2/2; cluster band 0.5×ATR; min_touches 2; stop_buffer 0.25×ATR;
@@ -139,12 +142,44 @@ negative-to-breakeven on three fresh coins. This is the signature of
 
 ---
 
+### Exp 4b — Post-review faithfulness patch + rerun (definitive)
+An external reviewer identified that `triggers.py` mis-ported three things:
+long_B broke *any* nearest level (not tested ceilings only), long_A fell back to
+a noise-tight wick stop when no structural pool existed, and retest entries
+weren't modelled. All three were fixed (commit `889d733`) and the OOS rerun was
+equalized to **60d across all four coins**, testing **close vs retest** entries.
+
+net expectancy R (pooled 4 coins, 60d, floor 2.0):
+
+| Setup | close entry | retest entry |
+|---|---|---|
+| long_A (flush-reclaim) | n15, 33% win, **−0.08R** | n99, 15% win, **−1.09R** |
+| long_B (momentum-break) | n119, 30% win, **−0.35R** | n430, 20% win, **−0.87R** |
+| short_A (failed-breakout) | n54, 19% win, **−0.73R** | n302, 20% win, **−0.77R** |
+| short_B (lower-high) | n0 — never clears the R:R floor intraday | n0 |
+
+Two things the patch revealed:
+1. **The earlier "HYPE long_A +0.40R" was a bug artifact.** With the faithful
+   structural stop, HYPE long_A collapses to **n1 / −1.40R** — the noise-tight
+   fallback stop had been admitting/mis-stopping trades the spec would skip. The
+   reviewer's item #3 was correct and material.
+2. **Retest entries are uniformly WORSE**, not better — they fire far more often
+   and lose more (the limit fills on pullbacks that then continue against the
+   trade). The retest hypothesis is refuted, not supported.
+
+Every trigger, every entry mode, is net-negative pooled across coins. Best case
+is long_A-close at −0.08R (near breakeven) on n15 — mixed-sign, tiny, and still
+negative. **The faithfulness patch strengthened the veto rather than lifting it.**
+
 ## 5. Conclusion
 
 Every deterministic trigger is net-negative to breakeven, out-of-sample, on
-every fresh coin, on the faithful intraday timeframe. The single positive result
-(long_A on HYPE) does not generalize. **No generalizable edge exists in these
-triggers as specified → do not deploy the live bot.** The build (engine +
+every fresh coin, on the faithful intraday timeframe, in **both** close and
+retest entry modes (§4b). The one apparent positive (HYPE long_A) was traced to
+a stop-placement bug and disappeared once fixed. **No generalizable edge exists
+in these triggers → do not deploy the live bot.** This verdict survived an
+external code review that corrected the highest-risk weakness (port faithfulness)
+and *strengthened* rather than lifted the conclusion. The build (engine +
 harness) is retained as reusable tooling; the trade *signal* is not there.
 
 Secondary finding: unfiltered trading (floor 0) loses ~10× more than the gated
@@ -155,11 +190,12 @@ system (Exp 2), i.e. the skill's value is its **discipline/gating layer**
 
 ## 6. Limitations — what a skeptical reviewer should check
 
-1. **Faithfulness of the port.** `structure.py`/`triggers.py` are *my*
-   interpretation of the skill's prose (`scalp-long.md`, `scalp-short.md`). If a
-   trigger is mis-specified (e.g. entry-on-retest vs entry-at-signal, or a
-   stop-placement rule), the negative could be an artifact of the port, not the
-   strategy. **Highest-priority check.** Diff the modules against the skill docs.
+1. **Faithfulness of the port.** [ADDRESSED — reviewer round 1, commit `889d733`.]
+   The port was reviewed against `scalp-long.md`/`scalp-short.md`; three real
+   mis-specifications were found and fixed (long_B ceiling-only; long_A
+   structural-pool stop or skip; close-vs-retest entry variants). Re-running OOS
+   post-fix (§4b) strengthened the negative. Residual risk: further prose nuances
+   not yet caught. This is no longer the top open risk.
 2. **The "raw expectancy" assumption (§3.3).** The backtest omits the flow /
    behavioral / regime gates. I argue they can only reduce exposure, not create
    coin-generalizable edge — but this is the load-bearing methodological claim.
@@ -171,9 +207,9 @@ system (Exp 2), i.e. the skill's value is its **discipline/gating layer**
 4. **Sample sizes are small for the intraday setups** (long_A n=3–14 per coin).
    The OOS *direction* is consistent (negative on all fresh coins), but each
    per-coin estimate has a wide error bar.
-5. **Window inconsistency in Exp 4.** HYPE ran 90d; SOL/INJ/NEAR ran 60d (the
-   first 4-coin run hit an API rate-limit; the retry used 60d + throttling).
-   Windows should be equalized for a clean comparison — easy to redo.
+5. **Window inconsistency in Exp 4.** [ADDRESSED — §4b equalizes all four coins
+   to 60d.] The original Exp 4 mixed 90d (HYPE) and 60d (others); the post-patch
+   rerun uses 60d uniformly.
 6. **Single era / four coins.** All data is crypto ~mid-2026 (a chop-to-down
    regime for HYPE). A different regime or a broader coin set could differ.
 7. **Fill model optimism/pessimism.** Market-fill-at-close is mildly optimistic
@@ -223,4 +259,6 @@ walk-forward (finds trades, empty on flat, cooldown, same-day stop, allow-list).
 - `cc74105` decision orchestrator
 - `34934d3` backtest harness (Phase 3, first NO-GO)
 - `e95f771` intraday two-timeframe path
-- `713a288` final verdict (this analysis) in `PLAN-live-bot-2026-07-09.md`
+- `713a288` final verdict in `PLAN-live-bot-2026-07-09.md`
+- `889d733` reviewer faithfulness patch (long_B ceilings-only; long_A pool-stop
+  or skip; close-vs-retest entries) → Exp 4b rerun (strengthened the veto)

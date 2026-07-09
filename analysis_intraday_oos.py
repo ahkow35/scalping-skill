@@ -78,20 +78,24 @@ def exp3(coin, days=60):
 
 
 def exp4(coins=("HYPE", "SOL", "INJ", "NEAR"), days=60):
+    """§4b definitive rerun: all triggers × close-vs-retest × coins, equalized."""
     now = int(time.time() * 1000)
-    print(f"Exp 4 — OOS long_A vs long_B, {days}d intraday, floor 2.0\n")
-    pool_a = []
-    for coin in coins:
-        c5, c15 = _hist(coin, "5m", days, now), _hist(coin, "15m", days, now)
-        ta = backtest.run_intraday("long", c5, c15, allow=("A",))
-        tb = backtest.run_intraday("long", c5, c15, allow=("B",))
-        pool_a += ta
-        na, wa, ea, tota = _stat(ta)
-        nb, _, eb, totb = _stat(tb)
-        print(f"  {coin:5} long_A n{na:<3} win{wa:>5}% exp{ea:+.3f} tot{tota:+6.1f}"
-              f"   | long_B n{nb:<3} exp{eb:+.3f} tot{totb:+6.1f}")
-    n, w, e, tot = _stat(pool_a)
-    print(f"\n  POOLED long_A: n{n} win{w}% exp{e:+.3f}R total{tot:+.1f}R")
+    data = {co: (_hist(co, "5m", days, now), _hist(co, "15m", days, now)) for co in coins}
+    print(f"Exp 4b — OOS, {days}d intraday, floor 2.0, all coins equalized\n")
+    for side, letter in (("long", "A"), ("long", "B"), ("short", "A"), ("short", "B")):
+        for mode in ("close", "retest"):
+            pool, cells = [], []
+            for co in coins:
+                c5, c15 = data[co]
+                tr = backtest.run_intraday(side, c5, c15, allow=(letter,),
+                                           trig_params={"entry_mode": mode})
+                pool += tr
+                n, _, e, _ = _stat(tr)
+                cells.append(f"{co} n{n} {e:+.2f}")
+            n, w, e, tot = _stat(pool)
+            print(f"  {side}_{letter} {mode:6}: POOL n{n:<3} win{w:>5}% exp{e:+.3f}R "
+                  f"tot{tot:+7.1f}  [{' | '.join(cells)}]")
+        print()
 
 
 if __name__ == "__main__":

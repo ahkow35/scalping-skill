@@ -65,6 +65,12 @@ real value was always the GATING (macro veto, behavioral discipline, R:R floor,
 sizing) that keeps you OUT of bad trades, not alpha generation. The backtest
 proves it: unfiltered trading (floor 0) loses ~10× more than the gated system.
 
+**Post-review update (commit `889d733`):** an external reviewer corrected three
+port mis-specifications (long_B ceilings-only, long_A structural-pool stop or
+skip, close-vs-retest entries). The equalized 60d rerun (see FINDINGS §4b)
+*strengthened* the veto — the apparent HYPE long_A edge was a stop-bug artifact
+(→ n1/−1.40R fixed); retest entries are uniformly worse. Verdict unchanged: shelve.
+
 ## Goal
 
 Run the scalp analysis unattended all day, and get pushed a notification the
