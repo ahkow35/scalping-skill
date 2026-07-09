@@ -26,8 +26,9 @@ robust NO-GO: the triggers have no generalizable edge. Not deployed.
   alpha (unfiltered trading loses ~10× more than the gated system).
 - **Docs:** `PLAN-live-bot-2026-07-09.md`, `FINDINGS-live-bot-2026-07-10.md`
   (reviewer-facing), `analysis_rr_sweep.py`, `analysis_intraday_oos.py`.
-- **Branch:** `feat/deterministic-live-bot` (PR #1) — not merged; alert-only,
-  never executes orders.
+- **Branch:** `feat/deterministic-live-bot` (PR #1) — merged to main 2026-07-10
+  (merge `4ea2ca0`) as reference tooling; not wired into the live `/scalp`
+  skill, alert-only, never executes orders.
 
 ## 2026-07-07 — VWAP + OI context (READ-ONLY Phase 1)
 
