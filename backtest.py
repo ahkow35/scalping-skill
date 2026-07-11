@@ -36,6 +36,7 @@ import decide
 import replay
 import structure
 import triggers
+import volume
 from fetch_market import HL_INFO, _post_json
 
 _MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000}
@@ -111,17 +112,46 @@ def run(side, candles, *, warmup=40, horizon=48, cooldown=4,
 DAY_MS = 86_400_000
 
 
+_SWEEP_BAR_KEY = {"long": "sweep_reclaim_bar", "short": "sweep_rejection_bar"}
+
+
+def passes_vol_filter(vol_filter, rvol_signal, rvol_sweep):
+    """Admission check for one candidate trade. `vol_filter` is None (off,
+    always admits) or {"kind": "F1"|"F2", "min_rvol": k}. F1 gates on
+    rvol_signal; F2 gates on rvol_sweep — an undefined basis (None, e.g. a
+    non-A trigger under F2) never admits, regardless of k."""
+    if vol_filter is None:
+        return True
+    basis = rvol_signal if vol_filter["kind"] == "F1" else rvol_sweep
+    return basis is not None and basis >= vol_filter["min_rvol"]
+
+
 def run_intraday(side, c5, c15, *, warmup5=60, cooldown=6, horizon_cap=288,
-                 struct_params=None, trig_params=None, allow=("A", "B")):
+                 struct_params=None, trig_params=None, allow=("A", "B"),
+                 vol_filter=None):
     """Faithful scalp walk-forward: LEVELS from 15m structure, SWEEP + ENTRY on
     5m closes, and a same-UTC-day time-stop (never carry past 00:00 UTC). Shares
     structure.with_entry_sweeps with the live engine so backtest == live. Pure;
     takes candles, no network. No look-ahead: 15m levels use only bars fully
     closed before the 5m entry bar's close; the fill sim sees only later 5m bars.
+
+    Every trade dict also carries `rvol_signal` (signal-bar RVOL, F1 basis) and
+    `rvol_sweep` (the sweep bar's RVOL for long_A/short_A only, F2 basis; None
+    otherwise) — computed unconditionally so callers can run the un-gated
+    population (e.g. the A1 quartile diagnostic) without a second pass.
+
+    vol_filter: optional admission-layer volume gate, default None (OFF; the
+    existing walk-forward is byte-identical to pre-filter behaviour when this
+    is left None). A dict {"kind": "F1"|"F2", "min_rvol": k}: F1 gates on
+    rvol_signal for any trigger; F2 gates on rvol_sweep (long_A/short_A only —
+    a non-A trigger, or an undefined RVOL, never passes F2). This does not
+    touch trigger internals; it is purely an extra admission check alongside
+    the existing R:R-floor admission (`decide._pick_trigger`).
     """
     trades = []
     last_fire = -10**9
     allow = set(allow)
+    ts_idx = {c["t"]: idx for idx, c in enumerate(c5)}
     for i in range(warmup5, len(c5) - 1):
         if i - last_fire < cooldown:
             continue
@@ -138,6 +168,18 @@ def run_intraday(side, c5, c15, *, warmup5=60, cooldown=6, horizon_cap=288,
         _, block = decide._pick_trigger(trig)
         if not block:
             continue
+
+        rvol_signal = volume.rvol(c5, i)
+        rvol_sweep = None
+        if block["trigger"] in ("long_A", "short_A"):
+            sweep_bar = s.get(_SWEEP_BAR_KEY[side])
+            sweep_idx = ts_idx.get(sweep_bar["t"]) if sweep_bar else None
+            if sweep_idx is not None:
+                rvol_sweep = volume.rvol(c5, sweep_idx)
+
+        if not passes_vol_filter(vol_filter, rvol_signal, rvol_sweep):
+            continue  # admission-layer volume filter rejects this trade
+
         day_end = (c5[i]["t"] // DAY_MS + 1) * DAY_MS
         tail = [c for c in c5[i + 1:] if c["t"] < day_end][:horizon_cap]
         if block.get("entry_mode", "close") == "close":
@@ -153,6 +195,7 @@ def run_intraday(side, c5, c15, *, warmup5=60, cooldown=6, horizon_cap=288,
             "i": i, "t": c5[i]["t"], "trigger": block["trigger"],
             "net_r": res["net_r"], "gross_r": res["r"],
             "status": res["status"], "ambiguous": res["ambiguous"],
+            "rvol_signal": rvol_signal, "rvol_sweep": rvol_sweep,
         })
     return trades
 

@@ -90,32 +90,46 @@ def cluster_levels(pivots, kind, eps):
     return out
 
 
-def detect_sweep(candles, level_price, kind, lookback=3):
-    """Did price sweep a level and close back through it within the last
-    `lookback` bars? ceiling: a bar wicks above (high > level) but closes below
-    (rejection). floor: a bar wicks below (low < level) but closes above
-    (reclaim). Returns bool."""
+def detect_sweep_bar(candles, level_price, kind, lookback=3):
+    """Like detect_sweep, but returns the actual bar (candle dict) that
+    pierced the level and closed back through it, or None if no bar in the
+    last `lookback` bars qualifies. ceiling: wicks above (high > level) but
+    closes below (rejection). floor: wicks below (low < level) but closes
+    above (reclaim). If more than one bar in the window qualifies, returns
+    the most recent one (closest to the current signal bar)."""
+    hit = None
     for k in candles[-lookback:] if lookback > 0 else []:
         hi, lo, cl = float(k["h"]), float(k["l"]), float(k["c"])
         if kind == "ceiling" and hi > level_price and cl < level_price:
-            return True
+            hit = k
         if kind == "floor" and lo < level_price and cl > level_price:
-            return True
-    return False
+            hit = k
+    return hit
+
+
+def detect_sweep(candles, level_price, kind, lookback=3):
+    """Did price sweep a level and close back through it within the last
+    `lookback` bars? Returns bool (see detect_sweep_bar for the bar itself)."""
+    return detect_sweep_bar(candles, level_price, kind, lookback) is not None
 
 
 def with_entry_sweeps(structure_out, entry_candles, *, lookback=3):
     """Two-timeframe helper: take a structure read whose LEVELS came from a
     higher timeframe (e.g. 15m) and recompute the sweep_reclaim / sweep_rejection
     flags on a FINER entry timeframe (e.g. 5m) against those same levels. This
-    is what lets the scalp enter on a fast 5m sweep of a slow 15m level. Returns
-    a shallow copy; never raises."""
+    is what lets the scalp enter on a fast 5m sweep of a slow 15m level. Also
+    exposes the actual sweep bar (sweep_reclaim_bar / sweep_rejection_bar —
+    the candle that pierced the level, not the later reclaim/rejection signal
+    bar) so callers can score climax volume on the bar that actually did the
+    piercing. Returns a shallow copy; never raises."""
     s = dict(structure_out) if isinstance(structure_out, dict) else {}
     ca, fb = s.get("ceiling_above"), s.get("floor_below")
-    s["sweep_rejection"] = (detect_sweep(entry_candles, ca["price"], "ceiling", lookback)
-                            if ca else False)
-    s["sweep_reclaim"] = (detect_sweep(entry_candles, fb["price"], "floor", lookback)
-                          if fb else False)
+    rej_bar = detect_sweep_bar(entry_candles, ca["price"], "ceiling", lookback) if ca else None
+    rec_bar = detect_sweep_bar(entry_candles, fb["price"], "floor", lookback) if fb else None
+    s["sweep_rejection"] = rej_bar is not None
+    s["sweep_reclaim"] = rec_bar is not None
+    s["sweep_rejection_bar"] = rej_bar
+    s["sweep_reclaim_bar"] = rec_bar
     return s
 
 

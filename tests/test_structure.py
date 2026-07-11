@@ -80,6 +80,28 @@ def test_detect_sweep_false_when_clean_break():
     assert structure.detect_sweep(candles, 100.0, "ceiling", lookback=3) is False
 
 
+# ---- detect_sweep_bar ----
+
+def test_detect_sweep_bar_returns_the_piercing_bar():
+    clean = c(0, 100.5, 99, 100.0, t="clean")
+    pierce = c(0, 101.5, 99, 99.8, t="pierce")  # wicks above 100, closes below
+    candles = [clean, pierce]
+    hit = structure.detect_sweep_bar(candles, 100.0, "ceiling", lookback=3)
+    assert hit is pierce
+
+
+def test_detect_sweep_bar_none_when_no_bar_qualifies():
+    candles = [c(0, 100.5, 99, 100.0, t="a")]
+    assert structure.detect_sweep_bar(candles, 100.0, "ceiling", lookback=3) is None
+
+
+def test_detect_sweep_bar_picks_most_recent_when_multiple_qualify():
+    first = c(0, 101.0, 99, 99.7, t="first")   # pierces, closes below
+    second = c(0, 101.8, 99, 99.9, t="second")  # also pierces, closes below
+    hit = structure.detect_sweep_bar([first, second], 100.0, "ceiling", lookback=3)
+    assert hit is second
+
+
 # ---- _trend ----
 
 def test_trend_up_on_higher_highs_and_lows():
@@ -179,3 +201,14 @@ def test_with_entry_sweeps_handles_missing_levels():
     s = structure.with_entry_sweeps({"ceiling_above": None, "floor_below": None},
                                     [c(0, 101, 99, 100)])
     assert s["sweep_reclaim"] is False and s["sweep_rejection"] is False
+    assert s["sweep_reclaim_bar"] is None and s["sweep_rejection_bar"] is None
+
+
+def test_with_entry_sweeps_exposes_the_actual_sweep_bar():
+    s15 = {"ceiling_above": {"price": 110.0}, "floor_below": {"price": 100.0},
+           "sweep_reclaim": False, "sweep_rejection": False}
+    calm = c(0, 100.5, 99.5, 100.2, t="calm")
+    pierce = c(0, 99.5, 98.5, 100.5, t="pierce")  # wicks below 100, closes above
+    s = structure.with_entry_sweeps(s15, [calm, pierce])
+    assert s["sweep_reclaim_bar"] is pierce
+    assert s["sweep_rejection_bar"] is None

@@ -131,3 +131,81 @@ def test_run_intraday_empty_on_flat():
     c5 = [c(105, 100, 102, i * 300_000) for i in range(240)]
     c15 = [c(105, 100, 102, i * 900_000) for i in range(80)]
     assert backtest.run_intraday("long", c5, c15, warmup5=200) == []
+
+
+# ---- volume-filter admission layer (vol_filter, default OFF) ----
+
+def test_run_intraday_attaches_rvol_fields_unconditionally():
+    c5, c15 = _aligned()
+    trades = backtest.run_intraday("short", c5, c15, warmup5=200, cooldown=2, allow=("A",))
+    assert len(trades) >= 1
+    for tr in trades:
+        assert "rvol_signal" in tr and tr["rvol_signal"] is not None
+        # every trade here is short_A (a sweep trigger) with a real sweep bar
+        assert tr["trigger"] == "short_A"
+        assert tr["rvol_sweep"] is not None
+
+
+def test_run_intraday_vol_filter_none_matches_unfiltered_default():
+    c5, c15 = _aligned()
+    base = backtest.run_intraday("short", c5, c15, warmup5=200, cooldown=2, allow=("A",))
+    explicit = backtest.run_intraday("short", c5, c15, warmup5=200, cooldown=2,
+                                     allow=("A",), vol_filter=None)
+    assert [t["i"] for t in base] == [t["i"] for t in explicit]
+
+
+def test_run_intraday_f1_filter_rejects_all_on_flat_constant_volume():
+    # _aligned()'s candles all carry the same constant volume -> rvol_signal
+    # is always 1.0, so any k > 1.0 must reject every trade.
+    c5, c15 = _aligned()
+    trades = backtest.run_intraday("short", c5, c15, warmup5=200, cooldown=2,
+                                   allow=("A",), vol_filter={"kind": "F1", "min_rvol": 1.5})
+    assert trades == []
+
+
+def test_run_intraday_f1_filter_admits_a_genuinely_high_volume_signal_bar():
+    c5, c15 = _aligned()
+    unfiltered = backtest.run_intraday("short", c5, c15, warmup5=200, cooldown=2, allow=("A",))
+    assert unfiltered  # sanity: fixture fires at least one short_A
+    target_i = unfiltered[0]["i"]
+    boosted = [dict(bar) for bar in c5]
+    boosted[target_i]["v"] = 6000.0  # prior-20 mean is 1000 -> rvol 6.0
+    trades = backtest.run_intraday("short", boosted, c15, warmup5=200, cooldown=2,
+                                   allow=("A",), vol_filter={"kind": "F1", "min_rvol": 5.0})
+    assert any(t["i"] == target_i for t in trades)
+
+
+def test_run_intraday_f2_filter_rejects_low_sweep_rvol():
+    # constant volume in the fixture -> rvol_sweep is always 1.0, below 1.5
+    c5, c15 = _aligned()
+    trades = backtest.run_intraday("short", c5, c15, warmup5=200, cooldown=2,
+                                   allow=("A",), vol_filter={"kind": "F2", "min_rvol": 1.5})
+    assert trades == []
+
+
+# ---- passes_vol_filter (extracted admission predicate) ----
+
+def test_passes_vol_filter_off_always_admits():
+    assert backtest.passes_vol_filter(None, None, None) is True
+    assert backtest.passes_vol_filter(None, 0.1, None) is True
+
+
+def test_passes_vol_filter_f1_gates_on_signal_rvol():
+    f = {"kind": "F1", "min_rvol": 2.0}
+    assert backtest.passes_vol_filter(f, 2.0, None) is True   # boundary passes
+    assert backtest.passes_vol_filter(f, 1.99, None) is False
+    assert backtest.passes_vol_filter(f, None, 5.0) is False  # undefined signal rvol
+
+
+def test_passes_vol_filter_f2_gates_on_sweep_rvol():
+    f = {"kind": "F2", "min_rvol": 2.0}
+    assert backtest.passes_vol_filter(f, 5.0, 2.0) is True
+    assert backtest.passes_vol_filter(f, 5.0, 1.9) is False
+
+
+def test_passes_vol_filter_f2_never_admits_a_trigger_without_a_sweep_basis():
+    # a non-A trigger (long_B/short_B) never has a sweep bar -> rvol_sweep is
+    # always None -> F2 must reject it regardless of k or how strong the
+    # signal-bar RVOL was.
+    f = {"kind": "F2", "min_rvol": 0.0}
+    assert backtest.passes_vol_filter(f, 100.0, None) is False
