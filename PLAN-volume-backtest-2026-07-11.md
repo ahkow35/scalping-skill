@@ -125,6 +125,26 @@ bad in Asia (00–08 UTC) and worst in US hours; mean RVOL is similar across
 sessions (1.5–1.9), so the rolling-20 RVOL definition is not badly
 session-confounded.
 
+### Review (2026-07-12, independent reviewer — verdict PASS)
+
+The NO-EDGE conclusion was independently attacked and held: RVOL computation,
+F2 sweep-bar identification, and admission wiring verified clean (no
+look-ahead/leakage); the long_A close n0 anomaly reproduced as genuine market
+data (the unfiltered floor-2.0 population is itself n0 on HYPE this window).
+Findings actioned:
+1. **Monotonicity classifier was stricter than pre-registered criterion 3**
+   (demanded a full Q1..Q4 staircase; plan requires only top ≥ bottom). Fixed
+   post-review to the plan's literal criterion. Reviewer verified by direct
+   rerun that no A2 cell flips in this run (criterion 1 fails every cell
+   independently); the fix matters only for reruns. The tables above retain
+   the original run's stricter labels.
+2. **Process gap:** the criteria-encoding script was committed together with
+   results, not before the run. No evidence of cherry-picking (the defect was
+   uniformly over-strict), but future pre-registered studies must commit the
+   analysis script BEFORE execution.
+3. **Ambiguity noted:** under retest entry mode, RVOL is measured on the
+   trigger-detection bar, not the (later) fill bar — defensible, now explicit.
+
 ### Conclusion
 
 Volume-conditioned admission does **not** rescue the deterministic triggers.

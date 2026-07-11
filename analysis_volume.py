@@ -166,17 +166,21 @@ def _quartile_row(label, sub):
 
 
 def monotonicity_read(pooled_quartiles):
-    """Pass criterion 3's basis: is net expectancy monotone across Q1..Q4?"""
+    """Pass criterion 3's basis, exactly as pre-registered (plan criterion 3):
+    'top quartile >= bottom quartile in net R'. A strict Q1..Q4 staircase is
+    NOT required — reviewer finding 2026-07-12: the earlier all-pairs version
+    was stricter than the plan and could wrongly fail criterion 3 on a rerun.
+    The full ordering is still reported for context."""
     exps = [q["net_exp"] for q in pooled_quartiles if q["n"] > 0]
     if len(exps) < 2:
         return "insufficient data"
-    nondecr = all(exps[i] <= exps[i + 1] for i in range(len(exps) - 1))
-    nonincr = all(exps[i] >= exps[i + 1] for i in range(len(exps) - 1))
-    if nondecr and exps[0] < exps[-1]:
+    top_ge_bottom = exps[-1] >= exps[0]
+    staircase = all(exps[i] <= exps[i + 1] for i in range(len(exps) - 1))
+    if top_ge_bottom and staircase and exps[0] < exps[-1]:
         return "monotone increasing"
-    if nonincr and exps[0] > exps[-1]:
-        return "monotone decreasing (inverse)"
-    return "no clear monotone trend"
+    if top_ge_bottom:
+        return "top >= bottom (non-staircase)"
+    return "inverse (top < bottom)"
 
 
 def a1_table_for_trigger(side, letter, data, coins):
@@ -251,7 +255,7 @@ def a2_all(data, a1_results):
     for (side, letter, mode, family), by_k in groups.items():
         trigger_name = f"{side}_{letter}"
         mono = a1_results[trigger_name]["monotonicity"]
-        crit3 = mono == "monotone increasing"
+        crit3 = mono in ("monotone increasing", "top >= bottom (non-staircase)")
         ks = sorted(by_k)
         for idx, k in enumerate(ks):
             cell = by_k[k]
