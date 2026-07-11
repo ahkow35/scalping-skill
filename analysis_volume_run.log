@@ -1,0 +1,176 @@
+Fetching/loading 60d candles for ['HYPE', 'SOL', 'INJ', 'NEAR']...
+  HYPE: 5130 x 5m, 5044 x 15m
+  SOL: 5108 x 5m, 5036 x 15m
+  INJ: 5104 x 5m, 5035 x 15m
+  NEAR: 5123 x 5m, 5041 x 15m
+Running A1 (RVOL-quartile diagnostic, floor 0.0)...
+Running A2 (threshold filters, floor 2.0, close+retest)...
+Running A3 (session-split diagnostic)...
+
+=== A1 — RVOL-quartile expectancy (floor 0.0, entry_mode close) ===
+
+-- long_A -- monotonicity: no clear monotone trend
+  HYPE (n=269, excluded_no_rvol=0):
+    Q1 rvol[0.09, 0.53] n67   win 40.3% exp-0.081R tot-5.5
+    Q2 rvol[0.54, 1.0] n67   win 32.8% exp-0.305R tot-20.4
+    Q3 rvol[1.01, 1.76] n68   win 51.5% exp-0.164R tot-11.2
+    Q4 rvol[1.78, 16.51] n67   win 37.3% exp-0.258R tot-17.3
+  SOL (n=204, excluded_no_rvol=0):
+    Q1 rvol[0.07, 0.44] n51   win 31.4% exp-0.415R tot-21.2
+    Q2 rvol[0.45, 0.8] n51   win 37.3% exp-0.336R tot-17.1
+    Q3 rvol[0.81, 1.45] n51   win 35.3% exp-0.288R tot-14.7
+    Q4 rvol[1.46, 8.78] n51   win 29.4% exp-0.366R tot-18.7
+  INJ (n=243, excluded_no_rvol=0):
+    Q1 rvol[0.02, 0.24] n61   win 41.0% exp-0.341R tot-20.8
+    Q2 rvol[0.24, 0.57] n61   win 42.6% exp-0.295R tot-18.0
+    Q3 rvol[0.58, 1.56] n60   win 45.0% exp-0.271R tot-16.3
+    Q4 rvol[1.57, 74.03] n61   win 32.8% exp-0.306R tot-18.7
+  NEAR (n=248, excluded_no_rvol=0):
+    Q1 rvol[0.05, 0.33] n62   win 46.8% exp-0.198R tot-12.3
+    Q2 rvol[0.33, 0.76] n62   win 48.4% exp-0.257R tot-15.9
+    Q3 rvol[0.78, 1.59] n62   win 37.1% exp-0.300R tot-18.6
+    Q4 rvol[1.6, 17.84] n62   win 41.9% exp-0.232R tot-14.4
+  POOLED (n=964, excluded_no_rvol=0):
+    Q1 rvol[0.02, 0.4] n241  win 39.8% exp-0.265R tot-63.8
+    Q2 rvol[0.4, 0.81] n241  win 41.5% exp-0.280R tot-67.5
+    Q3 rvol[0.81, 1.64] n241  win 41.5% exp-0.241R tot-58.1
+    Q4 rvol[1.64, 74.03] n241  win 36.1% exp-0.297R tot-71.5
+
+-- long_B -- monotonicity: no clear monotone trend
+  HYPE (n=178, excluded_no_rvol=0):
+    Q1 rvol[0.12, 0.61] n44   win 31.8% exp-0.613R tot-27.0
+    Q2 rvol[0.61, 1.14] n45   win 22.2% exp-0.648R tot-29.2
+    Q3 rvol[1.16, 1.9] n45   win 22.2% exp-0.568R tot-25.6
+    Q4 rvol[1.91, 16.51] n44   win 31.8% exp-0.418R tot-18.4
+  SOL (n=156, excluded_no_rvol=0):
+    Q1 rvol[0.09, 0.45] n39   win 20.5% exp-0.574R tot-22.4
+    Q2 rvol[0.45, 0.86] n39   win 28.2% exp-0.847R tot-33.0
+    Q3 rvol[0.86, 1.61] n39   win 28.2% exp-0.637R tot-24.8
+    Q4 rvol[1.67, 14.43] n39   win 23.1% exp-0.985R tot-38.4
+  INJ (n=184, excluded_no_rvol=0):
+    Q1 rvol[0.02, 0.34] n46   win 30.4% exp-0.708R tot-32.6
+    Q2 rvol[0.36, 0.83] n46   win 37.0% exp-0.542R tot-24.9
+    Q3 rvol[0.83, 1.65] n46   win 37.0% exp-0.478R tot-22.0
+    Q4 rvol[1.66, 36.12] n46   win 26.1% exp-0.710R tot-32.7
+  NEAR (n=181, excluded_no_rvol=0):
+    Q1 rvol[0.04, 0.43] n45   win 20.0% exp-0.874R tot-39.3
+    Q2 rvol[0.46, 0.9] n45   win 33.3% exp-0.663R tot-29.9
+    Q3 rvol[0.9, 1.79] n46   win 28.3% exp-0.728R tot-33.5
+    Q4 rvol[1.79, 17.84] n45   win 40.0% exp-0.421R tot-19.0
+  POOLED (n=699, excluded_no_rvol=0):
+    Q1 rvol[0.02, 0.46] n175  win 28.6% exp-0.665R tot-116.4
+    Q2 rvol[0.46, 0.93] n175  win 27.4% exp-0.731R tot-127.9
+    Q3 rvol[0.93, 1.76] n174  win 29.3% exp-0.586R tot-101.9
+    Q4 rvol[1.76, 36.12] n175  win 30.3% exp-0.608R tot-106.4
+
+-- short_A -- monotonicity: no clear monotone trend
+  HYPE (n=278, excluded_no_rvol=0):
+    Q1 rvol[0.17, 0.54] n70   win 18.6% exp-0.519R tot-36.4
+    Q2 rvol[0.55, 0.95] n69   win 36.2% exp-0.250R tot-17.2
+    Q3 rvol[0.95, 1.66] n69   win 36.2% exp-0.287R tot-19.8
+    Q4 rvol[1.67, 16.51] n70   win 28.6% exp-0.480R tot-33.6
+  SOL (n=243, excluded_no_rvol=0):
+    Q1 rvol[0.06, 0.44] n61   win 32.8% exp-0.461R tot-28.1
+    Q2 rvol[0.44, 0.78] n61   win 27.9% exp-0.521R tot-31.8
+    Q3 rvol[0.8, 1.47] n60   win 21.7% exp-0.348R tot-20.9
+    Q4 rvol[1.48, 14.18] n61   win 23.0% exp-0.453R tot-27.6
+  INJ (n=254, excluded_no_rvol=0):
+    Q1 rvol[0.01, 0.21] n64   win 42.2% exp-0.284R tot-18.2
+    Q2 rvol[0.21, 0.48] n63   win 34.9% exp-0.401R tot-25.3
+    Q3 rvol[0.48, 1.61] n63   win 38.1% exp-0.480R tot-30.3
+    Q4 rvol[1.64, 123.2] n64   win 40.6% exp-0.376R tot-24.1
+  NEAR (n=251, excluded_no_rvol=0):
+    Q1 rvol[0.01, 0.38] n63   win 39.7% exp-0.225R tot-14.2
+    Q2 rvol[0.38, 0.81] n63   win 34.9% exp-0.326R tot-20.5
+    Q3 rvol[0.82, 2.04] n62   win 45.2% exp-0.217R tot-13.5
+    Q4 rvol[2.12, 29.51] n63   win 36.5% exp-0.396R tot-24.9
+  POOLED (n=1026, excluded_no_rvol=0):
+    Q1 rvol[0.01, 0.39] n256  win 37.1% exp-0.315R tot-80.7
+    Q2 rvol[0.39, 0.78] n257  win 28.4% exp-0.455R tot-117.0
+    Q3 rvol[0.79, 1.67] n257  win 35.4% exp-0.316R tot-81.3
+    Q4 rvol[1.67, 123.2] n256  win 33.2% exp-0.419R tot-107.2
+
+-- short_B -- monotonicity: insufficient data
+  HYPE (n=0, excluded_no_rvol=0):
+    Q1 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q2 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q3 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q4 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+  SOL (n=0, excluded_no_rvol=0):
+    Q1 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q2 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q3 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q4 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+  INJ (n=0, excluded_no_rvol=0):
+    Q1 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q2 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q3 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q4 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+  NEAR (n=0, excluded_no_rvol=0):
+    Q1 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q2 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q3 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q4 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+  POOLED (n=0, excluded_no_rvol=0):
+    Q1 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q2 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q3 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+    Q4 rvolNone n0    win  0.0% exp+0.000R tot+0.0
+
+=== A2 — threshold filters (floor 2.0) ===
+  36 cells total, 0 PASS
+  long_A   close  F1 k1.5  HYPE n0   exp+0.000R | pooledOOS n1    exp-1.190R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_A   close  F1 k2.0  HYPE n0   exp+0.000R | pooledOOS n1    exp-1.190R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_A   close  F1 k3.0  HYPE n0   exp+0.000R | pooledOOS n1    exp-1.199R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_A   close  F2 k1.5  HYPE n0   exp+0.000R | pooledOOS n1    exp-1.190R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_A   close  F2 k2.0  HYPE n0   exp+0.000R | pooledOOS n1    exp-1.190R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_A   close  F2 k3.0  HYPE n0   exp+0.000R | pooledOOS n0    exp+0.000R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_A   retest F1 k1.5  HYPE n16  exp-0.768R | pooledOOS n29   exp-1.172R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_A   retest F1 k2.0  HYPE n13  exp-0.609R | pooledOOS n22   exp-1.166R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_A   retest F1 k3.0  HYPE n6   exp-0.301R | pooledOOS n13   exp-0.987R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_A   retest F2 k1.5  HYPE n15  exp-0.835R | pooledOOS n30   exp-1.191R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_A   retest F2 k2.0  HYPE n13  exp-0.752R | pooledOOS n19   exp-1.087R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_A   retest F2 k3.0  HYPE n7   exp-0.790R | pooledOOS n11   exp-0.874R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_B   close  F1 k1.5  HYPE n8   exp-0.227R | pooledOOS n30   exp-0.139R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_B   close  F1 k2.0  HYPE n4   exp-0.686R | pooledOOS n25   exp-0.142R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_B   close  F1 k3.0  HYPE n2   exp-2.158R | pooledOOS n16   exp+0.442R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_B   retest F1 k1.5  HYPE n52  exp-0.613R | pooledOOS n129  exp-1.158R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_B   retest F1 k2.0  HYPE n40  exp-0.561R | pooledOOS n96   exp-1.142R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  long_B   retest F1 k3.0  HYPE n25  exp-0.371R | pooledOOS n65   exp-1.083R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_A  close  F1 k1.5  HYPE n11  exp-0.853R | pooledOOS n11   exp-0.870R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_A  close  F1 k2.0  HYPE n8   exp-1.012R | pooledOOS n6    exp-0.694R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_A  close  F1 k3.0  HYPE n5   exp-0.914R | pooledOOS n4    exp-1.595R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_A  close  F2 k1.5  HYPE n9   exp-1.319R | pooledOOS n10   exp-0.816R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_A  close  F2 k2.0  HYPE n8   exp-1.304R | pooledOOS n5    exp-0.552R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_A  close  F2 k3.0  HYPE n4   exp-1.369R | pooledOOS n4    exp-1.595R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_A  retest F1 k1.5  HYPE n39  exp-0.850R | pooledOOS n78   exp-0.957R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_A  retest F1 k2.0  HYPE n29  exp-1.002R | pooledOOS n56   exp-1.186R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_A  retest F1 k3.0  HYPE n14  exp-0.594R | pooledOOS n31   exp-1.122R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_A  retest F2 k1.5  HYPE n33  exp-1.104R | pooledOOS n74   exp-0.802R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_A  retest F2 k2.0  HYPE n23  exp-1.288R | pooledOOS n50   exp-0.884R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_A  retest F2 k3.0  HYPE n10  exp-1.034R | pooledOOS n31   exp-0.856R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_B  close  F1 k1.5  HYPE n0   exp+0.000R | pooledOOS n0    exp+0.000R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_B  close  F1 k2.0  HYPE n0   exp+0.000R | pooledOOS n0    exp+0.000R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_B  close  F1 k3.0  HYPE n0   exp+0.000R | pooledOOS n0    exp+0.000R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_B  retest F1 k1.5  HYPE n0   exp+0.000R | pooledOOS n0    exp+0.000R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_B  retest F1 k2.0  HYPE n0   exp+0.000R | pooledOOS n0    exp+0.000R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+  short_B  retest F1 k3.0  HYPE n0   exp+0.000R | pooledOOS n0    exp+0.000R | reject (failed: 1_hype_net_exp_gt_0,2_pooled_oos_ge_0_n_ge_30,3_a1_monotone_consistent)
+
+=== A3 — session-split diagnostic (report-only) ===
+
+-- long_A --
+  Asia (00-08 UTC) n327  win 45.3% exp-0.238R mean_rvol1.76
+  EU (08-16 UTC)   n347  win 42.7% exp-0.242R mean_rvol1.62
+  US (16-24 UTC)   n290  win 30.0% exp-0.343R mean_rvol1.52
+
+-- long_B --
+  EU (08-16 UTC)   n278  win 26.3% exp-0.734R mean_rvol1.78
+  US (16-24 UTC)   n204  win 24.0% exp-0.759R mean_rvol1.55
+  Asia (00-08 UTC) n217  win 36.9% exp-0.432R mean_rvol1.67
+
+-- short_A --
+  EU (08-16 UTC)   n373  win 32.2% exp-0.438R mean_rvol1.69
+  US (16-24 UTC)   n311  win 32.5% exp-0.380R mean_rvol1.64
+  Asia (00-08 UTC) n342  win 36.0% exp-0.307R mean_rvol1.88
+
+-- short_B --

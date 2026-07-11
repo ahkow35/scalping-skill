@@ -78,3 +78,60 @@ required.
   fresh-coin validation (e.g. ARB/SUI) before being frozen for shadow.
 - Broad consistent pass (same filter direction across triggers/coins) →
   strongest case; freeze exact params and proceed to shadow-bot spec.
+
+---
+
+## Results (2026-07-12, run after pre-registration; full tables in `analysis_volume_run.log`)
+
+Note on cell count: the pre-registration prose above says "48 cells" but its own
+formula gives (4×2×3) + (2×2×3) = **36**. The analysis runs the formula as
+written; 36 is the correct count. (short_B has no F2 — it is not a sweep
+trigger — and short_B never clears the floor-2.0 admission intraday anyway,
+consistent with Exp 4b.)
+
+### A1 — RVOL-quartile diagnostic (primary; floor 0.0, close mode, 60d × 4 coins)
+
+**No trigger shows a monotone RVOL→expectancy relationship.** Pooled across
+coins (n=964 long_A, 699 long_B, 1026 short_A):
+
+| Trigger | Q1 (lowest RVOL) | Q2 | Q3 | Q4 (highest RVOL) |
+|---|---|---|---|---|
+| long_A | −0.27R | −0.28R | −0.24R | **−0.30R** |
+| long_B | −0.67R | −0.73R | −0.59R | −0.61R |
+| short_A | −0.32R | −0.46R | −0.32R | **−0.42R** |
+| short_B | n=0 — never fires intraday | | | |
+
+The highest-volume quartile is *slightly worse* than the lowest for long_A and
+short_A. Expectancy is negative in **every quartile of every trigger on every
+coin** (48 quartile cells, zero positive pooled). Under the pre-registered A1
+rule, threshold filters are dead for all triggers before A2 is even consulted.
+
+### A2 — Threshold filters (confirmatory; floor 2.0, close+retest)
+
+**36 cells, 0 PASS.** Every cell fails at least criteria 1 (HYPE exp > 0) and
+3 (A1 monotone consistency); most also fail 2 (pooled OOS ≥ 0 with n ≥ 30).
+The single positive-expectancy cell (long_B close F1 k3.0, pooled OOS +0.44R)
+is n=16 with HYPE n=2 at −2.16R — an isolated sub-threshold spike, exactly the
+class of lucky cell the pass criteria were pre-registered to reject.
+
+Anomaly noted for review: long_A close-mode admits n0 on HYPE / n1 pooled OOS
+at floor 2.0 under any RVOL filter — sparse but directionally consistent with
+Exp 4b's n15 pooled unfiltered.
+
+### A3 — Session split (report-only)
+
+Expectancy negative in all sessions for all triggers. Long setups are least
+bad in Asia (00–08 UTC) and worst in US hours; mean RVOL is similar across
+sessions (1.5–1.9), so the rolling-20 RVOL definition is not badly
+session-confounded.
+
+### Conclusion
+
+Volume-conditioned admission does **not** rescue the deterministic triggers.
+The primary diagnostic shows volume carries no information about these
+setups' outcomes at any threshold — the failure mode is the entry logic
+itself, not missing participation confirmation. Per the pre-registered
+interpretation commitment: **the trigger family is abandoned for the shadow
+bot**; remaining signal candidates are (b) the regime-gated passive fade and
+(c) a validated-components composite. This closes the "last cheap variation"
+question raised in the 2026-07-11 review of the shadow-bot brief.
