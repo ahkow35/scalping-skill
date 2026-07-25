@@ -11,7 +11,7 @@ def _snap(mark, oi, funding=1.25e-5):
             "btc_candles": {"1h": candles},
             "btc_ctx": {"mark": 65000.0, "funding": 1.25e-5},
             "taker_delta": {"15m": {"delta_usdc": -500.0,
-                                    "sample_pct": 12.0}},
+                                    "coverage_pct": 12.0}},
             "session": {"utc": "x", "sgt": "y"}}
 
 
@@ -27,7 +27,7 @@ def test_run_scan_computes_window_deltas_and_writes_audit(tmp_path,
 
     logged = []
     monkeypatch.setattr(scan2.audit_log, "write_audit_entry",
-                        lambda payload: logged.append(payload) or "id1")
+                        lambda payload, ts_ms=None: logged.append(payload) or "id1")
     monkeypatch.setattr(scan2.audit_log, "_load_entries", lambda path=None: [])
     monkeypatch.setattr(scan2, "CARDS_DIR", str(tmp_path))
     text = scan2.run_scan("manual", window_sec=0, coins=["HYPE"],
@@ -45,3 +45,22 @@ def test_render_no_trade_lists_reasons():
     text = scan2.render({"cards": [], "no_trade_reasons": ["HYPE: no lean"]},
                         "manual", {"utc": "2026-07-26 12:55 UTC"})
     assert "NO-TRADE" in text and "no lean" in text
+
+
+def test_flow_line_reads_coverage_pct_or_sample_pct():
+    # production (this branch, off main): coverage_pct
+    assert "sample 12%" in scan2._flow_line(
+        {"delta_usdc": -500.0, "coverage_pct": 12.0})
+    # fix/flow-honesty (unmerged): sample_pct — takes priority when present
+    assert "sample 34%" in scan2._flow_line(
+        {"delta_usdc": -500.0, "sample_pct": 34.0})
+
+
+def test_coin_read_handles_non_dict_taker_delta():
+    # fetch_market.assemble stores a string in taker_delta when
+    # fetch_recent_trades raised DataUnavailable internally.
+    snap_a = _snap(58.0, 100e6)
+    snap_b = _snap(58.0 * 1.003, 101e6)
+    snap_b["taker_delta"] = "DATA UNAVAILABLE: hyperliquid (recentTrades empty)"
+    read = scan2._coin_read("HYPE", snap_a, snap_b)
+    assert read["flow_line"] == "flow: DATA UNAVAILABLE"

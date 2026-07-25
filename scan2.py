@@ -22,13 +22,23 @@ CARDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cards")
 
 
 def _flow_line(td15):
-    sample = td15.get("sample_pct")
+    # sample_pct is the field name on the unmerged fix/flow-honesty branch;
+    # production (this branch, off main) still emits coverage_pct — fall
+    # back to it so this reads correctly today and after that branch merges.
+    sample = td15.get("sample_pct", td15.get("coverage_pct"))
     delta = td15.get("delta_usdc")
     if sample is None or delta is None:
         return "flow: DATA UNAVAILABLE"
     tag = "" if sample >= 50 else " LOW-SAMPLE"
     side = "buy" if delta > 0 else "sell"
     return f"flow {side} ${abs(delta):,.0f}/15m (sample {sample:.0f}%{tag})"
+
+
+def _bucket(taker_delta, w):
+    # fetch_market.assemble stores a STRING in taker_delta when
+    # fetch_recent_trades raised DataUnavailable — guard like flow.py's
+    # _bucket() does before indexing.
+    return taker_delta.get(w) if isinstance(taker_delta, dict) else None
 
 
 def _coin_read(coin, snap_a, snap_b):
@@ -43,7 +53,7 @@ def _coin_read(coin, snap_a, snap_b):
         "price_chg_pct": (mark_b / mark_a - 1) * 100,
         "oi_chg_pct": (oi_b / oi_a - 1) * 100,
         "funding_8h_pct": snap_b["ctx"]["funding"] * 8 * 100,
-        "flow_line": _flow_line(snap_b["taker_delta"]["15m"]),
+        "flow_line": _flow_line(_bucket(snap_b["taker_delta"], "15m") or {}),
     }
 
 
@@ -90,6 +100,10 @@ def run_scan(session, window_sec, coins=None, *, sleep=time.sleep,
     snaps_a = {c: assemble(c) for c in coins}
     sleep(window_sec)
     snaps_b = {c: assemble(c) for c in coins}
+    # single timestamp for the pull-B phase, reused for the gate, the card
+    # file's day, and the audit entry — universe selection above keeps its
+    # own earlier now_ms.
+    now_ms = int(time.time() * 1000)
     ref = snaps_b[coins[0]]
 
     reads = [_coin_read(c, snaps_a[c], snaps_b[c]) for c in coins]
@@ -100,11 +114,11 @@ def run_scan(session, window_sec, coins=None, *, sleep=time.sleep,
     entries = audit_log._load_entries(None)
     result = card2.build_cards(reads, load_profile(),
                                compute_behavioral_state(), macro,
-                               entries, int(time.time() * 1000))
+                               entries, now_ms)
     text = render(result, session, ref.get("session", {}))
 
     os.makedirs(CARDS_DIR, exist_ok=True)
-    day = iso_utc(int(time.time() * 1000))[:10]
+    day = iso_utc(now_ms)[:10]
     path = os.path.join(CARDS_DIR, f"{day}-{session}.md")
     with open(path, "w") as f:
         f.write(text + "\n")
@@ -113,7 +127,7 @@ def run_scan(session, window_sec, coins=None, *, sleep=time.sleep,
         "system": "scan2", "session": session,
         "verdict": "CARDS" if result["cards"] else "NO-TRADE",
         "cards": result["cards"],
-        "no_trade_reasons": result["no_trade_reasons"]})
+        "no_trade_reasons": result["no_trade_reasons"]}, ts_ms=now_ms)
     if notify:
         summary = (f"{len(result['cards'])} setup(s)" if result["cards"]
                    else "NO-TRADE")
@@ -129,7 +143,8 @@ def main():
     p.add_argument("--coins", default=None)
     p.add_argument("--no-notify", action="store_true")
     a = p.parse_args()
-    coins = a.coins.split(",") if a.coins else None
+    coins = ([c.strip() for c in a.coins.split(",") if c.strip()]
+             if a.coins else None)
     try:
         print(run_scan(a.session, a.window_sec, coins,
                        notify=not a.no_notify))
