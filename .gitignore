@@ -6,3 +6,4 @@ __pycache__/
 .audit_log.jsonl
 .scalp_profile.json
 .oi_cache.jsonl
+.worktrees/
