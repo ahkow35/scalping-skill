@@ -1,5 +1,13 @@
 # Changelog — scalp skill
 
+## 2026-07-26 — scalp2 scanner (feat/scalp2-scanner)
+Session-open scanner per spec 2026-07-24: universe2/card2/scan2 + thin
+/scalp2 skill. Scanner claims no entry alpha (deterministic cards, human
+decides); reuses validated v1 gates. Risk 0.5%/attempt proving-phase,
+evidence gate at 40 resolved. Cron 20:55 SGT weekdays (pending user approval).
+v1 skill untouched. Rejected: greenfield rewrite (re-pays hardened
+lessons); strip-v1-in-place (can't reach lightweight by subtraction).
+
 ## 2026-07-10 — Deterministic live-bot investigation → SHELVED (no edge)
 
 **Summary:** Investigated turning the skill into an unattended deterministic
