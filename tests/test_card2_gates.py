@@ -78,8 +78,89 @@ def test_build_cards_suppresses_low_rr_and_respects_veto(monkeypatch):
     card = out["cards"][0]
     assert card["side"] == "long" and card["rr"] >= card2.RR_FLOOR
     assert card["risk_pct"] == 0.5
+    assert card["funding_8h_pct"] == 0.01
 
     vetoed = dict(ok, veto_long=True)
     out2 = card2.build_cards([read], prof, beh, vetoed, [], 0)
     assert out2["cards"] == []
     assert any("veto" in r for r in out2["no_trade_reasons"])
+
+
+def _standard_read(funding_8h_pct=0.01, price_chg_pct=0.4):
+    lvl = lambda p: {"price": p, "touches": 2, "kind": "x"}
+    return {"coin": "HYPE", "mark": 58.8,
+            "struct_15m": {"floors": [lvl(57.1)],
+                           "ceilings": [lvl(60.0), lvl(61.5)],
+                           "atr": 0.2, "sweep_reclaim": False,
+                           "sweep_rejection": False},
+            "struct_1h": {"floors": [lvl(56.5)], "ceilings": [lvl(61.5)],
+                          "atr": 0.6, "sweep_reclaim": False,
+                          "sweep_rejection": False},
+            "price_chg_pct": price_chg_pct, "oi_chg_pct": 1.0,
+            "funding_8h_pct": funding_8h_pct, "flow_line": "flow n/a"}
+
+
+def test_build_cards_vetoes_long_on_own_coin_funding_extreme():
+    read = _standard_read(funding_8h_pct=0.05)          # >= FUNDING_VETO_8H_PCT
+    prof = {"equity": 5000.0, "phase": 1}
+    beh = {"cooldown": {"active": False}}
+    ok = {"veto_long": False, "veto_short": False, "size_mult": 1.0,
+          "flags": []}
+    out = card2.build_cards([read], prof, beh, ok, [], 0)
+    assert out["cards"] == []
+    assert any("own funding" in r and "long vetoed" in r
+               for r in out["no_trade_reasons"])
+
+
+def test_build_cards_vetoes_short_on_own_coin_funding_extreme():
+    # negative price move + rising OI => short lean (derive_lean)
+    read = _standard_read(funding_8h_pct=-0.05, price_chg_pct=-0.4)
+    prof = {"equity": 5000.0, "phase": 1}
+    beh = {"cooldown": {"active": False}}
+    ok = {"veto_long": False, "veto_short": False, "size_mult": 1.0,
+          "flags": []}
+    out = card2.build_cards([read], prof, beh, ok, [], 0)
+    assert out["cards"] == []
+    assert any("own funding" in r and "short vetoed" in r
+               for r in out["no_trade_reasons"])
+
+
+def test_build_cards_requires_equity_set():
+    read = _standard_read()
+    beh = {"cooldown": {"active": False}}
+    ok = {"veto_long": False, "veto_short": False, "size_mult": 1.0,
+          "flags": []}
+    out = card2.build_cards([read], {"equity": None, "phase": 1}, beh, ok,
+                            [], 0)
+    assert out["cards"] == []
+    assert any("profile equity unset" in r for r in out["no_trade_reasons"])
+
+
+def test_derive_setup_returns_none_when_atr_missing():
+    lvl = lambda p: {"price": p, "touches": 2, "kind": "x"}
+    struct_15m = {"floors": [lvl(57.1)], "ceilings": [lvl(60.0), lvl(61.5)],
+                 "atr": None, "sweep_reclaim": False, "sweep_rejection": False}
+    struct_1h = {"floors": [lvl(56.5)], "ceilings": [lvl(61.5)],
+                "atr": 0.6, "sweep_reclaim": False, "sweep_rejection": False}
+    assert card2.derive_setup("long", struct_15m, struct_1h, 58.8) is None
+
+
+def test_build_cards_suppresses_stop_too_tight_for_equity():
+    lvl = lambda p: {"price": p, "touches": 2, "kind": "x"}
+    read = {"coin": "HYPE", "mark": 100.0,
+            "struct_15m": {"floors": [lvl(99.99)],
+                           "ceilings": [lvl(101.0), lvl(102.0)],
+                           "atr": 0.001, "sweep_reclaim": False,
+                           "sweep_rejection": False},
+            "struct_1h": {"floors": [lvl(99.98)], "ceilings": [lvl(102.0)],
+                          "atr": 0.001, "sweep_reclaim": False,
+                          "sweep_rejection": False},
+            "price_chg_pct": 0.4, "oi_chg_pct": 1.0,
+            "funding_8h_pct": 0.01, "flow_line": "flow n/a"}
+    prof = {"equity": 5000.0, "phase": 1}
+    beh = {"cooldown": {"active": False}}
+    ok = {"veto_long": False, "veto_short": False, "size_mult": 1.0,
+          "flags": []}
+    out = card2.build_cards([read], prof, beh, ok, [], 0)
+    assert out["cards"] == []
+    assert any("stop too tight" in r for r in out["no_trade_reasons"])

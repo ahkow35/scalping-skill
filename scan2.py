@@ -8,6 +8,7 @@ renders, notifies, and logs.
 import argparse
 import os
 import subprocess
+import sys
 import time
 
 import audit_log
@@ -72,7 +73,7 @@ def render(result, session, session_info):
             f"T1 {c['t1']:.4g}  T2 {c['t2']:.4g}",
             f"  R:R {c['rr']}:1 net | ${c['margin_usdc']:,.0f} margin @"
             f"{card2.LEVERAGE}x (risk {c['risk_pct']:.2g}%) | "
-            f"{c['flow_line']}",
+            f"funding {c['funding_8h_pct']:+.3f}%/8h | {c['flow_line']}",
             f"  invalidation: {c['invalidation']} | time-stop: exit review "
             f"at +{c['time_stop_min']} min",
         ]
@@ -92,21 +93,44 @@ def _notify(title, body):
         pass                                   # best-effort by design
 
 
+def _pull(coins, assemble):
+    """assemble() every coin, isolating per-coin failures so one bad coin
+    doesn't abort the whole scan. Returns (snaps, errors) keyed by coin."""
+    snaps, errors = {}, {}
+    for c in coins:
+        try:
+            snaps[c] = assemble(c)
+        except Exception as exc:
+            errors[c] = exc
+    return snaps, errors
+
+
 def run_scan(session, window_sec, coins=None, *, sleep=time.sleep,
              assemble=None, notify=True):
     assemble = assemble or _assemble
     now_ms = int(time.time() * 1000)
     coins = coins or universe2.select_universe(now_ms)
-    snaps_a = {c: assemble(c) for c in coins}
+    snaps_a, errors_a = _pull(coins, assemble)
     sleep(window_sec)
-    snaps_b = {c: assemble(c) for c in coins}
+    snaps_b, errors_b = _pull(coins, assemble)
     # single timestamp for the pull-B phase, reused for the gate, the card
     # file's day, and the audit entry — universe selection above keeps its
     # own earlier now_ms.
     now_ms = int(time.time() * 1000)
-    ref = snaps_b[coins[0]]
 
-    reads = [_coin_read(c, snaps_a[c], snaps_b[c]) for c in coins]
+    survivors = [c for c in coins if c in snaps_a and c in snaps_b]
+    failed_reasons = []
+    for c in coins:
+        if c not in snaps_a or c not in snaps_b:
+            exc = errors_b.get(c, errors_a.get(c))
+            failed_reasons.append(
+                f"{c}: DATA UNAVAILABLE ({type(exc).__name__}: {exc})")
+    if not survivors:
+        raise DataUnavailable(
+            "DATA UNAVAILABLE: all coins failed — " + "; ".join(failed_reasons))
+
+    ref = snaps_b[survivors[0]]                 # BTC/macro from first survivor
+    reads = [_coin_read(c, snaps_a[c], snaps_b[c]) for c in survivors]
     btc_struct = structure.classify_structure(
         ref["btc_candles"]["1h"], price=ref["btc_ctx"]["mark"])
     macro = card2.macro_gate(btc_struct, ref["btc_candles"]["1h"],
@@ -115,6 +139,7 @@ def run_scan(session, window_sec, coins=None, *, sleep=time.sleep,
     result = card2.build_cards(reads, load_profile(),
                                compute_behavioral_state(), macro,
                                entries, now_ms)
+    result["no_trade_reasons"] = failed_reasons + result["no_trade_reasons"]
     text = render(result, session, ref.get("session", {}))
 
     os.makedirs(CARDS_DIR, exist_ok=True)
@@ -135,7 +160,37 @@ def run_scan(session, window_sec, coins=None, *, sleep=time.sleep,
     return text
 
 
+def _cmd_log_entry(args):
+    """python3 scan2.py log-entry <COIN> <long|short> <entry> <stop> <t1> <t2>
+
+    Records a taken card as a mode=ENTRY audit row — this is what feeds
+    session_stop_active and the 40-trade evidence gate (card2.py); a card
+    that's never logged is invisible to both.
+    """
+    if len(args) != 6:
+        print("usage: scan2.py log-entry <COIN> <long|short> <entry> "
+              "<stop> <t1> <t2>", file=sys.stderr)
+        return 2
+    coin, side = args[0], args[1]
+    if side not in ("long", "short"):
+        print("side must be 'long' or 'short'", file=sys.stderr)
+        return 2
+    try:
+        entry, stop, t1, t2 = (float(x) for x in args[2:])
+    except ValueError:
+        print("entry/stop/t1/t2 must be numbers", file=sys.stderr)
+        return 2
+    trade_id = audit_log.write_audit_entry({
+        "coin": coin, "side": side, "mode": "ENTRY", "system": "scan2",
+        "verdict": "TAKEN",
+        "trigger": {"entry": entry, "stop": stop, "t1": t1, "t2": t2}})
+    print(trade_id)
+    return 0
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "log-entry":
+        return _cmd_log_entry(sys.argv[2:])
     p = argparse.ArgumentParser()
     p.add_argument("--session", default="manual",
                    choices=["us", "asia", "manual"])

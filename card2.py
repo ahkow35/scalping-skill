@@ -38,6 +38,8 @@ def _mirror(struct, key_f, key_c, side):
 def derive_setup(lean, struct_15m, struct_1h, mark):
     if lean not in ("long", "short"):
         return None
+    if struct_15m.get("atr") is None or struct_1h.get("atr") is None:
+        return None                      # no ATR — no structural stop/zone math
     sign = 1 if lean == "long" else -1
     supports15, resists15 = _mirror(struct_15m, "floors", "ceilings", lean)
     supports1h, _ = _mirror(struct_1h, "floors", "ceilings", lean)
@@ -153,6 +155,10 @@ def build_cards(coin_reads, profile, behavioral, macro, entries, now_ms):
     if session_stop_active(entries, now_ms):
         return {"cards": [], "no_trade_reasons":
                 ["session stop: 2 losses in 12h"] + macro["flags"]}
+    if not profile.get("equity"):
+        return {"cards": [], "no_trade_reasons":
+                ["profile equity unset — run: python3 profile.py set "
+                 "equity <value>"]}
     risk_pct = v2_risk_pct(entries)
     for read in coin_reads:
         lean = derive_lean(read["price_chg_pct"], read["oi_chg_pct"],
@@ -162,6 +168,12 @@ def build_cards(coin_reads, profile, behavioral, macro, entries, now_ms):
             continue
         if macro[f"veto_{lean}"]:
             reasons.append(f"{read['coin']}: macro veto blocks {lean}")
+            continue
+        funding = read["funding_8h_pct"]
+        if (lean == "long" and funding >= FUNDING_VETO_8H_PCT) or \
+                (lean == "short" and funding <= -FUNDING_VETO_8H_PCT):
+            reasons.append(f"{read['coin']}: own funding {funding:+.3f}%/8h "
+                           f"extreme — {lean} vetoed")
             continue
         setup = derive_setup(lean, read["struct_15m"], read["struct_1h"],
                              read["mark"])
@@ -177,6 +189,10 @@ def build_cards(coin_reads, profile, behavioral, macro, entries, now_ms):
         size = size_from_risk(profile["equity"],
                               risk_pct * macro["size_mult"],
                               setup["entry"], setup["stop"])
+        if size["margin_usdc"] > profile["equity"]:
+            reasons.append(f"{read['coin']}: stop too tight — implied "
+                           "margin exceeds equity")
+            continue
         cards.append({"coin": read["coin"], "side": lean,
                       "zone": setup["zone"], "stop": setup["stop"],
                       "t1": setup["t1"], "t2": setup["t2"],
@@ -184,6 +200,7 @@ def build_cards(coin_reads, profile, behavioral, macro, entries, now_ms):
                       "margin_usdc": round(size["margin_usdc"], 2),
                       "notional_usdc": round(size["notional_usdc"], 2),
                       "risk_pct": risk_pct * macro["size_mult"],
+                      "funding_8h_pct": funding,
                       "flow_line": read["flow_line"],
                       "flags": list(macro["flags"]),
                       "time_stop_min": TIME_STOP_MIN,

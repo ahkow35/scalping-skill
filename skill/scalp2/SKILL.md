@@ -49,6 +49,25 @@ Follow the manage procedure in `scalp2.md` exactly: re-run the scan scoped
 to that coin, report thesis intact/degraded/invalidated in ≤10 lines, and
 never propose adds — exit now if the invalidation condition is met.
 
+## Step 3 — Logging a taken card (REQUIRED, not optional)
+
+If the human takes a card, log it immediately on fill — never upgrade,
+downgrade, or add to the trigger values printed on the card:
+
+```bash
+python3 scan2.py log-entry <COIN> <long|short> <entry> <stop> <t1> <t2>
+```
+
+On exit, resolve the printed `trade_id`:
+
+```bash
+python3 audit_log.py resolve <trade_id> <R> <exit_reason> [lesson]
+```
+
+A card that's never logged never feeds `session_stop_active` or the
+40-trade evidence gate (`scalp2.md`) — both read only `system=scan2,
+mode=ENTRY` rows.
+
 ## Hard rules (see `scalp2.md` for full detail)
 - Entry only on a retest inside the zone — never chase.
 - Stops are structural: cut size to manage risk, never tighten/widen them.
