@@ -1,5 +1,27 @@
 # Changelog — scalp skill
 
+## 2026-07-27 — scalp2 merged to main + activated
+Branch feat/scalp2-scanner merged (8 commits, 255 tests). Final Opus
+whole-branch review caught 3 cross-module defects fixed pre-merge:
+funding veto was wired to BTC not the traded coin; session-stop/evidence
+gates had no ENTRY writer (added `scan2.py log-entry`); single-coin fetch
+failure aborted whole scan (now per-coin isolated). Activated with user
+approval: crontab 20:55 SGT weekdays + skill symlink
+`.claude/skills/scalp2` → `skill/scalp2`. Cron pinned to Python 3.14
+after system 3.9 reproducibly failed on HL responses (IncompleteRead);
+verified under cron-equivalent minimal env. Equity $5,000 confirmed;
+fees base tier (user-confirmed). Live checkout moved
+fix/flow-honesty → main (scan2.py must be on the checked-out branch for
+cron; WIP branches preserved).
+
+## 2026-07-26 — scalp2 scanner (feat/scalp2-scanner)
+Session-open scanner per spec 2026-07-24: universe2/card2/scan2 + thin
+/scalp2 skill. Scanner claims no entry alpha (deterministic cards, human
+decides); reuses validated v1 gates. Risk 0.5%/attempt proving-phase,
+evidence gate at 40 resolved. Cron 20:55 SGT weekdays (pending user approval).
+v1 skill untouched. Rejected: greenfield rewrite (re-pays hardened
+lessons); strip-v1-in-place (can't reach lightweight by subtraction).
+
 ## 2026-07-10 — Deterministic live-bot investigation → SHELVED (no edge)
 
 **Summary:** Investigated turning the skill into an unattended deterministic

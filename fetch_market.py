@@ -831,6 +831,28 @@ def assemble(coin, deep=False, now_ms=None):
     return out
 
 
+_EVALS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evals")
+_SNAPSHOT_PATH = os.path.join(_EVALS_DIR, "snapshots.jsonl")
+
+
+def snapshot_market(out):
+    """Append the full market dict to evals/snapshots.jsonl for the eval harness.
+
+    This is the raw firehose the regression golden set is blessed from (Path A:
+    record real inputs going forward). It is an AUXILIARY sink and must never
+    break a live fetch — scalp runs this on every /loop tick. On any failure,
+    warn to stderr (never stdout, which the skill parses) and continue.
+    """
+    try:
+        os.makedirs(_EVALS_DIR, exist_ok=True)
+        rec = {"ts_ms": int(_time.time() * 1000),
+               "coin": out.get("primary"), "market": out}
+        with open(_SNAPSHOT_PATH, "a") as f:
+            f.write(json.dumps(rec, default=str) + "\n")
+    except Exception as exc:  # sink must not break the fetch
+        print(f"[snapshot warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 def main(argv):
     args = [a for a in argv[1:] if a != "--deep"]
     deep = "--deep" in argv[1:] or "deep" in args
@@ -842,6 +864,7 @@ def main(argv):
     except DataUnavailable as exc:
         print(str(exc))
         return 1
+    snapshot_market(out)
     print(json.dumps(out, indent=2, default=str))
     return 0
 

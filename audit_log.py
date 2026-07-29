@@ -14,7 +14,7 @@ CLI usage:
   python3 audit_log.py log < <json-payload>
   python3 audit_log.py resolve <trade_id> <outcome_r> <exit_reason> [lesson]
   python3 audit_log.py list-open
-  python3 audit_log.py summary [--since-days N]
+  python3 audit_log.py summary [--since-days N] [--system NAME]
 """
 
 import json
@@ -184,7 +184,7 @@ def list_open_entries(now_ms=None, path=None):
     return out
 
 
-def compute_summary(since_days=None, path=None, now_ms=None):
+def compute_summary(since_days=None, path=None, now_ms=None, system=None):
     """Aggregate stats across audit entries.
 
     Returns:
@@ -194,12 +194,16 @@ def compute_summary(since_days=None, path=None, now_ms=None):
                 (across RESOLVED entries only)
 
     `setup_name` priority: payload.setup -> payload.trigger_used -> verdict.
+    `system`, when set, restricts aggregation to entries whose `system` field
+    matches (e.g. "scan2") — v1 entries have no `system` key and are excluded.
     """
     now_ms = now_ms or _ts_ms()
     entries = _load_entries(path)
     if since_days is not None:
         cutoff_ms = now_ms - since_days * 86_400_000
         entries = [e for e in entries if int(e.get("ts_ms", 0)) >= cutoff_ms]
+    if system is not None:
+        entries = [e for e in entries if e.get("system") == system]
 
     verdict_counts = {}
     for e in entries:
@@ -406,7 +410,14 @@ def main(argv):
                 print("--since-days requires an integer argument",
                       file=sys.stderr)
                 return 2
-        out = compute_summary(since_days=since)
+        system = None
+        if "--system" in argv:
+            try:
+                system = argv[argv.index("--system") + 1]
+            except IndexError:
+                print("--system requires a value", file=sys.stderr)
+                return 2
+        out = compute_summary(since_days=since, system=system)
         print(json.dumps(out, indent=2))
         return 0
 
