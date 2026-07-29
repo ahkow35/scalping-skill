@@ -1,5 +1,26 @@
 # Changelog — scalp skill
 
+## 2026-07-30 — regression eval harness for decide() (PR #2, merged)
+Added `evals/` — a golden-file regression suite for the deterministic decision
+engine. `fetch_market.py` now appends every run's full market dict to
+`evals/snapshots.jsonl` (gitignored firehose; file-only sink, stdout untouched,
+cannot break a live fetch). `evals/bless.py` freezes a snapshot's current
+`decide()` output as a committed golden case; `evals/run_regression.py` replays
+`golden/*.json` through the current `decide()` and deep-diffs vs frozen
+`expected` (ignores human-text `reason`), non-zero exit on mismatch. Wired into
+pytest via `tests/test_evals.py` (+ `tests/fixtures/market_hype.json`): 4 tests
+— bless roundtrip, fresh-set passes, corrupted verdict fails, reason ignored.
+Full suite 259 passed (255 + 4). Files: fetch_market.py, .gitignore, evals/*,
+tests/test_evals.py, tests/fixtures/market_hype.json.
+KEY FINDING: no fetch→decide adapter needed — `fetch_market` output is a direct
+superset of decide()'s market contract (a live spike disproved an earlier grep
+that suggested `btc_ctx`/`macro_can_clear`/`btc_dominance` were absent). Scope:
+regression-tests the deterministic engine (the port of the LLM's logic), NOT the
+live interactive /scalp LLM verdict — that's a separate future eval. Golden set
+is curated, not exhaustive; seeded with 2 real HYPE WAIT cases, fills as varied
+snapshots accrue and get blessed. Merged via feature-branch PR (merge commit
+15eaa9c); local main fast-forwarded.
+
 ## 2026-07-27 — scalp2 merged to main + activated
 Branch feat/scalp2-scanner merged (8 commits, 255 tests). Final Opus
 whole-branch review caught 3 cross-module defects fixed pre-merge:
