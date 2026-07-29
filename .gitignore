@@ -7,3 +7,4 @@ __pycache__/
 .scalp_profile.json
 .oi_cache.jsonl
 .worktrees/
+evals/snapshots.jsonl
