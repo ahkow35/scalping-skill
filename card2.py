@@ -98,21 +98,22 @@ ATR_SPIKE_MULT = 2.0
 
 
 def macro_gate(btc_struct_1h, btc_candles_1h, funding_8h_pct):
-    veto_long = veto_short = False
+    """`veto_reasons[side]` holds the cause phrases behind that side's veto,
+    so a NO-TRADE line can name the binding condition instead of just
+    reporting that one exists. `funding_8h_pct` is BTC's, not the coin's."""
+    causes = {"long": [], "short": []}
     size_mult, flags = 1.0, []
     cls = btc_struct_1h.get("classification")
     if cls == "breakdown":
-        veto_long = True
-        flags.append("BTC 1h structural breakdown — alt longs vetoed")
+        causes["long"].append("BTC 1h structural breakdown")
     if cls == "breakout":
-        veto_short = True
-        flags.append("BTC 1h structural breakout — alt shorts vetoed")
+        causes["short"].append("BTC 1h structural breakout")
     if funding_8h_pct >= FUNDING_VETO_8H_PCT:
-        veto_long = True
-        flags.append(f"funding +{funding_8h_pct:.3f}%/8h extreme — longs vetoed")
+        causes["long"].append(f"BTC funding +{funding_8h_pct:.3f}%/8h extreme")
     if funding_8h_pct <= -FUNDING_VETO_8H_PCT:
-        veto_short = True
-        flags.append(f"funding {funding_8h_pct:.3f}%/8h extreme — shorts vetoed")
+        causes["short"].append(f"BTC funding {funding_8h_pct:.3f}%/8h extreme")
+    flags += [f"{c} — {side}s vetoed"
+              for side in ("long", "short") for c in causes[side]]
     ranges = [(float(c["h"]) - float(c["l"])) / float(c["o"])
               for c in btc_candles_1h]
     if len(ranges) > 20:
@@ -120,8 +121,9 @@ def macro_gate(btc_struct_1h, btc_candles_1h, funding_8h_pct):
         if avg > 0 and ranges[-1] >= ATR_SPIKE_MULT * avg:
             size_mult = 0.5
             flags.append("BTC 1h range spike ≥2x — size halved (not a veto)")
-    return {"veto_long": veto_long, "veto_short": veto_short,
-            "size_mult": size_mult, "flags": flags}
+    return {"veto_long": bool(causes["long"]),
+            "veto_short": bool(causes["short"]),
+            "veto_reasons": causes, "size_mult": size_mult, "flags": flags}
 
 
 def _resolved_v2(entries):
@@ -167,7 +169,9 @@ def build_cards(coin_reads, profile, behavioral, macro, entries, now_ms):
             reasons.append(f"{read['coin']}: no directional lean")
             continue
         if macro[f"veto_{lean}"]:
-            reasons.append(f"{read['coin']}: macro veto blocks {lean}")
+            why = "; ".join(macro.get("veto_reasons", {}).get(lean, []))
+            reasons.append(f"{read['coin']}: macro veto blocks {lean}"
+                           + (f" — {why}" if why else ""))
             continue
         funding = read["funding_8h_pct"]
         if (lean == "long" and funding >= FUNDING_VETO_8H_PCT) or \

@@ -1,5 +1,23 @@
 # Changelog — scalp skill
 
+## 2026-07-31 — NO-TRADE lines name the binding macro condition
+A vetoed coin printed only `macro veto blocks <lean>`; the causes lived in
+`macro["flags"]`, which `build_cards` forwarded on the behavioral-cooldown and
+session-stop branches but dropped on the per-coin veto branch — so a live
+NO-TRADE couldn't be read without reconstructing the gate by hand (hit during a
+manual `/scalp2 HYPE` where the cause turned out to be BTC 1h breakdown).
+`macro_gate` now returns `veto_reasons: {"long": [...], "short": [...]}` and
+derives `veto_long`/`veto_short` from those lists, so state and text can't
+drift; the veto branch appends the matching side's causes. Incidental: the four
+`flags` strings are generated from one source instead of duplicated, and the
+BTC funding flag now says "BTC funding" — it reads BTC's funding but said just
+"funding", colliding with the per-coin `own funding` veto message below it.
+`build_cards` reads the key via `.get()`, so a macro dict without it degrades
+to the old bare line rather than raising. Full suite 259 passed; ruff unchanged
+at 9 pre-existing errors (lambda assignments in tests). Verified live: HYPE
+scan now prints `macro veto blocks long — BTC 1h structural breakdown`.
+Files: card2.py, tests/test_card2_gates.py.
+
 ## 2026-07-30 — regression eval harness for decide() (PR #2, merged)
 Added `evals/` — a golden-file regression suite for the deterministic decision
 engine. `fetch_market.py` now appends every run's full market dict to
