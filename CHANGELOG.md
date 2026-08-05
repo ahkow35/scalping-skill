@@ -1,5 +1,26 @@
 # Changelog — scalp skill
 
+## 2026-08-06 — post-mortem-driven behavioral gates (coin lockout, tilt-coin guard, MANAGE time-stop)
+Full-fill post-mortem of the real Hyperliquid account (11,944 fills, 2025-01 →
+2026-08: net −$254k, of which −$384k across three days — ETH short capitulation
+2025-08-22, DOGE long liquidation 2025-10-10, DOGE re-entry unwind 2025-12-31)
+showed all three blowups shared one mechanism: scalp-sized thesis → multi-day
+leveraged hold with no stop → re-entry into the same losing coin+side.
+Counterfactual replay on the actual fills: a −$5k daily circuit breaker saved
+$425k / forfeited $0 (16/16 tripped days never recovered); a same-coin+side
+lockout blocked a −$346k pattern. Encoded: `behavioral.py` `coin_lockout`
+(2 losses ≤ −0.5R same coin+side within 12h → 24h hard ENTRY block; MANAGE
+proceeds; passive fades excluded), scalp-core Step 0e tilt-coin guard (DOGE:
+lifetime −$228.5k → conviction capped at med, in-plan only, until 20 resolved
+DOGE trades show positive expectancy), Step M position-age time-stop (>24h =
+forced close-or-swing decision; >72h underwater = stale-hold callout), and the
+0a daily stop pinned with its empirical basis. Additive dict key — card2.py /
+decide.py consumers read via `.get()`, unaffected. 6 new tests; suite 265
+green. Known limit (recorded in lessons): gates see only skill-logged trades;
+real-fill API integration listed as an open item.
+Files: behavioral.py, scalp-core.md, SKILL.md, tests/test_behavioral.py.
+Post-mortem: vault raw/hyperliquid-perp-post-mortem-2025-2026.md.
+
 ## 2026-07-31 — NO-TRADE lines name the binding macro condition
 A vetoed coin printed only `macro veto blocks <lean>`; the causes lived in
 `macro["flags"]`, which `build_cards` forwarded on the behavioral-cooldown and
