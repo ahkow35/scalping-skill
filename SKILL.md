@@ -186,12 +186,17 @@ Follow `scalp-core.md` + the direction module exactly.
 - `/loop` invocations default to TINY unless QUICK/DEEP is explicit.
 - Coin arg defaults to HYPE.
 - **Step 0 Behavioral preflight runs FIRST** (daily stop + cooldown + R16 vibe
-  check). Read state from `python3 behavioral.py` (derived from the audit log —
-  works under /loop with no conversation). `daily_stop.active` in ENTRY mode →
-  HARD `HALT (daily stop)` before market fetch; MANAGE still proceeds. Cooldown
+  check + coin lockout + tilt-coin guard). Read state from `python3
+  behavioral.py` (derived from the audit log — works under /loop with no
+  conversation). `daily_stop.active` in ENTRY mode → HARD `HALT (daily stop)`
+  before market fetch; MANAGE still proceeds. `coin_lockout` matching the
+  requested coin+side (2 material losses ≤ −0.5R within 12h → 24h lock) →
+  HARD `HALT (coin lockout)` in ENTRY mode, MANAGE proceeds. Tilt-coin list
+  (currently DOGE) → conviction capped at med, in-plan only. Cooldown
   active → print `BEHAVIORAL WARNING: cooldown active (...) — informational
   only` and PROCEED with full analysis (no halt, no verdict/conviction effect).
-  R16 leaks → conviction penalty + named warning; trade proceeds.
+  R16 leaks → conviction penalty + named warning; trade proceeds. MANAGE mode
+  surfaces position age: >24h = action-required time-stop decision.
 - Macro veto runs SECOND, from the direction module. Includes hard
   NO-TRADE on FOMC/CPI/NFP/PCE days + extreme funding (long: >+0.03%/8h;
   short: <-0.03%/8h).

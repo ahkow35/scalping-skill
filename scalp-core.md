@@ -19,7 +19,7 @@ stated position (or args), and the matching direction module is loaded.
 
 ## Step 0 — Behavioral preflight (RUN FIRST, before any data fetch)
 
-Three checks:
+Five checks:
 - **Daily stop (0a)**: HARD ENTRY gate. If active, emit `HALT (daily stop)`
   and do not fetch market data. MANAGE still proceeds.
 - **Loss cooldown (0b)**: informational WARNING only — printed, but zero effect
@@ -27,6 +27,10 @@ Three checks:
   lost > 0.7R.
 - **R16 vibe check (0c)**: leaks cap conviction and are flagged. At low
   conviction the entry fires at PROBE size (25%) instead of full.
+- **Coin lockout (0d)**: HARD ENTRY gate per coin+side. Two material losses
+  (≤ −0.5R) on the same coin+side within 12h lock that coin+side for 24h.
+- **Tilt-coin guard (0e)**: static conviction cap on coins with a documented
+  account-history tilt (currently DOGE).
 (The macro veto in the direction module is separate and DOES still hard-stop.)
 
 ### 0a. Behavioral state + daily stop (ENTRY + MANAGE)
@@ -53,6 +57,36 @@ Returns `daily_stop {active, until_utc, realized_r_24h, reason}`,
   it is a heads-up that the last trade was a material loss, nothing more.
 - If the log is empty / fresh slate, the script returns all-clear — omit the
   warning entirely.
+
+Empirical basis (2025–26 account post-mortem, 11,944 fills): a daily-loss
+circuit breaker was net-positive on every one of the 16 days it would have
+tripped — losses avoided ~$425k, later-same-day gains forfeited $0. The daily
+stop is the single highest-value rule in this skill; never soften it.
+
+### 0d. Coin lockout (ENTRY only — HARD gate per coin+side)
+`behavioral.py` returns `coin_lockout {active, locked: [{coin, side,
+until_utc, losses_12h}]}` — two material losses (≤ −0.5R) resolved on the
+same coin+side within 12h lock that coin+side for 24h from the second loss.
+- ENTRY request matching a locked coin+side → HARD halt. Do not fetch market
+  data. Print `BEHAVIORAL HALT: <COIN> <side> locked out (<n> losses in 12h)
+  until <until_utc> — the re-entry is the tilt, not the setup` and emit the
+  no-action HALT shape (TINY: `<COIN> HALT | coin lockout (until <T>)`).
+  Audit-log it with `behavioral.coin_lockout` in the payload.
+- Other coins and the opposite side are unaffected. MANAGE always proceeds.
+- Empirical basis (post-mortem): repeated re-entry into the same losing
+  coin+side accounted for ~$345k of realized losses (DOGE long −$219k,
+  ETH short −$107k) that this lockout would have blocked.
+
+### 0e. Tilt-coin guard (ENTRY only — static list)
+Coins with a documented account-history tilt get a standing conviction cap:
+entries are capped at **med** (never NOW/full size) and are never valid as
+OOP entries — in-plan only. Current list:
+- **DOGE** — lifetime realized −$228.5k (2025 post-mortem: an October
+  liquidation followed by five weeks of $50k re-entries into the same falling
+  long). The cap stands until 20 resolved DOGE trades show positive expectancy.
+Print `TILT-COIN: <COIN> — conviction capped at med (see post-mortem)` when it
+binds. This list is maintained by hand; update it from post-mortem evidence,
+not vibes.
 
 ### 0c. R16 vibe check (ENTRY only — skip in MANAGE)
 One line per row. Leaks reduce conviction and are flagged — they do NOT halt the trade.
@@ -90,6 +124,11 @@ Printing rule (silence-by-default):
 - Cooldown active → print `BEHAVIORAL WARNING: cooldown active (<reason>) —
   informational only` and PROCEED. No stop, no conviction effect. Stacks with
   a leak line if R16 also leaks.
+- Coin lockout matching the requested coin+side → print the 0d HALT line;
+  ENTRY stops before market fetch. A lockout on a DIFFERENT coin/side is not
+  printed (silence-by-default).
+- Tilt-coin entry (0e) → print `TILT-COIN: <COIN> — conviction capped at med
+  (see post-mortem)` and apply the cap.
 - DEEP mode → always print the full 6/6 score even when clear, so the
   discipline check is visible in the detailed report.
 - Passive mode: also read `behavioral.passive_tilt`; if active, print
@@ -429,6 +468,15 @@ the failure prominently so it gets fixed.
 
 Read entry price and direction from conversation (or args). Compute:
 - Unrealized P&L: long = (mark − entry) / entry; short = (entry − mark) / entry
+- **Position age** (from the audit-log entry time, or ask once if unknown).
+  Age > 24h on a scalp entry = the position is no longer a scalp — that is
+  itself an ACTION-required event: the output must force an explicit decision
+  (close, or state the new swing thesis + structural stop + reduced size),
+  never a silent HOLD. Age > 72h with the position underwater → lead with
+  `TIME-STOP: this is a stale losing hold, not a trade`. Empirical basis
+  (post-mortem): all three 2025 blowups (−$384k across Aug 22 / Oct 10 /
+  Dec 31) were scalp-sized theses held for days-to-weeks without a stop;
+  none began as a large loss.
 - Tape state: classify from taker_delta + recent candle bodies +
   vol_zscore. One of {impulse, distribution, chop, reversal-up,
   reversal-down}. Distribution = high volume + small body + close in
@@ -461,7 +509,8 @@ in the compact form unless conviction is changing.
 #### MANAGE — action required
 
 ```
-POSITION: <COIN> <long|short> from <entry> | now <px> | unrealized <±%>
+POSITION: <COIN> <long|short> from <entry> | now <px> | unrealized <±%> | age <Xh>
+[TIME-STOP: age <Xh> — no longer a scalp; decide: close or restate as swing with structural stop]
 [COOLDOWN: active until <T> — blocks new entries, not MANAGE]
 TAPE: <state> — <one clause, cite taker_delta / candles / microprice lean>
 MACRO: <CLEAR|VETO ...>

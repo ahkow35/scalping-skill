@@ -1,5 +1,65 @@
 # Changelog — scalp skill
 
+## 2026-08-06 — post-mortem-driven behavioral gates (coin lockout, tilt-coin guard, MANAGE time-stop)
+Full-fill post-mortem of the real Hyperliquid account (11,944 fills, 2025-01 →
+2026-08: net −$254k, of which −$384k across three days — ETH short capitulation
+2025-08-22, DOGE long liquidation 2025-10-10, DOGE re-entry unwind 2025-12-31)
+showed all three blowups shared one mechanism: scalp-sized thesis → multi-day
+leveraged hold with no stop → re-entry into the same losing coin+side.
+Counterfactual replay on the actual fills: a −$5k daily circuit breaker saved
+$425k / forfeited $0 (16/16 tripped days never recovered); a same-coin+side
+lockout blocked a −$346k pattern. Encoded: `behavioral.py` `coin_lockout`
+(2 losses ≤ −0.5R same coin+side within 12h → 24h hard ENTRY block; MANAGE
+proceeds; passive fades excluded), scalp-core Step 0e tilt-coin guard (DOGE:
+lifetime −$228.5k → conviction capped at med, in-plan only, until 20 resolved
+DOGE trades show positive expectancy), Step M position-age time-stop (>24h =
+forced close-or-swing decision; >72h underwater = stale-hold callout), and the
+0a daily stop pinned with its empirical basis. Additive dict key — card2.py /
+decide.py consumers read via `.get()`, unaffected. 6 new tests; suite 265
+green. Known limit (recorded in lessons): gates see only skill-logged trades;
+real-fill API integration listed as an open item.
+Files: behavioral.py, scalp-core.md, SKILL.md, tests/test_behavioral.py.
+Post-mortem: vault raw/hyperliquid-perp-post-mortem-2025-2026.md.
+
+## 2026-07-31 — NO-TRADE lines name the binding macro condition
+A vetoed coin printed only `macro veto blocks <lean>`; the causes lived in
+`macro["flags"]`, which `build_cards` forwarded on the behavioral-cooldown and
+session-stop branches but dropped on the per-coin veto branch — so a live
+NO-TRADE couldn't be read without reconstructing the gate by hand (hit during a
+manual `/scalp2 HYPE` where the cause turned out to be BTC 1h breakdown).
+`macro_gate` now returns `veto_reasons: {"long": [...], "short": [...]}` and
+derives `veto_long`/`veto_short` from those lists, so state and text can't
+drift; the veto branch appends the matching side's causes. Incidental: the four
+`flags` strings are generated from one source instead of duplicated, and the
+BTC funding flag now says "BTC funding" — it reads BTC's funding but said just
+"funding", colliding with the per-coin `own funding` veto message below it.
+`build_cards` reads the key via `.get()`, so a macro dict without it degrades
+to the old bare line rather than raising. Full suite 259 passed; ruff unchanged
+at 9 pre-existing errors (lambda assignments in tests). Verified live: HYPE
+scan now prints `macro veto blocks long — BTC 1h structural breakdown`.
+Files: card2.py, tests/test_card2_gates.py.
+
+## 2026-07-30 — regression eval harness for decide() (PR #2, merged)
+Added `evals/` — a golden-file regression suite for the deterministic decision
+engine. `fetch_market.py` now appends every run's full market dict to
+`evals/snapshots.jsonl` (gitignored firehose; file-only sink, stdout untouched,
+cannot break a live fetch). `evals/bless.py` freezes a snapshot's current
+`decide()` output as a committed golden case; `evals/run_regression.py` replays
+`golden/*.json` through the current `decide()` and deep-diffs vs frozen
+`expected` (ignores human-text `reason`), non-zero exit on mismatch. Wired into
+pytest via `tests/test_evals.py` (+ `tests/fixtures/market_hype.json`): 4 tests
+— bless roundtrip, fresh-set passes, corrupted verdict fails, reason ignored.
+Full suite 259 passed (255 + 4). Files: fetch_market.py, .gitignore, evals/*,
+tests/test_evals.py, tests/fixtures/market_hype.json.
+KEY FINDING: no fetch→decide adapter needed — `fetch_market` output is a direct
+superset of decide()'s market contract (a live spike disproved an earlier grep
+that suggested `btc_ctx`/`macro_can_clear`/`btc_dominance` were absent). Scope:
+regression-tests the deterministic engine (the port of the LLM's logic), NOT the
+live interactive /scalp LLM verdict — that's a separate future eval. Golden set
+is curated, not exhaustive; seeded with 2 real HYPE WAIT cases, fills as varied
+snapshots accrue and get blessed. Merged via feature-branch PR (merge commit
+15eaa9c); local main fast-forwarded.
+
 ## 2026-07-27 — scalp2 merged to main + activated
 Branch feat/scalp2-scanner merged (8 commits, 255 tests). Final Opus
 whole-branch review caught 3 cross-module defects fixed pre-merge:

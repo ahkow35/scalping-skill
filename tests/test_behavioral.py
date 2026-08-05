@@ -128,6 +128,90 @@ def test_oop_this_week_count(tmp_path):
     assert st["oop_this_week"] == 1
 
 
+def _coin_entry(p, ts, coin, side, verdict="LONG-NOW"):
+    return audit_log.write_audit_entry(
+        {"coin": coin, "side": side, "mode": "ENTRY", "verdict": verdict},
+        ts_ms=ts, path=p)
+
+
+def test_coin_lockout_two_material_losses_within_12h(tmp_path):
+    p = _p(tmp_path)
+    tid1 = _coin_entry(p, NOW - 10 * HOUR, "DOGE", "long")
+    audit_log.resolve_audit_entry(tid1, -1.0, "stop",
+                                  resolved_at_ms=NOW - 8 * HOUR, path=p)
+    tid2 = _coin_entry(p, NOW - 5 * HOUR, "DOGE", "long")
+    audit_log.resolve_audit_entry(tid2, -0.6, "stop",
+                                  resolved_at_ms=NOW - 2 * HOUR, path=p)
+    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
+    assert st["coin_lockout"]["active"] is True
+    locked = st["coin_lockout"]["locked"]
+    assert len(locked) == 1
+    assert locked[0]["coin"] == "DOGE" and locked[0]["side"] == "long"
+    assert locked[0]["until_ms"] == NOW - 2 * HOUR + DAY
+    assert locked[0]["losses_12h"] == 2
+
+
+def test_coin_lockout_ignores_losses_on_different_coin_or_side(tmp_path):
+    p = _p(tmp_path)
+    tid1 = _coin_entry(p, NOW - 10 * HOUR, "DOGE", "long")
+    audit_log.resolve_audit_entry(tid1, -1.0, "stop",
+                                  resolved_at_ms=NOW - 8 * HOUR, path=p)
+    tid2 = _coin_entry(p, NOW - 5 * HOUR, "ETH", "short", verdict="SHORT-NOW")
+    audit_log.resolve_audit_entry(tid2, -1.0, "stop",
+                                  resolved_at_ms=NOW - 2 * HOUR, path=p)
+    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
+    assert st["coin_lockout"]["active"] is False
+
+
+def test_coin_lockout_not_triggered_when_losses_more_than_12h_apart(tmp_path):
+    p = _p(tmp_path)
+    tid1 = _coin_entry(p, NOW - 20 * HOUR, "DOGE", "long")
+    audit_log.resolve_audit_entry(tid1, -1.0, "stop",
+                                  resolved_at_ms=NOW - 16 * HOUR, path=p)
+    tid2 = _coin_entry(p, NOW - 3 * HOUR, "DOGE", "long")
+    audit_log.resolve_audit_entry(tid2, -1.0, "stop",
+                                  resolved_at_ms=NOW - 2 * HOUR, path=p)
+    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
+    assert st["coin_lockout"]["active"] is False
+
+
+def test_coin_lockout_expires_after_24h(tmp_path):
+    p = _p(tmp_path)
+    tid1 = _coin_entry(p, NOW - 40 * HOUR, "DOGE", "long")
+    audit_log.resolve_audit_entry(tid1, -1.0, "stop",
+                                  resolved_at_ms=NOW - 38 * HOUR, path=p)
+    tid2 = _coin_entry(p, NOW - 30 * HOUR, "DOGE", "long")
+    audit_log.resolve_audit_entry(tid2, -1.0, "stop",
+                                  resolved_at_ms=NOW - 28 * HOUR, path=p)
+    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
+    assert st["coin_lockout"]["active"] is False
+
+
+def test_coin_lockout_scratch_losses_do_not_count(tmp_path):
+    p = _p(tmp_path)
+    tid1 = _coin_entry(p, NOW - 10 * HOUR, "DOGE", "long")
+    audit_log.resolve_audit_entry(tid1, -0.3, "stop",
+                                  resolved_at_ms=NOW - 8 * HOUR, path=p)
+    tid2 = _coin_entry(p, NOW - 5 * HOUR, "DOGE", "long")
+    audit_log.resolve_audit_entry(tid2, -0.4, "stop",
+                                  resolved_at_ms=NOW - 2 * HOUR, path=p)
+    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
+    assert st["coin_lockout"]["active"] is False
+
+
+def test_coin_lockout_ignores_passive_fades(tmp_path):
+    p = _p(tmp_path)
+    for dt in (8, 2):
+        tid = audit_log.write_audit_entry(
+            {"coin": "DOGE", "side": "long", "mode": "ENTRY",
+             "verdict": "FADE-LONG-NOW", "setup_family": "passive-fade"},
+            ts_ms=NOW - (dt + 1) * HOUR, path=p)
+        audit_log.resolve_audit_entry(tid, -1.0, "stop",
+                                      resolved_at_ms=NOW - dt * HOUR, path=p)
+    st = behavioral.compute_behavioral_state(now_ms=NOW, path=p)
+    assert st["coin_lockout"]["active"] is False
+
+
 def test_passive_tilt_active_after_three_consecutive_losses(tmp_path):
     p = str(tmp_path / "a.jsonl")
     base = 1779102720000

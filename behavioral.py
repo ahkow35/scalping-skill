@@ -6,6 +6,11 @@ Everything here is READ-ONLY over .audit_log.jsonl. Outputs:
   cooldown      — active if the last resolved trade lost > 0.7R within 24h.
   daily_stop    — active if the trailing 24h realized R or directional loss
                   streak says the day is broken.
+  coin_lockout  — per (coin, side): two material losses within 12h lock that
+                  coin+side for 24h. Motivated by the 2025 account post-mortem:
+                  repeated re-entry into the same losing coin+side (DOGE long,
+                  ETH short) accounted for ~$345k of realized losses that a
+                  lockout would have blocked.
   oop_this_week — count of OOP-1-tagged entries since the Saturday week start
                   (derives going forward — older entries predate plan_status).
 
@@ -28,6 +33,10 @@ DAILY_REALIZED_R_THRESHOLD = -2.0
 DAILY_DIRECTIONAL_LOSS_THRESHOLD = -0.7
 DAILY_DIRECTIONAL_LOSS_N = 2
 PASSIVE_TILT_N = 3
+COIN_LOCKOUT_R = -0.5
+COIN_LOCKOUT_N = 2
+COIN_LOCKOUT_WINDOW_MS = 12 * HOUR_MS
+COIN_LOCKOUT_MS = DAY_MS
 
 
 def _has_leaks(entry):
@@ -108,6 +117,42 @@ def _daily_stop(entries, now_ms):
     }
 
 
+def _coin_lockout(entries, now_ms):
+    """Per-(coin, side) lockout: COIN_LOCKOUT_N material losses (outcome_r <=
+    COIN_LOCKOUT_R) resolved within COIN_LOCKOUT_WINDOW_MS of each other lock
+    that coin+side for COIN_LOCKOUT_MS from the later loss. Directional ENTRY
+    trades only — passive fades have their own tilt gate.
+    """
+    losses = {}
+    for e in _resolved_rows(entries):
+        if e.get("mode") != "ENTRY" or e.get("setup_family") == "passive-fade":
+            continue
+        if float(e["outcome"]["outcome_r"]) > COIN_LOCKOUT_R:
+            continue
+        key = (e.get("coin"), e.get("side"))
+        losses.setdefault(key, []).append(int(e["outcome"]["resolved_at_ms"]))
+
+    locked = []
+    for (coin, side), times in losses.items():
+        until = None
+        for prev, cur in zip(times, times[1:]):
+            if cur - prev <= COIN_LOCKOUT_WINDOW_MS:
+                until = max(until or 0, cur + COIN_LOCKOUT_MS)
+        if until and now_ms < until:
+            locked.append({
+                "coin": coin,
+                "side": side,
+                "until_ms": until,
+                "until_utc": datetime.fromtimestamp(until / 1000, timezone.utc)
+                .strftime("%Y-%m-%d %H:%M UTC"),
+                "losses_12h": sum(
+                    1 for t in times
+                    if 0 <= (until - COIN_LOCKOUT_MS) - t
+                    <= COIN_LOCKOUT_WINDOW_MS),
+            })
+    return {"active": bool(locked), "locked": locked}
+
+
 def _week_start_saturday_ms(now_ms):
     """Most recent Saturday 00:00 UTC at or before now (planning week start)."""
     now = datetime.fromtimestamp(now_ms / 1000, timezone.utc)
@@ -153,6 +198,7 @@ def compute_behavioral_state(now_ms=None, path=None):
             "reasons": reasons,
         },
         "daily_stop": _daily_stop(entries, now_ms),
+        "coin_lockout": _coin_lockout(entries, now_ms),
         "oop_this_week": oop,
         "passive_tilt": _passive_tilt(entries),
     }

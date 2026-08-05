@@ -27,6 +27,8 @@ def test_funding_extreme_vetoes_crowded_side():
 def test_btc_breakdown_vetoes_longs():
     g = card2.macro_gate(_btc_struct("breakdown"), _btc_candles(), 0.0)
     assert g["veto_long"] and not g["veto_short"]
+    assert g["veto_reasons"]["long"] == ["BTC 1h structural breakdown"]
+    assert g["veto_reasons"]["short"] == []
 
 
 def test_atr_spike_halves_size_not_veto():
@@ -84,6 +86,14 @@ def test_build_cards_suppresses_low_rr_and_respects_veto(monkeypatch):
     out2 = card2.build_cards([read], prof, beh, vetoed, [], 0)
     assert out2["cards"] == []
     assert any("veto" in r for r in out2["no_trade_reasons"])
+
+    # A vetoed coin names the binding condition, not just "a veto exists".
+    with_why = dict(ok, veto_long=True,
+                    veto_reasons={"long": ["BTC 1h structural breakdown"],
+                                  "short": []})
+    out3 = card2.build_cards([read], prof, beh, with_why, [], 0)
+    assert out3["no_trade_reasons"] == [
+        "HYPE: macro veto blocks long — BTC 1h structural breakdown"]
 
 
 def _standard_read(funding_8h_pct=0.01, price_chg_pct=0.4):
