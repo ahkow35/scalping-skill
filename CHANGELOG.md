@@ -1,5 +1,21 @@
 # Changelog — scalp skill
 
+## 2026-08-24 — strip-BTC gate promoted to a deterministic helper
+Promoted Step 1c from a prose/model-applied gate to a deterministic code helper,
+matching how flow/regime/behavioral gates work. New `strip_btc.py` (pure, mirrors
+`regime.py`/`flow.py`): `classify(candles, btc_candles, corr=...)` returns
+`{status, cut, cut_tiers, btc_corr, coin_move_pct, btc_move_pct, reason}`.
+`status` ∈ {beta, idiosyncratic, moderate, decoupled, unavailable}; `cut` is true
+only for `beta` (corr ≥ 0.7, coin move aligned with BTC and not outrunning it by
+>1.5×, BTC not ~flat). Reuses `regime.btc_corr` (passed in from `out['regime']`)
+so the two reads never disagree. Wired into `fetch_market.assemble` as
+`out['strip_btc']`; Step 1c + SKILL.md now say "read `out['strip_btc']`, do not
+re-derive by eye." Direction-neutral, CUT-only. Thresholds provisional
+(`strip_btc.DEFAULT_PARAMS`). Live check on HYPE: corr 0.486 → status moderate →
+no cut (correct). 13 new tests (`tests/test_strip_btc.py`); suite 265 → 278 green.
+Files: `strip_btc.py` (new), `fetch_market.py`, `scalp-core.md`, `SKILL.md`,
+`tests/test_strip_btc.py`.
+
 ## 2026-08-24 — Step 1c strip-BTC idiosyncrasy gate (CUT-only)
 New conviction gate in `scalp-core.md`: a directional scalp whose move is pure
 BTC beta (`regime.btc_corr` ≥ 0.7, same direction as BTC, coin not outrunning

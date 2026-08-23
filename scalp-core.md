@@ -232,7 +232,7 @@ if no trigger fires at all. Surface the result on the FLOW line of the output.
 If `flow` is a string (DATA UNAVAILABLE) or all fields null, treat as
 `coverage_ok == false`.
 
-## Step 1c — Strip-BTC idiosyncrasy check (read `out['regime']` + BTC macro move)
+## Step 1c — Strip-BTC idiosyncrasy check (read `out['strip_btc']`)
 
 A directional scalp should be paid for a **coin-specific** move, not for BTC
 beta the whole market is riding. Borrowing the partial-correlation logic from
@@ -244,29 +244,26 @@ which hard-stops on BTC *danger* (a dump on rising vol); this gate cuts on BTC
 *authorship* of the move even when macro is CLEAR (e.g. a calm BTC grind up
 dragging the coin with it).
 
-Inputs, all already fetched (no new data): `regime.btc_corr` (rolling BTC
-correlation), the coin's own move (`regime.directionality` + recent candle
-bodies / range position), and BTC's recent move (direction + rough magnitude)
-from the fetched BTC macro candles — the same BTC move the macro veto reads.
+**Deterministic — read `out['strip_btc']`; do not re-derive by eye.** The helper
+(`strip_btc.py`) computes the decision from `btc_corr` (reused from regime, so
+the two reads agree) plus the coin's and BTC's recent 1h move. It is **CUT-only**
+(like the flow gate — can only lower conviction, never raise it) and returns:
 
-**CUT-only** — like the flow gate, it can only lower conviction or sit you out,
-never raise it. It consumes the numeric `btc_corr` input only; the
-`regime_label` verdict stays READ-ONLY (Phase 1). Thresholds are PROVISIONAL —
-revisit after 20 resolved trades.
+- `status` ∈ {`beta`, `idiosyncratic`, `moderate`, `decoupled`, `unavailable`}
+- `cut` (bool) and `cut_tiers` (1 only when `status == "beta"`)
+- `reason`, plus `btc_corr` / `coin_move_pct` / `btc_move_pct` for the output line
 
-1. **Pure BTC beta → cut one tier** (prefer WAIT if already low): `btc_corr ≥
-   0.7` AND the coin's recent move is the SAME direction as BTC's AND the coin
-   is NOT outrunning BTC (coin |move| ≲ 1.5× BTC |move|, i.e. negligible
-   idiosyncratic residual). What you'd be trading is index beta, not a <COIN>
-   setup. Flag `⚠ BTC-beta: <COIN> move is index-driven`. This operationalizes
-   the `correlated-chop` weather into an actual conviction effect.
-2. **Idiosyncratic residual → NO cut.** High corr but the coin is moving
-   *against* BTC, or materially *beyond* it (coin |move| > 1.5× BTC |move|).
-   That residual is the coin-specific edge you want — do not penalize it. State
-   `strip-BTC: idiosyncratic residual — coin-specific move, no cut`.
-3. **Already decoupled → NO cut.** `btc_corr < 0.4`: the move is not a BTC read.
-   Note `strip-BTC: decoupled (corr <x>)`.
-4. **Data unavailable** (`regime` null or `btc_corr` None): skip, say so, no cut.
+Apply it mechanically: **if `out['strip_btc'].cut` is true, cut conviction one
+tier** (prefer WAIT if already low) and print the STRIP-BTC line with
+`out['strip_btc'].reason`; otherwise no effect and the line stays silent. The
+status meanings: `beta` = high corr (≥ 0.7), move aligned with BTC and not
+outrunning it → index-driven, the one case that cuts; `idiosyncratic` = high
+corr but the coin opposes or outruns BTC (>1.5×), or BTC is ~flat → coin-specific,
+no cut; `moderate` = corr in [0.4, 0.7) → not clearly BTC-driven, no cut;
+`decoupled` = corr < 0.4 → no cut; `unavailable` = data missing → skip. Only the
+numeric `btc_corr` feeds this; `regime_label` stays READ-ONLY (Phase 1).
+Thresholds are PROVISIONAL (`strip_btc.DEFAULT_PARAMS`) — revisit after ~20
+resolved trades via `/scalp summary` + `replay`.
 
 Caveat — linear only: `btc_corr` is a Pearson (straight-line) correlation, so
 it catches coins that track BTC evenly but can MISS a coin that is
