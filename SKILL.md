@@ -3,7 +3,8 @@ name: scalp
 description: >
   Live tactical quant scalp thesis and position management for any Hyperliquid
   perp (default HYPE), gated by a BTC + BTC-dominance macro veto, a behavioral
-  preflight, real taker-aggressor delta, and UTC/SGT session awareness.
+  preflight, a BTC-beta (strip-BTC) idiosyncrasy check, real taker-aggressor
+  delta, and UTC/SGT session awareness.
   Long AND short setups, each with its own protocol module. Three output sizes —
   TINY (one-line pulse, default for /loop), QUICK (standard), DEEP (full).
   Two modes — ENTRY (fresh thesis) and MANAGE (review open position).
@@ -217,6 +218,12 @@ Follow `scalp-core.md` + the direction module exactly.
   aggressor bias vs side, climax, divergence, breakout-volume) — it can only
   CUT conviction. `coverage_ok == false` (max coverage <50%) caps conviction
   at low: you're scalping half-blind (Varma §8a).
+- ALWAYS run the Step 1c strip-BTC (idiosyncrasy) gate from
+  `out['regime'].btc_corr` + the fetched BTC macro move — CUT-only: a
+  directional scalp whose move is pure BTC beta (corr ≥ 0.7, same direction as
+  BTC, no idiosyncratic residual) gets conviction cut one tier; a genuine
+  coin-specific residual (against BTC, or beyond it) does NOT. Strip the shared
+  market factor before trusting a directional read (partial-correlation logic).
 - Apply Step 6e spread/depth guard when L2 is available: cost-heavy books force
   maker-only or conviction downgrade; intended size is capped to 25% of visible
   top-3 entry-side depth. Missing book data does not block a fired trigger.
