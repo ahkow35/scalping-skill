@@ -268,6 +268,13 @@ revisit after 20 resolved trades.
    Note `strip-BTC: decoupled (corr <x>)`.
 4. **Data unavailable** (`regime` null or `btc_corr` None): skip, say so, no cut.
 
+Caveat — linear only: `btc_corr` is a Pearson (straight-line) correlation, so
+it catches coins that track BTC evenly but can MISS a coin that is
+nonlinearly driven by BTC (e.g. decoupled when calm, but dumps hard whenever
+BTC dumps) — such a coin shows low linear corr and slips this gate. The Step 2
+macro veto (hard-stop on BTC dumping on rising vol) is the backstop for that
+one-sided case.
+
 Passive mode: informational only — passive fades the VWAP mean and does not
 depend on idiosyncratic directional edge.
 
