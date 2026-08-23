@@ -1,5 +1,44 @@
 # Changelog — scalp skill
 
+## 2026-08-24 — strip-BTC gate promoted to a deterministic helper
+Promoted Step 1c from a prose/model-applied gate to a deterministic code helper,
+matching how flow/regime/behavioral gates work. New `strip_btc.py` (pure, mirrors
+`regime.py`/`flow.py`): `classify(candles, btc_candles, corr=...)` returns
+`{status, cut, cut_tiers, btc_corr, coin_move_pct, btc_move_pct, reason}`.
+`status` ∈ {beta, idiosyncratic, moderate, decoupled, unavailable}; `cut` is true
+only for `beta` (corr ≥ 0.7, coin move aligned with BTC and not outrunning it by
+>1.5×, BTC not ~flat). Reuses `regime.btc_corr` (passed in from `out['regime']`)
+so the two reads never disagree. Wired into `fetch_market.assemble` as
+`out['strip_btc']`; Step 1c + SKILL.md now say "read `out['strip_btc']`, do not
+re-derive by eye." Direction-neutral, CUT-only. Thresholds provisional
+(`strip_btc.DEFAULT_PARAMS`). Live check on HYPE: corr 0.486 → status moderate →
+no cut (correct). 13 new tests (`tests/test_strip_btc.py`); suite 265 → 278 green.
+Files: `strip_btc.py` (new), `fetch_market.py`, `scalp-core.md`, `SKILL.md`,
+`tests/test_strip_btc.py`.
+
+## 2026-08-24 — Step 1c strip-BTC idiosyncrasy gate (CUT-only)
+New conviction gate in `scalp-core.md`: a directional scalp whose move is pure
+BTC beta (`regime.btc_corr` ≥ 0.7, same direction as BTC, coin not outrunning
+BTC by >1.5×) gets conviction cut one tier; a genuine coin-specific residual
+(against BTC, or beyond it) does not. Rationale: the "filter the confounder"
+partial-correlation logic from the ML pairs-trading deep-read (Rotondi & Russo
+2025) — don't pay directional conviction for index beta the whole market shares.
+Distinct from the macro veto (which stops on BTC *danger*); this cuts on BTC
+*authorship* even when macro is CLEAR. Consumes only the numeric `btc_corr`
+input, so `regime_label` stays Phase-1 READ-ONLY as designed. Thresholds
+(0.7 / 0.4 / 1.5×) provisional — revisit after 20 resolved trades. Documented
+blind spot: `btc_corr` is Pearson (linear), so a nonlinearly-BTC-driven coin
+(calm normally, dumps hard on BTC dumps) can slip the gate — macro veto is the
+backstop. Wired into the final-conviction min rule (Steps 1b, 4b), QUICK output
+(silence-by-default STRIP-BTC line), WAIT reason list, TINY (β-cut token), and
+SKILL.md (execution checklist + frontmatter). Regression check: direction
+modules carry no conviction-tier logic (rule lives only in core), so the gate is
+incorporated in one place; passive mode marked informational-only. Docs-only
+change — no Python touched, no test impact.
+Commits `683d8aa` + `c01bb0b` on `feature/scalp-changelog-eval` (local, unpushed).
+Files: `scalp-core.md`, `SKILL.md`.
+Source note: vault `knowledge/concepts/partial-correlation-filters-confounders.md`.
+
 ## 2026-08-06 — post-mortem-driven behavioral gates (coin lockout, tilt-coin guard, MANAGE time-stop)
 Full-fill post-mortem of the real Hyperliquid account (11,944 fills, 2025-01 →
 2026-08: net −$254k, of which −$384k across three days — ETH short capitulation

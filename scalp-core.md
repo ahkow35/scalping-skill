@@ -202,8 +202,8 @@ Varma's rule: volume is the signal that confirms whether a price move is real
 flow is doing; this gate maps it to conviction. **It only ever CUTS conviction
 or sits you out — never raises it** (volume confirms an edge or it doesn't; it
 never manufactures one). Apply AFTER the direction module sets the base verdict
-and `side`; the final conviction = the LOWEST tier across the R16 check (0b)
-and this gate. Tiers: high → med → low.
+and `side`; the final conviction = the LOWEST tier across the R16 check (0c),
+this flow gate (1b), and the strip-BTC gate (1c). Tiers: high → med → low.
 
 1. **Coverage — can you even see the flow?** `coverage_ok == false`
    (max_coverage_pct < 50) → you're scalping half-blind: cap conviction at
@@ -232,16 +232,60 @@ if no trigger fires at all. Surface the result on the FLOW line of the output.
 If `flow` is a string (DATA UNAVAILABLE) or all fields null, treat as
 `coverage_ok == false`.
 
-After Step 1/1b, hand off to the direction module: Step 2 (macro veto),
+## Step 1c — Strip-BTC idiosyncrasy check (read `out['strip_btc']`)
+
+A directional scalp should be paid for a **coin-specific** move, not for BTC
+beta the whole market is riding. Borrowing the partial-correlation logic from
+ML pair selection (filter the shared common factor before trusting the
+relationship — Rotondi & Russo 2025), strip BTC and ask: is <COIN>'s move
+idiosyncratic, or is the index just dragging it along? A move that is pure beta
+carries no coin-specific edge. This is **distinct from the Step 2 macro veto**,
+which hard-stops on BTC *danger* (a dump on rising vol); this gate cuts on BTC
+*authorship* of the move even when macro is CLEAR (e.g. a calm BTC grind up
+dragging the coin with it).
+
+**Deterministic — read `out['strip_btc']`; do not re-derive by eye.** The helper
+(`strip_btc.py`) computes the decision from `btc_corr` (reused from regime, so
+the two reads agree) plus the coin's and BTC's recent 1h move. It is **CUT-only**
+(like the flow gate — can only lower conviction, never raise it) and returns:
+
+- `status` ∈ {`beta`, `idiosyncratic`, `moderate`, `decoupled`, `unavailable`}
+- `cut` (bool) and `cut_tiers` (1 only when `status == "beta"`)
+- `reason`, plus `btc_corr` / `coin_move_pct` / `btc_move_pct` for the output line
+
+Apply it mechanically: **if `out['strip_btc'].cut` is true, cut conviction one
+tier** (prefer WAIT if already low) and print the STRIP-BTC line with
+`out['strip_btc'].reason`; otherwise no effect and the line stays silent. The
+status meanings: `beta` = high corr (≥ 0.7), move aligned with BTC and not
+outrunning it → index-driven, the one case that cuts; `idiosyncratic` = high
+corr but the coin opposes or outruns BTC (>1.5×), or BTC is ~flat → coin-specific,
+no cut; `moderate` = corr in [0.4, 0.7) → not clearly BTC-driven, no cut;
+`decoupled` = corr < 0.4 → no cut; `unavailable` = data missing → skip. Only the
+numeric `btc_corr` feeds this; `regime_label` stays READ-ONLY (Phase 1).
+Thresholds are PROVISIONAL (`strip_btc.DEFAULT_PARAMS`) — revisit after ~20
+resolved trades via `/scalp summary` + `replay`.
+
+Caveat — linear only: `btc_corr` is a Pearson (straight-line) correlation, so
+it catches coins that track BTC evenly but can MISS a coin that is
+nonlinearly driven by BTC (e.g. decoupled when calm, but dumps hard whenever
+BTC dumps) — such a coin shows low linear corr and slips this gate. The Step 2
+macro veto (hard-stop on BTC dumping on rising vol) is the backstop for that
+one-sided case.
+
+Passive mode: informational only — passive fades the VWAP mean and does not
+depend on idiosyncratic directional edge.
+
+After Step 1/1b/1c, hand off to the direction module: Step 2 (macro veto),
 Step 3 (structure), Step 4 (triggers) — or `scalp-passive.md` when `passive`
-is in args. Then return here for Steps 4b–6. (Step 1b's conviction effect is
-applied once the direction module has set the base verdict and side.)
+is in args. Then return here for Steps 4b–6. (The Step 1b flow-gate and Step 1c
+strip-BTC conviction effects are applied once the direction module has set the
+base verdict and side.)
 
 ## Step 4b — Conviction-to-size verdict mapping
 
 Once triggers are defined (direction module Step 4) and the final conviction is
-set (the LOWEST tier across the R16 check and the flow gate), map to the
-verdict and size:
+set (the LOWEST tier across the R16 check, the flow gate, and the strip-BTC
+gate), map to the verdict and size:
 
 | Final conviction | Verdict (long) | Verdict (short) | Size (% of cap) |
 |---|---|---|---|
@@ -561,6 +605,9 @@ Rules that apply to BOTH shapes:
 - VWAP + OI are READ-ONLY context (Phase 1): they never change the verdict or
   conviction. Omit the VWAP segment when `vwap` is null; print the OI line as
   `OI: warming (<coverage_h>h)` while both window reads are null.
+- Omit the `STRIP-BTC:` line unless the strip-BTC gate (Step 1c) actually cut
+  conviction; the beta call is otherwise silent (an idiosyncratic/decoupled move
+  is the default and needs no line).
 - Time header: `<sgt> | <utc>`. Append the US-session clause **only** when within
   1h of `us_open` or `us_close` (decision-relevant); omit otherwise.
 
@@ -575,6 +622,7 @@ WEATHER: <regime_label> (compression <x> | BTC-corr <x> | 2-sided <x> | fade_ok 
 Range <floor> – <ceiling> | now <mid> (<pos>) | VWAP <px> (<above|below> <±X>bps)
 Flow: 5m <±$Xk> (<buy_share>%)  15m <±$Xk>  [cov <%>]
 FLOW-GATE: <bias> (<avg_buy_share>%) | cov <max>% | [climax <dir> ×<r>] [div <bearish|bullish>] [breakout-vol <ok|thin>] → conviction <unaffected | −1 | −2 | cap-low>
+[STRIP-BTC: β-driven (corr <x>, move aligned w/ BTC) → conviction −1 — omit unless it cut]
 OI: $<X>M | 1h <±%> → <read> | 24h <±%> → <read>   (or "warming <h>h" when read is null)
 Book: micro <px> vs mid <px> (dev <±X> bps)  spread <Y> bps  depth top3 bid/ask <B>/<A> <COIN>
 Triggers:
@@ -606,7 +654,7 @@ VERDICT: <V>  MACRO: <CLEAR|VETO ...>  Conviction: <low|med|high>
 WEATHER: <regime_label> (compression <x> | BTC-corr <x> | 2-sided <x> | fade_ok <bool>)
 [FLOW: <bias> (<avg_buy_share>%) cov <max>% — include only when flow is the/a reason to wait]
 Watching: A <name> at <entry> | B <name> at <entry>  [C ... — short only]
-Reason: <one clause — why not now, cite the missing condition (e.g. flow opposes / low coverage / unconfirmed breakout)>
+Reason: <one clause — why not now, cite the missing condition (e.g. flow opposes / low coverage / unconfirmed breakout / BTC-beta move)>
 Next: <when to re-check — e.g. 14:00 UTC 1h close, or "on close above 73.4">
 ```
 
@@ -653,6 +701,9 @@ Rules for TINY:
 - Output the line and stop. No headers, no follow-up sentence, no "let me know".
 - TINY may show gross `RR` only for brevity, but the decision to fire or wait
   still uses the NET R:R floor from Step 6c.
+- Append ` | β-cut` to the TINY line when the strip-BTC gate (Step 1c) cut
+  conviction (the move is index-driven). The lowered conviction tier is already
+  shown; the token just names why.
 - On daily-stop HALT: `<COIN> HALT | daily stop <±X.X>R (until <T>) | resolve stale opens if wrong`.
 - On other HALT: `<COIN> HALT | <reason>` — single line, no other fields.
 - On data-unavailable: `<COIN> DATA-UNAVAILABLE | <source>` and stop.

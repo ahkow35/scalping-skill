@@ -686,6 +686,7 @@ import time as _time
 
 import regime as regime_mod
 import flow as flow_mod
+import strip_btc as strip_btc_mod
 
 _NOW = lambda: int(_time.time() * 1000)
 _DAY = 86400000
@@ -757,6 +758,12 @@ def assemble(coin, deep=False, now_ms=None):
         out.get("taker_delta"), out.get("book"))
 
     out["flow"] = flow_mod.classify(out["candles"], out.get("taker_delta"))
+
+    # Strip-BTC idiosyncrasy gate (Step 1c) — reuses regime's btc_corr so the
+    # two reads agree. CUT-only: beta-driven move => cut one conviction tier.
+    out["strip_btc"] = strip_btc_mod.classify(
+        out["candles"], out["btc_candles"],
+        corr=out["regime"].get("btc_corr"))
 
     # VWAP — UTC-day anchored, from 1h candles. READ-ONLY Phase 1.
     vw = compute_vwap(out["candles"].get("1h", []), now_ms)
