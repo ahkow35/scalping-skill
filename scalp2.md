@@ -41,3 +41,9 @@ silences the session stop and keeps risk stuck at the proving 0.5% forever.
 0.5%/attempt proving → 1.0% after ≥40 resolved v2 trades with positive
 mean R. 10x leverage. 2-loss/12h session stop. Structural stops only —
 cut size, never tighten.
+
+Correlated cards collapse to one — a scan shows at most one card per
+rolling-correlation cluster (|rho|>=0.7 over 24x15m bars); the highest
+net-R:R card in a cluster is kept, the rest suppressed, capping aggregate
+correlated risk at one attempt and enforcing one direction per correlated
+fleet.
