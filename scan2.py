@@ -55,6 +55,7 @@ def _coin_read(coin, snap_a, snap_b):
         "oi_chg_pct": (oi_b / oi_a - 1) * 100,
         "funding_8h_pct": snap_b["ctx"]["funding"] * 8 * 100,
         "flow_line": _flow_line(_bucket(snap_b["taker_delta"], "15m") or {}),
+        "closes_15m": [float(k["c"]) for k in snap_b["candles"]["15m"]],
     }
 
 
