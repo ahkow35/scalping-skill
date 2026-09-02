@@ -1,5 +1,33 @@
 # Changelog — scalp skill
 
+## 2026-09-01 — scalp2 correlation-aware aggregate-risk cap (#5)
+A single scan could surface up to `MAX_CARDS` (3) cards, each carrying a full
+per-attempt risk budget — so taking two cards on coins that move together
+silently multiplied real risk on one thesis, and a long-here/short-there pair on
+correlated coins was an incoherent fleet. Neither was capped. Fix: a pure
+post-filter in `card2.build_cards`, inserted between the existing `-rr` sort and
+the `MAX_CARDS` slice (no existing gate touched). `scan2._coin_read` now threads
+a 15m close series (`closes_15m`) into each read; `_corr_clusters` computes
+plain-Python log-return Pearson correlation (no numpy) and union-find connected
+components, clustering coins at `|rho| ≥ CORR_THRESHOLD` (0.7) over
+`CORR_WINDOW_BARS` (24) bars. Within each cluster only the highest-net-R:R card
+survives; suppressed cards get a `no_trade_reasons` line naming the kept coin and
+rho. Fail-open by design: a coin with <25 closes, a flat/zero-variance series, or
+a missing `closes_15m` key never correlates and survives as its own singleton
+(div-by-zero guarded) — correlation that can't be computed never drops a real
+setup. Design choice: keep-one-per-cluster, NOT split-budget-across-legs (one
+managed position beats two half-size correlated ones — same risk, double the
+taker fees and management surface; matches the "cut size, never widen" ethos).
+Enforces both the aggregate-risk cap and one-direction-per-correlated-fleet in a
+single move. Built via build-to-pr (PR #5, reviewed PASS/medium, 2 low nits
+squashed), merged to main (squash `4aca9962`). 11 new tests
+(`tests/test_card2_correlation.py`); suite green.
+Files: `card2.py`, `scan2.py`, `scalp2.md`, `tests/test_card2_correlation.py`.
+
+Deferred by Nyan's choice (not built): fail-closed-if-native-stop-absent and
+broker-first position reconciliation on restart — both need his Hyperliquid
+wallet address (public info) in scalp2 config; reopen anytime.
+
 ## 2026-08-24 — strip-BTC gate promoted to a deterministic helper
 Promoted Step 1c from a prose/model-applied gate to a deterministic code helper,
 matching how flow/regime/behavioral gates work. New `strip_btc.py` (pure, mirrors
