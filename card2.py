@@ -3,6 +3,7 @@
 No alpha claims: `lean` is a label derived from the OI/price/sweep read
 (cheatsheet quadrants); the human decides. Every rule here is spec §6.
 """
+import math
 
 FEE_TAKER_PCT = 0.045    # % notional per side — base tier, UNVERIFIED
 FEE_MAKER_PCT = 0.015
@@ -15,6 +16,8 @@ ENTRY_ZONE_ATR = 0.15
 MAX_STOP_DIST_PCT = 3.0
 LEAN_MIN_PRICE_CHG_PCT = 0.10   # window price move below this = no lean
 LEAN_MIN_OI_CHG_PCT = 0.20     # window OI move below this = no lean
+CORR_WINDOW_BARS = 24    # trailing 15m bars for the return-correlation window
+CORR_THRESHOLD = 0.7     # |rho| at/above this clusters two coins as correlated
 
 
 def derive_lean(price_chg_pct, oi_chg_pct, struct_15m):
@@ -149,8 +152,64 @@ def v2_risk_pct(entries):
     return RISK_PCT_PROVEN if mean_r > 0 else RISK_PCT_PROVING
 
 
+def _log_returns(closes):
+    """Log-return series over the trailing CORR_WINDOW_BARS closes, or None
+    if there isn't enough history — callers must treat None as fail-open
+    (no correlation claim, not a zero correlation)."""
+    if len(closes) < CORR_WINDOW_BARS + 1:
+        return None
+    window = closes[-(CORR_WINDOW_BARS + 1):]
+    return [math.log(window[i] / window[i - 1]) for i in range(1, len(window))]
+
+
+def _pearson(a, b):
+    n = len(a)
+    mean_a, mean_b = sum(a) / n, sum(b) / n
+    cov = sum((x - mean_a) * (y - mean_b) for x, y in zip(a, b))
+    var_a = sum((x - mean_a) ** 2 for x in a)
+    var_b = sum((y - mean_b) ** 2 for y in b)
+    denom = math.sqrt(var_a * var_b)
+    return cov / denom if denom else 0.0     # flat series — no correlation
+
+
+def _corr_clusters(cards, closes_by_coin):
+    """Connected components over the "|rho| >= CORR_THRESHOLD" graph between
+    cards' coins. A coin with too little history or a flat return series
+    fails open into its own singleton cluster."""
+    n = len(cards)
+    rets = [_log_returns(closes_by_coin.get(c["coin"], [])) for c in cards]
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(n):
+        if rets[i] is None:
+            continue
+        for j in range(i + 1, n):
+            if rets[j] is None:
+                continue
+            if abs(_pearson(rets[i], rets[j])) >= CORR_THRESHOLD:
+                union(i, j)
+
+    clusters = {}
+    for i in range(n):
+        clusters.setdefault(find(i), []).append(i)
+    return list(clusters.values())
+
+
 def build_cards(coin_reads, profile, behavioral, macro, entries, now_ms):
     reasons, cards = [], []
+    closes_by_coin = {read["coin"]: read.get("closes_15m", [])
+                      for read in coin_reads}
     if behavioral.get("cooldown", {}).get("active"):
         return {"cards": [], "no_trade_reasons":
                 ["behavioral cooldown active"] + macro["flags"]}
@@ -211,4 +270,28 @@ def build_cards(coin_reads, profile, behavioral, macro, entries, now_ms):
                       "invalidation":
                           f"1h close beyond {setup['stop']:.4g}"})
     cards.sort(key=lambda c: -c["rr"])
+
+    # correlated coins move together — surfacing a card on each multiplies
+    # risk on one thesis and can leave an incoherent long-here/short-there
+    # fleet. Keep only the top-R:R card per correlation cluster (cards are
+    # already -rr sorted, so the first index seen in a cluster is the one
+    # to keep).
+    survivors = []
+    for idxs in _corr_clusters(cards, closes_by_coin):
+        idxs.sort()
+        kept = cards[idxs[0]]
+        survivors.append(kept)
+        if len(idxs) == 1:
+            continue
+        kept_rets = _log_returns(closes_by_coin.get(kept["coin"], []))
+        for i in idxs[1:]:
+            c = cards[i]
+            rho = _pearson(kept_rets,
+                           _log_returns(closes_by_coin.get(c["coin"], [])))
+            reasons.append(f"{c['coin']}: correlated with {kept['coin']} "
+                           f"(rho={rho:.2f}) — aggregate-risk cap, "
+                           f"{kept['coin']} kept")
+    survivors.sort(key=lambda c: -c["rr"])
+    cards = survivors
+
     return {"cards": cards[:MAX_CARDS], "no_trade_reasons": reasons}
