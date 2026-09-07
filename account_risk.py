@@ -110,7 +110,8 @@ def evaluate(snapshot, config, state=None, *, now_ms, max_age_ms=90_000, reset_g
         base = observation
         near_reset = 0 <= observation["asof_ms"] - start <= reset_grace_ms
         previous = candidate.get("last_observation")
-        if previous and 0 <= start - previous["asof_ms"] <= reset_grace_ms and near_reset:
+        anchored_reset = bool(previous and 0 <= start - previous["asof_ms"] <= reset_grace_ms and near_reset)
+        if anchored_reset:
             base = previous
         limit = config.get("daily_loss_usdc")
         if limit is None:
@@ -119,7 +120,7 @@ def evaluate(snapshot, config, state=None, *, now_ms, max_age_ms=90_000, reset_g
         day = {"key": key, "start_ms": start, "end_ms": end,
                "baseline_at_ms": base["asof_ms"], "baseline_equity_usdc": base["equity_usdc"],
                "baseline_unrealized_usdc": base["unrealized_pnl_usdc"],
-               "baseline_quality": "near_reset_observation" if near_reset else "partial_day",
+               "baseline_quality": "near_reset_observation" if anchored_reset else "partial_day",
                "limit_usdc": limit, "tripped": False, "tripped_at_ms": None}
         candidate["day"] = day
     if observation["asof_ms"] < day["baseline_at_ms"]:
