@@ -26,7 +26,7 @@ Five checks:
   on verdict or conviction. Surfaces a 24h pause when the last resolved trade
   lost > 0.7R.
 - **R16 vibe check (0c)**: leaks cap conviction and are flagged. At low
-  conviction the entry fires at PROBE size (25%) instead of full.
+  conviction the verdict is WAIT with no executable size.
 - **Coin lockout (0d)**: HARD ENTRY gate per coin+side. Two material losses
   (≤ −0.5R) on the same coin+side within 12h lock that coin+side for 24h.
 - **Tilt-coin guard (0e)**: static conviction cap on coins with a documented
@@ -58,10 +58,10 @@ Returns `daily_stop {active, until_utc, realized_r_24h, reason}`,
 - If the log is empty / fresh slate, the script returns all-clear — omit the
   warning entirely.
 
-Empirical basis (2025–26 account post-mortem, 11,944 fills): a daily-loss
-circuit breaker was net-positive on every one of the 16 days it would have
-tripped — losses avoided ~$425k, later-same-day gains forfeited $0. The daily
-stop is the single highest-value rule in this skill; never soften it.
+The account post-mortem motivates an account-wide loss limit, but the claimed
+~$425k saved/$0 forfeited is an unverified counterfactual: removing losing
+closes does not model closing the underlying positions. Do not quote it as
+proven savings. This journal-based gate cannot see unlogged manual trades.
 
 ### 0d. Coin lockout (ENTRY only — HARD gate per coin+side)
 `behavioral.py` returns `coin_lockout {active, locked: [{coin, side,
@@ -104,7 +104,7 @@ Applies identically to long and short entries.
 Scoring:
 - 6/6 edge → conviction = high (no penalty)
 - 4–5/6 edge → conviction capped at **med**; name the leak rows
-- ≤3/6 edge → conviction capped at **low**; name all leak rows; fire at PROBE size (25% of cap)
+- ≤3/6 edge → conviction capped at **low**; name all leak rows; WAIT, no entry size.
 - Any leak in Timing or State → add one explicit sentence in output: "BEHAVIORAL CAUTION: <row> leaked — size accordingly"
 
 Out-of-plan flag: if thesis is NOT in this week's Saturday plan but row 1 still
@@ -152,8 +152,9 @@ indicative and lean on instrument-specific event awareness instead.
 
 The output includes `taker_delta` — REAL aggressor flow from a local trade
 cache that grows across repeated /scalp calls. Use `delta_usdc` and
-`buy_share_pct` per window for buyer-vs-seller pressure. CHECK `coverage_pct` —
-if <50% the window is partial and the signal is weak; report that explicitly.
+`buy_share_pct` per window for sampled buyer-vs-seller pressure. REST samples
+do not prove capture: require explicit reliable execution-window data. Null
+coverage is unknown, not zero or full coverage; old cache age is not evidence.
 
 The output includes `book.execution` — Stoikov top-of-book microprice and the
 instantaneous lean of the book. Key field: `microprice_dev_bps` (positive = bid
@@ -205,13 +206,12 @@ never manufactures one). Apply AFTER the direction module sets the base verdict
 and `side`; the final conviction = the LOWEST tier across the R16 check (0c),
 this flow gate (1b), and the strip-BTC gate (1c). Tiers: high → med → low.
 
-1. **Coverage — can you even see the flow?** `coverage_ok == false`
-   (max_coverage_pct < 50) → you're scalping half-blind: cap conviction at
-   **low** and flag `⚠ low coverage`. Re-run /scalp every ~5m to build the
-   trade cache before sizing up.
+1. **Coverage — can you even see the flow?** Missing, legacy or unreliable
+   execution-window flow (`coverage_ok == false`) → WAIT, no executable size.
+   REST cache span and repeated polling do not establish complete capture.
 2. **Aggressor bias must agree with `side`.** long wants `buyers`, short wants
    `sellers`.
-   - `balanced` → no confirmation: cut **one** tier.
+   - `balanced` → no confirmation: WAIT.
    - OPPOSES the side (long into `sellers` / short into `buyers`) → cut **two**
      tiers (→ low) + flag `flow opposes`; strongly prefer WAIT.
 3. **Delta divergence = exhaustion, don't chase.** long + `bearish` (price up
@@ -226,9 +226,9 @@ this flow gate (1b), and the strip-BTC gate (1c). Tiers: high → med → low.
    momentum entry and `breakout_vol_ok == false`, the breakout is unconfirmed →
    cut one tier (a breakout on thin volume is suspect).
 
-Cuts stack (take the minimum tier). If the gate drives the final conviction to
-low AND macro/regime is also weak, prefer **PROBE** over WAIT; only go to WAIT
-if no trigger fires at all. Surface the result on the FLOW line of the output.
+Cuts stack (take the minimum tier). Final low conviction always means WAIT,
+even when a price trigger fires. Never substitute a small live PROBE for
+missing confirmation. Surface the result on the FLOW line of the output.
 If `flow` is a string (DATA UNAVAILABLE) or all fields null, treat as
 `coverage_ok == false`.
 
@@ -291,10 +291,10 @@ gate), map to the verdict and size:
 |---|---|---|---|
 | high | LONG-NOW | SHORT-NOW | 100% |
 | med | LONG-CLOSE | SHORT-CLOSE | 50% |
-| low | LONG-PROBE | SHORT-PROBE | 25% |
+| low | WAIT | WAIT | 0% |
 
-All six are **action verdicts** — they produce a JOURNAL STUB and are fired live.
-Only go to WAIT when no trigger fires. If the macro veto blocks, the verdict is
+NOW and CLOSE are action verdicts only after all required checks pass.
+Low conviction, missing confirmation or no fired trigger means WAIT. If the macro veto blocks, the verdict is
 VETOED / NO-TRADE regardless of conviction.
 
 The conviction tier shown on the VERDICT line reflects the **final** conviction
@@ -327,7 +327,7 @@ Returns `{equity, phase}`. Default cap follows phase:
 The verdict tier applies a multiplier to the cap:
 - NOW (high conviction): ×1.0 — full cap.
 - CLOSE (med conviction): ×0.5 — half cap.
-- PROBE (low conviction): ×0.25 — quarter cap.
+- Low conviction: WAIT — no executable sizing. PROBE is a historical label only.
 
 If `equity` is null, ask once and offer to save:
 `/scalp profile set equity <amount>`. Do NOT guess equity — without it, no
@@ -338,14 +338,16 @@ Always state the verdict tier on the SIZE line so the multiplier is explicit.
 Single line per trigger, all values explicit. SIZE line includes the verdict
 tier multiplier:
 ```
-SIZE (NOW): $<E> × <C>% = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
-SIZE (CLOSE 50%): $<E> × <C>% × 0.5 = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
-SIZE (PROBE 25%): $<E> × <C>% × 0.25 = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
+SIZE (NOW): $<E> × <C>% = $<risk> ÷ $<after_cost_loss_per_unit> = <coins> <COIN> @ <Nx> lev
+SIZE (CLOSE 50%): $<E> × <C>% × 0.5 = $<risk> ÷ $<after_cost_loss_per_unit> = <coins> <COIN> @ <Nx> lev
 ```
 Show only the line matching the verdict tier. Leverage is the OUTPUT (coins ×
 entry / E), never an INPUT. Submit hard SL to Hyperliquid at entry — no mental
 stops, no widening (tightening is fine). The formula is direction-neutral: for
-a short, stop is above entry; `|entry − stop|` is unchanged.
+a short, stop is above entry. Use `costs.loss_per_unit`: `|entry − stop|`
+plus modeled round-trip fees/slippage. Net reward/risk divides after-cost
+reward by after-cost stop loss, not raw stop distance. These modeled costs
+are assumptions, not a guarantee against gap/slippage losses.
 
 ### 6c. Discipline rules
 - Structural stop only — never noise-tight.
@@ -392,7 +394,7 @@ never block a fired trigger solely because book data is unavailable.
   market-take. The setup can still fire, but do not pay taker into a cost-heavy
   book.
 - If live execution `cost_r > 0.35R` → additionally downgrade one conviction
-  tier and flag `⚠ cost-heavy`. This can turn NOW → CLOSE or CLOSE → PROBE.
+  tier and flag `⚠ cost-heavy`. This can turn NOW → CLOSE or CLOSE → WAIT.
 - Depth cap: intended size must be ≤25% of visible top-3 depth on the entry
   side. Longs consume ask depth (`book.depth.ask_top3.sz`); shorts consume bid
   depth (`book.depth.bid_top3.sz`). If intended size is larger, cut size to the
@@ -683,8 +685,7 @@ Examples:
   (when an entry is firing, swap the range field for the firing trigger detail)
 - `HYPE LONG-CLOSE | med | A 72.55 SL 72.20 RR 1.6 | size 14.3 @ 0.5x | dev +4bps`
   (CLOSE = 50% of cap, med conviction)
-- `HYPE LONG-PROBE | low | A 69.50 SL 68.80 RR 2.1 | size 7.1 @ 0.25x | dev -2bps`
-  (PROBE = 25% of cap, low conviction)
+- `HYPE WAIT | low | reason: reliable flow confirmation unavailable | next 14:00 UTC`
 - `HYPE VETOED | n/a | reason: BTC −2.1% on rising vol | next 14:00`
 - `HYPE HALT | daily stop -2.1R (until 2026-07-07 03:20 UTC) | resolve stale opens if wrong`
 
@@ -714,11 +715,9 @@ Rules for TINY:
   liveness heartbeat.)
 
 ## /loop usage (hands-off monitoring)
-**Default to TINY in `/loop`.** Run `/loop 5m /scalp <COIN>` continuously to
-catch setups as they form — the audit log shows 1-12h gaps between entries
-without it, which means setups are being missed. The trade cache also builds
-meaningful taker-delta coverage (~30 min for 5m/15m windows) only under
-sustained /loop. Examples:
+**Default to TINY in `/loop`.** Optional periodic checks can observe changing
+conditions; gaps between logged decisions do not prove missed profitable
+trades. REST polling does not establish complete taker-flow capture. Examples:
 - `/loop 5m /scalp HYPE` → TINY ENTRY every 5 min
 - `/loop 5m /scalp short HYPE` → TINY ENTRY short every 5 min
 - `/loop 5m /scalp manage HYPE 72.55` → TINY MANAGE every 5 min

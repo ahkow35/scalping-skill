@@ -12,7 +12,9 @@ description: >
 
 # Scalp
 
-Activating the live tactical scalp companion.
+Activating the tactical scalp discipline companion. Entry alpha is unvalidated;
+historical component tests were negative. Do not add indicators, loosen gates,
+or treat replay results as proof of profitability. New signal research stays paper-only.
 
 ## Step 0 — Admin commands (short-circuit before trading flow)
 
@@ -49,16 +51,17 @@ Verdict distribution:
   <verdict>  <count>  (<pct>%)
   ... one row per verdict, sorted by count desc, pad to align
 
-Performance by setup (resolved only):
+Performance by system/family/side/setup (eligible resolved ENTRY rows only):
   Setup <name>: <n> trades, win rate <pct>%, expectancy <±R>R, total <±R>R
   ... sorted by total_r desc
   (if no resolved trades yet: "No resolved trades yet — log outcomes via /scalp resolve")
 
-GATE VALUE (counterfactual replay, <scored> scored):
-  WAITs:  <n> scored, <fired> would have filled — missed <±R>R
-  VETOs:  <n> scored, <fired> would have filled — blocked <±R>R
-          (negative = the gate saved you; positive = the gate cost you)
-  By setup (simulated): <side>-<label>: n <n>, win <pct>%, expectancy <±R>R
+HYPOTHETICAL REPLAY (best trigger selected with hindsight, <scored> scored):
+  WAITs/VETOs: show filled, unfilled and unavailable counts separately.
+  Show total_hypothetical_best_net_r; report null as unavailable, not zero.
+  Legacy gross-only results are separate, never included in net totals.
+  By setup (simulated): <system>/<family>/<side>/<label>: n <n>, expectancy <±R>R
+  Not missed profit, saved losses, executable returns or evidence to loosen gates.
   ... sorted by total_r desc; omit whole block if scored == 0
   [if unscored open non-action entries exist: "→ run /scalp replay to score <K> new entries"]
 
@@ -212,7 +215,7 @@ Follow `scalp-core.md` + the direction module exactly.
   `/scalp profile set equity <amt>`; a per-trade A+ override to 1% is still
   declared inline. Flag the cap when non-default.
 - Every trigger block shows the sizing math (equity × cap = $risk;
-  $risk ÷ stop_distance = position size; leverage derived, not chosen).
+  $risk ÷ after-cost loss_per_unit = position size; leverage derived, not chosen).
 - Directional triggers must pass the NET R:R floor from `costs.py`; show gross
   and net R:R in QUICK/DEEP trigger blocks.
 - JOURNAL STUB is shown for ACTION verdicts (LONG-NOW / SHORT-NOW) and
@@ -222,8 +225,8 @@ Follow `scalp-core.md` + the direction module exactly.
   (directional entries omit it / default "directional").
 - ALWAYS run the Step 1b volume/flow gate from `out['flow']` (coverage,
   aggressor bias vs side, climax, divergence, breakout-volume) — it can only
-  CUT conviction. `coverage_ok == false` (max coverage <50%) caps conviction
-  at low: you're scalping half-blind (Varma §8a).
+  CUT conviction. Missing or unreliable execution-window flow, balanced flow,
+  and final low conviction produce WAIT with no executable sizing, never PROBE.
 - ALWAYS run the Step 1c strip-BTC (idiosyncrasy) gate by reading the
   deterministic `out['strip_btc']` (`strip_btc.py`) — CUT-only: if
   `out['strip_btc'].cut` is true (`status == "beta"`: high BTC corr, move aligned
@@ -247,6 +250,9 @@ Follow `scalp-core.md` + the direction module exactly.
 The fetch script builds a local trade cache at
 `/Users/nyanyk/Claude/research/scalp/.trade_cache/<COIN>.jsonl` because the
 Hyperliquid `recentTrades` endpoint is hard-capped at 10 trades per call.
-Each /scalp run dedupes by `tid` and appends. Running `/loop 5m /scalp HYPE`
-builds meaningful 5m/15m/1h coverage within 30 minutes. First call after
-long idle = low coverage; say so.
+Each /scalp run dedupes by `tid` and appends. This sparse REST sample cannot
+establish complete capture, even after repeated calls. Per-window span,
+freshness and gap diagnostics are not coverage proof: `coverage_pct` and
+`capture_complete` remain null, `reliable` is false. Old cached trades cannot
+validate a current window. A continuous feed with reconnect/gap accounting is
+a prerequisite for the later paper-only signal experiment, not implemented here.

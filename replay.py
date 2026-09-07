@@ -3,8 +3,9 @@
 For every open ENTRY-mode audit row with trigger levels, fetch the candles
 that followed it and mechanically simulate each trigger: did it fill, and did
 the stop or the targets get hit first? Writes a `counterfactual` block back
-onto the audit entry, which `audit_log.compute_summary` aggregates into
-gate-value stats (WAIT missed-R, VETO avoided-R, per-setup expectancy).
+onto the audit entry. Maxima across triggers are explicitly hypothetical:
+the winning trigger is selected after seeing the future, so these are not
+missed profits, avoided losses or estimates of a tradable gate's value.
 
 Simulation conventions (deliberately simple, documented, conservative):
   - Fill = candle touch of the trigger entry price. The fill price is exact
@@ -12,8 +13,11 @@ Simulation conventions (deliberately simple, documented, conservative):
     a realistic ROUND-TRIP COST (taker fee + slippage), expressed in R — see
     the cost-model block below. Per-trigger results carry both `r` (GROSS, the
     pure fill logic) and `net_r` (after cost); `cost_r` records the charge.
-    The summary aggregates NET. Unfilled triggers pay nothing. This is still
-    gate-tuning evidence, not proof of live P&L.
+    R always uses the ORIGINAL price-stop distance, including for net_r;
+    it is not the after-cost loss denominator used by admission's net R:R.
+    The summary keeps NET results separate from legacy gross-only results.
+    Unfilled triggers pay nothing. Candle completeness is unverified; an
+    empty response is unavailable data, not evidence a trigger never filled.
   - Ladder per protocol: 50% out at T1, stop moves to breakeven; remaining
     50% out at T2 (the 20% trail is NOT simulated — T2 exit is the
     conservative stand-in). No T2 defined -> remainder scored at breakeven.
@@ -34,6 +38,7 @@ CLI:
 
 import argparse
 import json
+import math
 import sys
 import time
 
@@ -175,8 +180,9 @@ def simulate_trigger(trigger, side, candles, fetch_finer=None):
     cost_r = round_trip_cost_r(lv)
     trig, cds = _normalize(trigger, side, candles)
     if not cds:
-        return {"status": "unfilled", "r": None, "net_r": None,
-                "cost_r": round(cost_r, 4), "ambiguous": False}
+        return {"status": "data_unavailable", "r": None, "net_r": None,
+                "cost_r": 0.0, "modeled_cost_r": round(cost_r, 4),
+                "r_denominator": "original_price_stop_distance", "ambiguous": False}
 
     interval_ms = (cds[1]["t"] - cds[0]["t"]) if len(cds) > 1 else SCAN_INTERVAL_MS
     phase, ambiguous = "PENDING", False
@@ -189,7 +195,9 @@ def simulate_trigger(trigger, side, candles, fetch_finer=None):
         return {"status": status,
                 "r": gross,
                 "net_r": net,
-                "cost_r": round(cost_r, 4),
+                "cost_r": round(cost_r, 4) if r is not None else 0.0,
+                "modeled_cost_r": round(cost_r, 4),
+                "r_denominator": "original_price_stop_distance",
                 "ambiguous": amb}
 
     for cd in cds:
@@ -225,7 +233,7 @@ def simulate_trigger(trigger, side, candles, fetch_finer=None):
                   ambiguous)
 
 
-def _scoreable_trigger(trig):
+def _scoreable_trigger(trig, side=None):
     """A trigger is scoreable when entry/stop/t1 are present and numeric.
 
     The audit log has accumulated schema drift — some triggers are stubs like
@@ -237,9 +245,18 @@ def _scoreable_trigger(trig):
         for key in ("entry", "stop", "t1"):
             if trig.get(key) is None:
                 return False
-            float(trig[key])
+            if not math.isfinite(float(trig[key])):
+                return False
         if trig.get("t2") is not None:
-            float(trig["t2"])
+            if not math.isfinite(float(trig["t2"])):
+                return False
+        e, s, t1 = (float(trig[key]) for key in ("entry", "stop", "t1"))
+        if e == s:
+            return False
+        if side == "long" and not s < e < t1:
+            return False
+        if side == "short" and not t1 < e < s:
+            return False
     except (TypeError, ValueError):
         return False
     return True
@@ -260,7 +277,8 @@ def apply_replay_to_entry(entry, candles, window_h, fetch_finer=None):
         return None
     triggers = entry.get("triggers") or {}
     live = {k: v for k, v in triggers.items() if v}
-    scoreable = {k: v for k, v in live.items() if _scoreable_trigger(v)}
+    scoreable = {k: v for k, v in live.items()
+                 if _scoreable_trigger(v, entry.get("side"))}
     if not scoreable:
         return None
 
@@ -277,14 +295,27 @@ def apply_replay_to_entry(entry, candles, window_h, fetch_finer=None):
         "interval": SCAN_INTERVAL,
         "per_trigger": per_trigger,
         "unscoreable": sorted(set(live) - set(scoreable)),
+        "r_denominator": "original_price_stop_distance",
+        "selection": "hypothetical_best_after_observing_outcomes",
+        "hypothetical_best_gross_r": round(max(fired_rs), 4) if fired_rs else None,
+        "hypothetical_best_net_r": round(max(net_rs), 4) if net_rs else None,
+        # Preserve stored field compatibility; consumers should render the
+        # hypothetical names above, never infer missed or avoided profits.
         "best_r": round(max(fired_rs), 4) if fired_rs else None,  # gross
         "net_best_r": round(max(net_rs), 4) if net_rs else None,  # after cost
+        "candle_data": {
+            "count": len(candles),
+            "first_t_ms": min((int(c["t"]) for c in candles), default=None),
+            "last_t_ms": max((int(c["t"]) for c in candles), default=None),
+            "completeness": "unverified" if candles else "unavailable",
+        },
         "cost_model": {
             "taker_fee": TAKER_FEE,
             "slippage_frac": SLIPPAGE_FRAC,
             "round_trip_fills": ROUND_TRIP_FILLS,
-            "note": "net_r / net_best_r are GROSS minus round-trip cost; "
-                    "summary aggregates net.",
+            "note": "net_r is gross payoff minus modeled round-trip cost in "
+                    "original price-stop R. Best fields select with hindsight; "
+                    "summary keeps legacy gross-only results separate.",
         },
     }
 
@@ -356,7 +387,12 @@ def replay_open_entries(window_h=72, force=False, only_id=None):
                 audit_log.attach_counterfactual(tid, {
                     "window_h": window_h, "interval": SCAN_INTERVAL,
                     "per_trigger": {}, "unscoreable": sorted(live),
-                    "best_r": None, "simulated_at_ms": now_ms,
+                    "best_r": None, "net_best_r": None,
+                    "hypothetical_best_gross_r": None,
+                    "hypothetical_best_net_r": None,
+                    "r_denominator": "original_price_stop_distance",
+                    "selection": "unscoreable",
+                    "simulated_at_ms": now_ms,
                     "simulated_at_utc": iso_utc(now_ms),
                 }, force=force)
                 skipped.append({"id": tid, "reason":

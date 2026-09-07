@@ -9,7 +9,7 @@ conviction adjustment).
 Encodes Samir Varma's "volume is the key signal" heuristics
 ([[samir-varma-react-to-risk-quant-trading]] §8a) as testable flags:
 
-  - coverage_ok        — can we even see the flow? (<50% = scalping half-blind)
+  - coverage_ok        — reliable, fresh capture for the execution window
   - aggressor_bias     — are buyers or sellers leaning on the tape?
   - volume_climax      — a volume spike = capitulation (down) / blow-off (up)
   - delta_divergence   — price up on selling / price down on buying = exhaustion
@@ -25,7 +25,8 @@ raise it (volume confirms or it doesn't; it never manufactures an edge).
 # passes). Conservative by design.
 DEFAULT_PARAMS = {
     "interval": "5m",        # near-term execution tape for climax/divergence
-    "min_coverage": 50.0,    # below => flow read is unreliable (Varma: half-blind)
+    "min_coverage": 50.0,    # only meaningful with explicit capture reliability
+    "max_sample_age_ms": 60_000,
     "buyers_min": 58.0,      # avg buy_share >= => buyers leaning
     "sellers_max": 42.0,     # avg buy_share <= => sellers leaning
     "climax_baseline_n": 20, # max bars of volume baseline for a spike
@@ -46,6 +47,43 @@ def _bucket(taker_delta, w):
     return b if isinstance(b, dict) else None
 
 
+def _reliable(bucket, params):
+    """Legacy percentages and sparse REST snapshots cannot confirm flow."""
+    if not bucket or bucket.get("reliable") is not True or bucket.get("capture_complete") is not True:
+        return False
+    if bucket.get("source") == "recent_trades_rest":
+        return False
+    try:
+        return (float(bucket.get("trade_count", 0)) > 0
+                and 0 <= float(bucket["sample_age_ms"]) <= params["max_sample_age_ms"]
+                and params["min_coverage"] <= float(bucket["coverage_pct"]) <= 100)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def closed_candles(candles_iv, *, now_ms=None):
+    """Use explicit close state or exchange close timestamps when available.
+
+    Older snapshots lack those fields: conservatively omit their final bar.
+    This fallback also excludes a lone bar whose close cannot be established.
+    """
+    closed = []
+    for i, candle in enumerate(candles_iv or []):
+        end = candle.get("T")
+        if now_ms is not None and end is not None:
+            try:
+                if float(end) < now_ms:
+                    closed.append(candle)
+            except (TypeError, ValueError):
+                pass
+        elif "closed" in candle:
+            if candle["closed"] is True:
+                closed.append(candle)
+        elif i < len(candles_iv) - 1:
+            closed.append(candle)
+    return closed
+
+
 def max_coverage_pct(taker_delta, windows=_WINDOWS):
     """Best coverage across windows, or None if no window has flow data."""
     covs = []
@@ -57,12 +95,11 @@ def max_coverage_pct(taker_delta, windows=_WINDOWS):
 
 
 def aggressor_bias(taker_delta, params, windows=_WINDOWS):
-    """('buyers'|'sellers'|'balanced', avg_buy_share) from buy_share across
-    windows. (None, None) if no window reports a buy_share."""
+    """Average only explicitly reliable windows; unavailable otherwise."""
     shares = []
     for w in windows:
         b = _bucket(taker_delta, w)
-        if b is not None and b.get("buy_share_pct") is not None:
+        if _reliable(b, params) and b.get("buy_share_pct") is not None:
             shares.append(float(b["buy_share_pct"]))
     if not shares:
         return None, None
@@ -121,7 +158,7 @@ def delta_divergence(candles_iv, taker_delta, params):
     if pd not in ("up", "down"):
         return None
     near = _bucket(taker_delta, params["interval"])
-    if near is None or near.get("buy_share_pct") is None:
+    if not _reliable(near, params) or near.get("buy_share_pct") is None:
         return None
     bs = float(near["buy_share_pct"])
     if pd == "up" and bs <= params["sellers_max"]:
@@ -145,7 +182,7 @@ def breakout_vol_ok(candles_iv, params):
     return vols[-1] >= params["breakout_mult"] * avg
 
 
-def classify(candles, taker_delta, *, params=None):
+def classify(candles, taker_delta, *, params=None, now_ms=None):
     """Compose primitives into a flow read. Pure; never raises.
 
     candles: {interval: [candle,...]} (each candle has o/h/l/c/v).
@@ -155,7 +192,7 @@ def classify(candles, taker_delta, *, params=None):
     p = {**DEFAULT_PARAMS, **(params or {})}
     td = taker_delta if isinstance(taker_delta, dict) else {}
     iv = p["interval"]
-    cs = candles.get(iv, []) if isinstance(candles, dict) else []
+    cs = closed_candles(candles.get(iv, []), now_ms=now_ms) if isinstance(candles, dict) else []
 
     cov = max_coverage_pct(td)
     bias, avg_share = aggressor_bias(td, p)
@@ -166,7 +203,10 @@ def classify(candles, taker_delta, *, params=None):
     return {
         "interval": iv,
         "max_coverage_pct": cov,
-        "coverage_ok": (cov is not None and cov >= p["min_coverage"]),
+        "coverage_ok": _reliable(_bucket(td, iv), p),
+        "capture_reliable": _reliable(_bucket(td, iv), p),
+        "reliable_windows": [w for w in _WINDOWS if _reliable(_bucket(td, w), p)],
+        "closed_bar_count": len(cs),
         "aggressor_bias": bias,
         "avg_buy_share_pct": avg_share,
         "volume_climax": climax,
@@ -174,8 +214,9 @@ def classify(candles, taker_delta, *, params=None):
         "breakout_vol_ok": brk,
         "params": p,
         "_note": (
-            "Volume/flow read (Varma §8a). coverage_ok False => flow unreliable, "
-            "Step 1b caps conviction to low. aggressor_bias must agree with the "
+            "Volume/flow read (Varma §8a). coverage_ok requires explicit reliable "
+            "capture and fresh trades in the execution window; otherwise WAIT. "
+            "REST sample span never proves coverage. aggressor_bias must agree with the "
             "trade side or conviction is cut. delta_divergence against the side = "
             "exhaustion, do not chase. volume_climax: 'down'=capitulation "
             "(supports longs/covers), 'up'=blow-off (supports shorts/take-profit) "
