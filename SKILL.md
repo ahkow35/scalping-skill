@@ -8,11 +8,11 @@ description: >
   Long AND short setups, each with its own protocol module. Three output sizes —
   TINY (one-line pulse, default for /loop), QUICK (standard), DEEP (full).
   Two modes — ENTRY (fresh thesis) and MANAGE (review open position).
-  Plus five admin commands — `summary` (audit log aggregate stats),
+  Plus six admin commands — `account` (read-only account risk and stop audit), `summary` (audit log aggregate stats),
   `resolve` (close out an open trade with outcome), `list-open` (list unresolved
   entries), `replay` (counterfactual scoring of logged decisions), `profile`
   (set account equity / phase for sizing). Trigger phrases: "/scalp",
-  "/scalp <COIN>", "/scalp tiny <COIN>", "/scalp quick <COIN>",
+  "/scalp account check", "/scalp <COIN>", "/scalp tiny <COIN>", "/scalp quick <COIN>",
   "/scalp deep <COIN>", "/scalp short <COIN>", "/scalp tiny short <COIN>",
   "/scalp deep short <COIN>", "/scalp manage [short] <COIN> <entry>",
   "/scalp tiny manage [short] <COIN> <entry>", "/scalp summary [--since-days N]",
@@ -33,7 +33,14 @@ Check args FIRST. If the first token is one of these, run the admin command
 and STOP — do NOT proceed to the trading flow, do NOT fetch market data, do
 NOT run behavioral preflight.
 
-### `/scalp summary [--since-days N]`
+### `/scalp account check`
+
+For `/scalp account check`, run `python3 account_monitor.py check` from the
+skill repository and report its status and limitations; then STOP. For account
+configuration, read `ACCOUNT-MONITOR.md` and obtain the public trading wallet
+and owner-selected daily loss limit. Never request a private key or place orders.
+
+### `/scalp summary [--since-days N]` (audit journal)
 
 Run:
 ```bash
@@ -186,7 +193,15 @@ Follow `scalp-core.md` + the direction module exactly.
 - `passive` in args = PASSIVE mode (loads scalp-passive.md; both-sides fade).
 - `/loop` invocations default to TINY unless QUICK/DEEP is explicit.
 - Coin arg defaults to HYPE.
-- **Step 0 Behavioral preflight runs FIRST** (daily stop + cooldown + R16 vibe
+- **Account preflight runs before every new entry**, including passive mode:
+  run `python3 account_monitor.py check --json` from the skill repository.
+  Only a fresh `entry_allowed: true` permits further entry checks. Missing
+  configuration, unsupported account mode, errors and unknown data block new
+  entries. Report the exact status; do not infer CLEAR from silence or a cached
+  result. MANAGE and protective analysis must still proceed. Read
+  `ACCOUNT-MONITOR.md` for scope, partial-day baselines and stop limitations.
+  This read-only latch cannot block manual trades or place/cancel orders.
+- **Step 0 Behavioral preflight runs after account preflight** (daily stop + cooldown + R16 vibe
   check + coin lockout + tilt-coin guard). Read state from `python3
   behavioral.py` (derived from the audit log — works under /loop with no
   conversation). `daily_stop.active` in ENTRY mode → HARD `HALT (daily stop)`
