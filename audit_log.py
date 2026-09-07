@@ -265,13 +265,15 @@ def compute_summary(since_days=None, path=None, now_ms=None, system=None):
     if system is not None:
         entries = [e for e in entries if e.get("system") == system]
 
-    verdict_counts = {}
+    verdict_counts: dict[str, int] = {}
     for e in entries:
         v = e.get("verdict", "UNKNOWN")
         verdict_counts[v] = verdict_counts.get(v, 0) + 1
 
     resolved_rows = [e for e in entries if e.get("outcome")]
-    resolved, excluded, resolved_by_mode = [], {}, {}
+    resolved: list[dict] = []
+    excluded: dict[str, int] = {}
+    resolved_by_mode: dict[str, int] = {}
     for e in resolved_rows:
         mode = e.get("mode") or "UNKNOWN"
         resolved_by_mode[mode] = resolved_by_mode.get(mode, 0) + 1
@@ -280,21 +282,21 @@ def compute_summary(since_days=None, path=None, now_ms=None, system=None):
             resolved.append(e)
         else:
             excluded[reason] = excluded.get(reason, 0) + 1
-    by_setup = {}
+    by_setup: dict[str, list[float]] = {}
     for e in resolved:
         setup = _setup_key(e)
         r = float(e["outcome"]["outcome_r"])
         by_setup.setdefault(setup, []).append(r)
 
-    setup_stats = {}
+    setup_stats: dict[str, dict] = {}
     for setup, rs in by_setup.items():
         setup_stats[setup] = _r_stats(rs)
 
-    by_family = {}
+    by_family: dict[str, list[float]] = {}
     for e in resolved:
         fam = e.get("setup_family", "directional")
         by_family.setdefault(fam, []).append(float(e["outcome"]["outcome_r"]))
-    family_stats = {}
+    family_stats: dict[str, dict] = {}
     for fam, rs in by_family.items():
         family_stats[fam] = _r_stats(rs)
 
@@ -375,7 +377,8 @@ def _counterfactual_stats(entries):
     wait = bucket(("WAIT",))
     veto = bucket(("VETOED", "NO-TRADE", "HALT"))
 
-    by_setup, legacy_gross_by_setup = {}, {}
+    by_setup: dict[str, list[float]] = {}
+    legacy_gross_by_setup: dict[str, list[float]] = {}
     for e in attached:
         for label, res in (e["counterfactual"].get("per_trigger") or {}).items():
             if not isinstance(res, dict):
