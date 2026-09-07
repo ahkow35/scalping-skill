@@ -20,6 +20,8 @@ what that means for conviction — and it can only ever CUT conviction, never
 raise it (volume confirms or it doesn't; it never manufactures an edge).
 """
 
+import math
+
 # Initial CANDIDATE thresholds — confirm/retune via backtest_thresholds.py
 # (same status as regime.DEFAULT_PARAMS: not final until a plateau sweep
 # passes). Conservative by design.
@@ -54,7 +56,11 @@ def _reliable(bucket, params):
     if bucket.get("source") == "recent_trades_rest":
         return False
     try:
-        return (float(bucket.get("trade_count", 0)) > 0
+        share = bucket.get("buy_share_pct")
+        count = bucket.get("trade_count", 0)
+        return (not isinstance(share, bool) and 0 <= float(share) <= 100
+                and not isinstance(count, bool) and math.isfinite(float(count))
+                and float(count) > 0
                 and 0 <= float(bucket["sample_age_ms"]) <= params["max_sample_age_ms"]
                 and params["min_coverage"] <= float(bucket["coverage_pct"]) <= 100)
     except (KeyError, TypeError, ValueError):
@@ -90,7 +96,12 @@ def max_coverage_pct(taker_delta, windows=_WINDOWS):
     for w in windows:
         b = _bucket(taker_delta, w)
         if b is not None and b.get("coverage_pct") is not None:
-            covs.append(float(b["coverage_pct"]))
+            try:
+                value = float(b["coverage_pct"])
+                if not isinstance(b["coverage_pct"], bool) and 0 <= value <= 100:
+                    covs.append(value)
+            except (TypeError, ValueError):
+                pass
     return round(max(covs), 1) if covs else None
 
 

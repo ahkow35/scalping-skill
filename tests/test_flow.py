@@ -171,3 +171,11 @@ def test_legacy_closure_fallback_excludes_last_and_lone_bar():
     bar = {key: value for key, value in k(100, 100, 100).items() if key != "closed"}
     assert flow.closed_candles([bar]) == []
     assert flow.closed_candles([bar, bar]) == [bar]
+
+
+def test_invalid_directional_share_cannot_be_certified_as_reliable():
+    for share in (float("inf"), float("-inf"), float("nan"), True, -1, 101, None, "bad"):
+        tape = td(**{"5m": (share, 100)})
+        result = flow.classify({}, tape)
+        assert result["capture_reliable"] is False
+        assert result["aggressor_bias"] is None

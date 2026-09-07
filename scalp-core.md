@@ -594,8 +594,9 @@ label (Bear case for long / Bull case for short), and the trigger labels.
 Fill the `<...>` slots accordingly.
 
 **Two QUICK shapes, selected by verdict:**
-- **Action verdict** (`LONG-NOW` / `LONG-CLOSE` / `LONG-PROBE` / `SHORT-NOW` /
-  `SHORT-CLOSE` / `SHORT-PROBE`) → full block, JOURNAL STUB included.
+- **Action verdict** (`LONG-NOW` / `LONG-CLOSE` / `SHORT-NOW` /
+  `SHORT-CLOSE`) → full block, JOURNAL STUB included. Historical PROBE rows
+  remain readable but are never emitted for a new low-conviction entry.
 - **No-action verdict** (`WAIT` / `NO-TRADE` / `VETOED` / `HALT`) → compact
   block, JOURNAL STUB **suppressed** (no trade firing = nothing to journal yet).
 
@@ -613,7 +614,7 @@ Rules that apply to BOTH shapes:
 - Time header: `<sgt> | <utc>`. Append the US-session clause **only** when within
   1h of `us_open` or `us_close` (decision-relevant); omit otherwise.
 
-### QUICK — action verdict (NOW / CLOSE / PROBE)
+### QUICK — action verdict (NOW / CLOSE)
 
 ```
 SCALP — <COIN> <LONG|SHORT> | <sgt> | <utc>  [US open in Xh | US close in Xh]
@@ -629,9 +630,9 @@ OI: $<X>M | 1h <±%> → <read> | 24h <±%> → <read>   (or "warming <h>h" when
 Book: micro <px> vs mid <px> (dev <±X> bps)  spread <Y> bps  depth top3 bid/ask <B>/<A> <COIN>
 Triggers:
   A <name>: <entry> / SL <stop> / T1 <px> T2 <px> (RR <r1>/<r2>, net <n1>/<n2>)
-    SIZE (<TIER <N>%>): $<E> × <C>% × <mult> = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev
+    SIZE (<TIER <N>%>): $<E> × <C>% × <mult> = $<risk> ÷ $<after_cost_loss_per_unit> = <coins> <COIN> @ <Nx> lev
   [B <name>: <entry> / SL <stop> / T1 <px> T2 <px> (RR <r1>/<r2>, net <n1>/<n2>)
-    SIZE (<TIER <N>%>): $<E> × <C>% × <mult> = $<risk> ÷ $<stop_dist> = <coins> <COIN> @ <Nx> lev]
+    SIZE (<TIER <N>%>): $<E> × <C>% × <mult> = $<risk> ÷ $<after_cost_loss_per_unit> = <coins> <COIN> @ <Nx> lev]
 Invalidation: <one line>
 <Bear case|Bull case>: <one clause>
 Next: <e.g. 14:00 UTC 1h close — confirms by closing > X>
