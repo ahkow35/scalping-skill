@@ -66,6 +66,10 @@ def test_parent_children_do_not_count_as_active_protection():
     assert not stop_coverage(position(), [parent])["fully_covered"]
 
 
+def test_unhashable_or_boolean_order_ids_cannot_crash_or_count():
+    assert not stop_coverage(position(), [stop(oid=[]), stop(oid=True)])["fully_covered"]
+
+
 @pytest.mark.parametrize("mode", ["unifiedAccount", "portfolioMargin", "dexAbstraction", "default", None])
 def test_shared_or_unspecified_balances_are_not_summed_as_equity(mode):
     result = normalize_snapshot(snapshot(mode=mode), WALLET, NOW, 90_000)

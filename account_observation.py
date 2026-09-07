@@ -24,7 +24,8 @@ def stop_coverage(position, orders):
     """
     qty, mark = abs(position["size"]), position["mark"]
     long = position["size"] > 0
-    candidates, rejected, seen = [], [], {}
+    candidates, rejected = [], []
+    seen: dict[object, str] = {}
     for order in orders:
         if not isinstance(order, dict):
             raise AccountDataError("malformed open order")
@@ -35,7 +36,7 @@ def stop_coverage(position, orders):
             continue
         oid = order.get("oid")
         encoded = json.dumps(order, sort_keys=True)
-        if oid is None:
+        if not isinstance(oid, (int, str)) or isinstance(oid, bool):
             rejected.append("stop has no order ID")
             continue
         if oid in seen:
@@ -158,7 +159,7 @@ def _events(snapshot, key, since_ms):
     rows = snapshot.get(key)
     if not isinstance(rows, list):
         raise AccountDataError(f"{key} history missing")
-    unique = {}
+    unique: dict[object, dict] = {}
     for row in rows:
         if not isinstance(row, dict):
             raise AccountDataError(f"malformed {key} event")
