@@ -1,26 +1,13 @@
 ---
 name: scalp
 description: >
-  Live tactical quant scalp thesis and position management for any Hyperliquid
-  perp (default HYPE), gated by a BTC + BTC-dominance macro veto, a behavioral
-  preflight, a BTC-beta (strip-BTC) idiosyncrasy check, real taker-aggressor
-  delta, and UTC/SGT session awareness.
-  Long AND short setups, each with its own protocol module. Three output sizes —
-  TINY (one-line pulse, default for /loop), QUICK (standard), DEEP (full).
-  Two modes — ENTRY (fresh thesis) and MANAGE (review open position).
-  Plus five admin commands — `summary` (audit log aggregate stats),
-  `resolve` (close out an open trade with outcome), `list-open` (list unresolved
-  entries), `replay` (counterfactual scoring of logged decisions), `profile`
-  (set account equity / phase for sizing). Trigger phrases: "/scalp",
-  "/scalp <COIN>", "/scalp tiny <COIN>", "/scalp quick <COIN>",
-  "/scalp deep <COIN>", "/scalp short <COIN>", "/scalp tiny short <COIN>",
-  "/scalp deep short <COIN>", "/scalp manage [short] <COIN> <entry>",
-  "/scalp tiny manage [short] <COIN> <entry>", "/scalp summary [--since-days N]",
-  "/scalp resolve <trade_id> <R> <exit_reason> [lesson]", "/scalp list-open",
-  "/scalp replay [--window-h N] [--force]", "/scalp profile [set <field> <value>]",
-  "scalp read", "scalp thesis", "scalp the tape", "review my <COIN> long",
-  "review my <COIN> short", "manage my position",
-  "what's the move now" (when a position is open).
+  Hyperliquid perpetual scalp discipline and position management, not validated
+  entry alpha. Supports long/short and passive reads, ENTRY and MANAGE modes,
+  and tiny/quick/deep output. Use for /scalp, scalp read, scalp thesis, scalp
+  the tape, or reviewing an open perpetual position.
+  Six admin commands: /scalp account check (read-only account risk), /scalp summary,
+  /scalp resolve, /scalp list-open, /scalp replay, and /scalp profile.
+  No order placement or profitability guarantee.
 ---
 
 # Scalp
@@ -33,7 +20,14 @@ Check args FIRST. If the first token is one of these, run the admin command
 and STOP — do NOT proceed to the trading flow, do NOT fetch market data, do
 NOT run behavioral preflight.
 
-### `/scalp summary [--since-days N]`
+### `/scalp account check`
+
+For `/scalp account check`, run `python3 account_monitor.py check` from the
+skill repository and report its status and limitations; then STOP. For account
+configuration, read `ACCOUNT-MONITOR.md` and obtain the public trading wallet
+and owner-selected daily loss limit. Never request a private key or place orders.
+
+### `/scalp summary [--since-days N]` (audit journal)
 
 Run:
 ```bash
@@ -186,7 +180,19 @@ Follow `scalp-core.md` + the direction module exactly.
 - `passive` in args = PASSIVE mode (loads scalp-passive.md; both-sides fade).
 - `/loop` invocations default to TINY unless QUICK/DEEP is explicit.
 - Coin arg defaults to HYPE.
-- **Step 0 Behavioral preflight runs FIRST** (daily stop + cooldown + R16 vibe
+- **Account preflight runs before every new entry**, including passive mode:
+  run `python3 account_monitor.py check --json` from the skill repository.
+  Only a fresh `entry_allowed: true` permits further entry checks. Missing
+  configuration, unsupported account mode, errors and unknown data block new
+  entries. Report the exact status; do not infer CLEAR from silence or a cached
+  result. MANAGE and protective analysis must still proceed. Read
+  `ACCOUNT-MONITOR.md` for scope, partial-day baselines and stop limitations.
+  This read-only latch cannot block manual trades or place/cancel orders.
+  Use observed equity for current sizing, retaining the owner's profile risk
+  cap. Proposed after-cost stopped loss must also fit within
+  `remaining_daily_budget_usdc - open_trigger_distance_risk_usdc`; unknown or
+  non-positive headroom means no new entry. Never treat CLEAR as signal alpha.
+- **Step 0 Behavioral preflight runs after account preflight** (daily stop + cooldown + R16 vibe
   check + coin lockout + tilt-coin guard). Read state from `python3
   behavioral.py` (derived from the audit log — works under /loop with no
   conversation). `daily_stop.active` in ENTRY mode → HARD `HALT (daily stop)`
