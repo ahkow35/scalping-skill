@@ -106,7 +106,7 @@ The ENTRY QUICK / DEEP and MANAGE skeletons come from `scalp-core.md`. Fill:
   `LONG-NOW | LONG-CLOSE | LONG-PROBE | WAIT | NO-TRADE | VETOED | HALT`
   - `LONG-NOW` (high conviction → 100% of cap)
   - `LONG-CLOSE` (med conviction → 50% of cap)
-  - `LONG-PROBE` (low conviction → 25% of cap)
+  - Low conviction → `WAIT` with no executable size; never a live `LONG-PROBE`.
 - The counter-case line is **"Bear case"** — one clause on what kills the long
   in the next 1h.
 - Triggers labelled A (sweep-reclaim) / B (momentum-break). No trigger C.

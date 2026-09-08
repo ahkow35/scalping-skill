@@ -127,7 +127,7 @@ The ENTRY QUICK / DEEP and MANAGE skeletons come from `scalp-core.md`. Fill:
   `SHORT-NOW | SHORT-CLOSE | SHORT-PROBE | WAIT | NO-TRADE | VETOED | HALT`
   - `SHORT-NOW` (high conviction → 100% of cap)
   - `SHORT-CLOSE` (med conviction → 50% of cap)
-  - `SHORT-PROBE` (low conviction → 25% of cap)
+  - Low conviction → `WAIT` with no executable size; never a live `SHORT-PROBE`.
 - The counter-case line is **"Bull case"** — one clause on what kills the
   short in the next 1h (an upside surprise).
 - Triggers labelled A (failed-breakout) / B (lower-high rejection).

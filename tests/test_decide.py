@@ -4,6 +4,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import decide
+import costs
+import pytest
 
 
 def c(h, l, cl, v=1000.0, t=None):
@@ -45,7 +47,8 @@ def _series(bars, last_close=None):
 
 
 def _clean_flow(bias):
-    return {"coverage_ok": True, "max_coverage_pct": 100.0, "aggressor_bias": bias,
+    return {"coverage_ok": True, "capture_reliable": True,
+            "max_coverage_pct": 100.0, "aggressor_bias": bias,
             "avg_buy_share_pct": 30.0 if bias == "sellers" else 70.0,
             "volume_climax": None, "delta_divergence": None, "breakout_vol_ok": True}
 
@@ -99,21 +102,23 @@ def test_short_now_on_clean_setup():
     assert out["sizing"]["risk_usdc"] == 25.0  # 5000 * 0.5% * 1.0
 
 
-def test_low_coverage_caps_to_probe():
+def test_low_coverage_waits_without_executable_plan():
     blind = {"coverage_ok": False, "max_coverage_pct": 1.0, "aggressor_bias": "sellers",
              "volume_climax": None, "delta_divergence": None, "breakout_vol_ok": True}
     m = _market(_series(SHORT_SETUP_BARS, SETUP_PX), mid=SETUP_PX, flow=blind)
     out = decide.decide("short", m, CLEAR_BEHAVIORAL, PROFILE, params=NO_CLOSE)
-    assert out["verdict"] == "SHORT-PROBE"
+    assert out["verdict"] == "WAIT"
     assert out["conviction"] == "low"
-    assert out["sizing"]["tier_mult"] == 0.25
+    assert out["sizing"] is None
+    assert out["trigger_used"] is None
 
 
 def test_flow_opposes_cuts_two_tiers():
     m = _market(_series(SHORT_SETUP_BARS, SETUP_PX), mid=SETUP_PX, flow=_clean_flow("buyers"))
     out = decide.decide("short", m, CLEAR_BEHAVIORAL, PROFILE, params=NO_CLOSE)
-    # sellers wanted, buyers present -> -2 tiers -> low -> PROBE
-    assert out["verdict"] == "SHORT-PROBE"
+    assert out["verdict"] == "WAIT"
+    assert out["sizing"] is None
+    assert out["trigger_used"] is None
 
 
 def test_wait_when_no_trigger():
@@ -140,3 +145,48 @@ def test_equity_unset_still_decides_without_sizing():
     assert out["verdict"] == "SHORT-NOW"
     assert out["sizing"] is None
     assert "equity unset" in out["flags"]["sizing"]
+
+
+@pytest.mark.parametrize("flow", [None, _clean_flow("balanced"),
+                                 {key: value for key, value in _clean_flow("sellers").items()
+                                  if key != "capture_reliable"}])
+def test_missing_flow_confirmation_waits(flow):
+    m = _market(_series(SHORT_SETUP_BARS, SETUP_PX), mid=SETUP_PX, flow=flow)
+    out = decide.decide("short", m, CLEAR_BEHAVIORAL, PROFILE, params=NO_CLOSE)
+    assert out["verdict"] == "WAIT"
+    assert out["sizing"] is None
+    assert out["trigger_used"] is None
+
+
+def test_medium_conviction_preserved_when_reliable_direction_agrees():
+    agreeing = {**_clean_flow("sellers"), "volume_climax": {"direction": "down"}}
+    m = _market(_series(SHORT_SETUP_BARS, SETUP_PX), mid=SETUP_PX, flow=agreeing)
+    out = decide.decide("short", m, CLEAR_BEHAVIORAL, PROFILE, params=NO_CLOSE)
+    assert out["verdict"] == "SHORT-CLOSE"
+    assert out["conviction"] == "med"
+    assert out["sizing"]["tier_mult"] == 0.5
+
+
+@pytest.mark.parametrize("side,rate", [("long", 0.00004), ("short", -0.00004),
+                                       ("long", 0.0003 / 8), ("short", -0.0003 / 8)])
+def test_funding_veto_converts_hourly_rate_to_eight_hour_equivalent(side, rate):
+    m = _market([], mid=100, funding=rate)
+    out = decide.decide(side, m, CLEAR_BEHAVIORAL, PROFILE)
+    assert out["verdict"] == "VETOED"
+    assert "%/8h equivalent" in out["reason"]
+
+
+def test_sizing_accounts_for_both_execution_costs_and_rounds_down():
+    sizing = decide._sizing(5000, 0.005, 3, 100, 99.7, 1)
+    assert sizing["coins"] == pytest.approx(58.1395)
+    assert sizing["coins"] * costs.loss_per_unit(100, 99.7) <= 25
+    assert sizing["price_risk_usdc"] < 25
+    assert sizing["round_trip_cost_usdc"] > 7
+    assert sizing["risk_basis"] == "price_stop_plus_round_trip_cost"
+
+
+def test_explicitly_closed_last_bar_is_kept_and_lone_unknown_bar_dropped():
+    p = decide.DEFAULT_PARAMS
+    assert decide._closed([{"closed": True}], p) == [{"closed": True}]
+    assert decide._closed([{"closed": False}], p) == []
+    assert decide._closed([{}], p) == []

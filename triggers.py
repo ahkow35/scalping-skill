@@ -88,6 +88,8 @@ def _mk(side, name, entry, stop, t1, t2, reason, p, fired, entry_mode="close"):
         "trigger": name, "fired": False, "entry": entry, "stop": stop,
         "t1": t1, "t2": t2, "rr_t1": 0.0, "rr_t2": 0.0,
         "net_rr_t1": 0.0, "net_rr_t2": 0.0, "passes_rr": False,
+        "net_reward_r_t1": 0.0, "net_reward_r_t2": 0.0,
+        "net_rr_denominator": "price_stop_plus_round_trip_cost",
         "entry_mode": entry_mode, "reason": reason,
     }
     if fired and t1 is None and entry is not None and stop is not None:
@@ -108,6 +110,10 @@ def _mk(side, name, entry, stop, t1, t2, reason, p, fired, entry_mode="close"):
         "t1": round(t1, 6), "t2": round(t2, 6) if t2 is not None else None,
         "rr_t1": round(rr_t1, 2), "rr_t2": round(rr_t2, 2),
         "net_rr_t1": round(net_t1, 2), "net_rr_t2": round(net_t2, 2),
+        "net_reward_r_t1": round(costs.net_reward_r(entry, stop, t1), 2),
+        "net_reward_r_t2": round(costs.net_reward_r(entry, stop, t2), 2)
+                           if t2 is not None else 0.0,
+        "net_rr_denominator": "price_stop_plus_round_trip_cost",
         "passes_rr": net_t1 >= p["min_net_rr_t1"],
         "entry_mode": entry_mode, "reason": reason,
     }

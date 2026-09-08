@@ -153,11 +153,11 @@ def test_compute_summary_aggregates_verdict_and_setup(tmp_path):
     assert summary["verdict_distribution"]["WAIT"] == 2
     assert summary["verdict_distribution"]["VETOED"] == 1
     assert summary["verdict_distribution"]["LONG-NOW"] == 2
-    assert summary["by_setup"]["A"]["n"] == 1
-    assert summary["by_setup"]["A"]["expectancy_r"] == 2.5
-    assert summary["by_setup"]["A"]["win_rate"] == 1.0
-    assert summary["by_setup"]["B"]["expectancy_r"] == -1.0
-    assert summary["by_setup"]["B"]["win_rate"] == 0.0
+    assert summary["by_setup"]["legacy/directional/long/A"]["n"] == 1
+    assert summary["by_setup"]["legacy/directional/long/A"]["expectancy_r"] == 2.5
+    assert summary["by_setup"]["legacy/directional/long/A"]["win_rate"] == 1.0
+    assert summary["by_setup"]["legacy/directional/long/B"]["expectancy_r"] == -1.0
+    assert summary["by_setup"]["legacy/directional/long/B"]["win_rate"] == 0.0
 
 
 def test_compute_summary_since_days_filters_old_entries(tmp_path):

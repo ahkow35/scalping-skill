@@ -15,17 +15,20 @@ Never raises; returns a JSON-serialisable verdict dict shaped like the audit
 payload so audit_log.py can log it unchanged.
 """
 
+import math
+
 import costs
+import flow as flow_mod
 import structure
 import triggers
 
 # Conviction tiers as integers so cuts compose by min().
 _TIER = {3: "high", 2: "med", 1: "low"}
 _VERDICT = {
-    ("long", 3): "LONG-NOW", ("long", 2): "LONG-CLOSE", ("long", 1): "LONG-PROBE",
-    ("short", 3): "SHORT-NOW", ("short", 2): "SHORT-CLOSE", ("short", 1): "SHORT-PROBE",
+    ("long", 3): "LONG-NOW", ("long", 2): "LONG-CLOSE",
+    ("short", 3): "SHORT-NOW", ("short", 2): "SHORT-CLOSE",
 }
-_SIZE_MULT = {3: 1.0, 2: 0.5, 1: 0.25}
+_SIZE_MULT = {3: 1.0, 2: 0.5}
 
 DEFAULT_PARAMS = {
     "funding_veto_long": 0.0003,    # +0.03%/8h => crowded long, veto longs
@@ -42,8 +45,8 @@ DEFAULT_PARAMS = {
 # ---- helpers ----
 
 def _closed(candles, p):
-    if p["use_closed_only"] and candles and len(candles) > 1:
-        return candles[:-1]
+    if p["use_closed_only"]:
+        return flow_mod.closed_candles(candles)
     return candles
 
 
@@ -89,15 +92,16 @@ def _macro(side, market, p, econ_blackout):
         event_flag = "US econ event today — bot does not veto; apply judgement"
 
     # Funding extreme (crowded book against the side).
-    funding = ctx.get("funding")
-    if funding is not None:
-        if side == "long" and funding > p["funding_veto_long"]:
-            reasons.append(f"funding +{funding*100:.4f}%/8h — crowded long")
-        if side == "short" and funding < p["funding_veto_short"]:
-            reasons.append(f"funding {funding*100:.4f}%/8h — crowded short")
+    funding_hourly = ctx.get("funding")
+    if funding_hourly is not None:
+        funding_8h = funding_hourly * 8
+        if side == "long" and funding_8h >= p["funding_veto_long"]:
+            reasons.append(f"funding +{funding_8h*100:.4f}%/8h equivalent — crowded long")
+        if side == "short" and funding_8h <= p["funding_veto_short"]:
+            reasons.append(f"funding {funding_8h*100:.4f}%/8h equivalent — crowded short")
 
     # BTC structural break on rising volume.
-    brk = _btc_structural_break(market.get("btc_candles", {}).get(p["structure_tf"], []), side, p)
+    brk = _btc_structural_break(_closed(market.get("btc_candles", {}).get(p["structure_tf"], []), p), side, p)
     if brk:
         reasons.append(brk)
 
@@ -134,16 +138,16 @@ def _macro(side, market, p, econ_blackout):
 def _flow_cuts(side, flow, trigger_name):
     """Step 1b: conviction only ever gets CUT. Returns (delta_tiers, notes)."""
     if not isinstance(flow, dict):
-        return -2, ["flow unavailable — treat as low coverage"]
+        return -2, ["flow unavailable — WAIT for reliable confirmation"]
     cut, notes = 0, []
-    if not flow.get("coverage_ok", False):
-        return -2, [f"low coverage {flow.get('max_coverage_pct')}% — half-blind, cap low"]
+    if flow.get("coverage_ok") is not True or flow.get("capture_reliable") is not True:
+        return -2, ["flow capture unknown or unreliable — WAIT for reliable confirmation"]
     bias = flow.get("aggressor_bias")
     want = "buyers" if side == "long" else "sellers"
     if bias == want:
         pass
     elif bias == "balanced":
-        cut -= 1
+        cut -= 2
         notes.append("flow balanced — no confirmation")
     else:
         cut -= 2
@@ -179,14 +183,20 @@ def _sizing(equity, cap, tier, entry, stop, size_mult):
     mult = _SIZE_MULT[tier] * size_mult
     risk = equity * cap * mult
     dist = abs(entry - stop)
-    if dist <= 0 or equity <= 0:
+    if dist <= 0 or equity <= 0 or risk <= 0:
         return None
-    coins = risk / dist
+    modeled_loss = costs.loss_per_unit(entry, stop)
+    # Round down so displayed sizing cannot exceed the modeled after-cost cap.
+    coins = math.floor(risk / modeled_loss * 10_000) / 10_000
     return {
-        "risk_usdc": round(risk, 2), "coins": round(coins, 4),
+        "risk_usdc": round(risk, 2), "coins": coins,
         "leverage": round(coins * entry / equity, 2),
         "cap_pct": round(cap * 100, 3), "tier_mult": _SIZE_MULT[tier],
         "macro_size_mult": size_mult, "stop_dist": round(dist, 6),
+        "price_risk_usdc": round(coins * dist, 4),
+        "round_trip_cost_usdc": round(coins * (modeled_loss - dist), 4),
+        "modeled_stop_loss_usdc": round(coins * modeled_loss, 4),
+        "risk_basis": "price_stop_plus_round_trip_cost",
     }
 
 
@@ -250,6 +260,10 @@ def decide(side, market, behavioral_state, profile, *, params=None, econ_blackou
     tier = max(1, tier + cut)
     out["conviction"] = _TIER[tier]
     out["flags"]["flow_notes"] = notes
+
+    if tier == 1:
+        out["reason"] = "low conviction — WAIT; " + "; ".join(notes)
+        return out
 
     # Step 4b + 6 — verdict + sizing.
     equity = (profile or {}).get("equity")

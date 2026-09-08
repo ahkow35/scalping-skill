@@ -515,7 +515,9 @@ def fetch_candles(coin, interval, start_ms, end_ms):
     rows = _post_json(HL_INFO, {"type": "candleSnapshot", "req": {
         "coin": coin, "interval": interval,
         "startTime": start_ms, "endTime": end_ms}}, "hyperliquid")
-    return [{"t": iso_utc(k["t"]), "o": float(k["o"]), "h": float(k["h"]),
+    return [{"t": iso_utc(k["t"]), "t_ms": int(k["t"]), "T": int(k["T"]),
+             "closed": int(k["T"]) < end_ms,
+             "o": float(k["o"]), "h": float(k["h"]),
              "l": float(k["l"]), "c": float(k["c"]), "v": float(k["v"])}
             for k in rows]
 
@@ -571,8 +573,8 @@ def fetch_l2(coin):
 def fetch_recent_trades(coin):
     """Recent taker trades. side 'B' = taker buy (lifted ask), 'A' = taker sell (hit bid).
 
-    Hyperliquid hard-caps this endpoint at ~10 trades — see merge_trade_cache for
-    how we build longer history across repeated calls.
+    This is a bounded REST snapshot, not a complete trade feed. Repeated calls
+    can accumulate observations but cannot prove that intervening trades were captured.
     """
     return _post_json(HL_INFO, {"type": "recentTrades", "coin": coin}, "hyperliquid")
 
@@ -590,9 +592,9 @@ def merge_trade_cache(coin, fresh_trades, now_ms):
     """Dedupe fresh trades against on-disk cache, write merged back, return combined list.
 
     Cache lives at .trade_cache/<sanitized-coin>.jsonl (one trade per line). Trades
-    older than TRADE_CACHE_MAX_AGE_MS are dropped on write. Dedupe key is `tid`. This
-    is how we build a meaningful taker-delta history from the 10-trade recentTrades
-    cap — across repeated /scalp calls (typical loop = every 5m) the cache accumulates.
+    older than TRADE_CACHE_MAX_AGE_MS or newer than now_ms are dropped on write.
+    Dedupe key is `tid`. This retains sampled observations; accumulating snapshots
+    does not establish capture completeness or reliable taker-delta history.
     HIP-3 namespaced coins (e.g. "xyz:SPCX") have ':' replaced with '_' in the filename.
     """
     os.makedirs(TRADE_CACHE_DIR, exist_ok=True)
@@ -611,14 +613,14 @@ def merge_trade_cache(coin, fresh_trades, now_ms):
                         t = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if int(t.get("time", 0)) < cutoff:
+                    if not cutoff <= int(t.get("time", 0)) <= now_ms:
                         continue
                     by_tid[t.get("tid")] = t
         except OSError:
             pass
 
     for t in fresh_trades:
-        if int(t.get("time", 0)) < cutoff:
+        if not cutoff <= int(t.get("time", 0)) <= now_ms:
             continue
         by_tid[t.get("tid")] = t
 
@@ -637,16 +639,10 @@ def bucket_taker_delta(trades, now_ms,
                       windows=(("5m", 5), ("15m", 15), ("1h", 60), ("4h", 240))):
     """Aggregate taker buy vs sell USDC notional into trailing windows ending at now_ms.
 
-    Returns per-window dict with buy_usdc, sell_usdc, delta_usdc, buy_share_pct,
-    trade_count, and coverage_pct (how much of the window the trade history covers).
-    coverage_pct < 100 means recentTrades didn't reach far enough back — treat the
-    bucket as partial.
+    Only describes observed REST trades. Capture completeness and coverage stay
+    unknown regardless of cache age or sample span. Gaps describe observation
+    spacing, not proven packet loss; zero gaps do not prove complete capture.
     """
-    if not trades:
-        return {name: {"coverage_pct": 0.0, "trade_count": 0} for name, _ in windows}
-
-    times = [int(t["time"]) for t in trades]
-    earliest_ms = min(times)
     result = {}
     for name, mins in windows:
         win_ms = mins * 60 * 1000
@@ -654,29 +650,41 @@ def bucket_taker_delta(trades, now_ms,
         buy_usdc = 0.0
         sell_usdc = 0.0
         count = 0
+        times = []
         for t in trades:
             t_ms = int(t["time"])
-            if t_ms < win_start:
+            if not win_start <= t_ms <= now_ms or t.get("side") not in ("B", "A"):
                 continue
             notional = float(t["px"]) * float(t["sz"])
             count += 1
+            times.append(t_ms)
             if t["side"] == "B":
                 buy_usdc += notional
             elif t["side"] == "A":
                 sell_usdc += notional
         total = buy_usdc + sell_usdc
-        # coverage: how much of the window the trade stream actually reaches
-        if earliest_ms <= win_start:
-            coverage = 100.0
-        else:
-            coverage = round(100.0 * (now_ms - earliest_ms) / win_ms, 1)
+        times.sort()
+        gaps = [b - a for a, b in zip(times, times[1:])]
+        span = times[-1] - times[0] if times else 0
+        age = now_ms - times[-1] if times else None
         result[name] = {
             "buy_usdc": round(buy_usdc, 2),
             "sell_usdc": round(sell_usdc, 2),
             "delta_usdc": round(buy_usdc - sell_usdc, 2),
             "buy_share_pct": round(100.0 * buy_usdc / total, 1) if total > 0 else None,
             "trade_count": count,
-            "coverage_pct": max(0.0, min(100.0, coverage)),
+            "source": "recent_trades_rest",
+            "coverage_pct": None,
+            "capture_complete": None,
+            "reliable": False,
+            "sample_span_ms": span,
+            "sample_span_pct": round(100.0 * span / win_ms, 1),
+            "sample_age_ms": age,
+            "sample_fresh": age is not None and age <= 60_000,
+            "leading_gap_ms": times[0] - win_start if times else win_ms,
+            "max_observed_gap_ms": max(gaps) if gaps else None,
+            "observed_gap_count": sum(gap > 60_000 for gap in gaps),
+            "gap_threshold_ms": 60_000,
         }
     return result
 
@@ -745,10 +753,10 @@ def assemble(coin, deep=False, now_ms=None):
         merged = merge_trade_cache(coin, fresh, now_ms)
         out["taker_delta"] = bucket_taker_delta(merged, now_ms)
         out["taker_delta"]["_note"] = (
-            f"Real taker aggressor delta from local cache ({len(merged)} trades, "
-            "fed by repeated /scalp calls). side=B (taker bought) vs side=A (taker sold). "
-            "coverage_pct<100 = window is partial — re-run /scalp every 5m to build history. "
-            "Positive delta_usdc = buyers aggressive; negative = sellers aggressive."
+            f"Sampled taker delta from REST cache ({len(merged)} observations). "
+            "Capture completeness is unknown; repeated polling and sample span "
+            "do not measure market coverage. Observation gaps and sample freshness "
+            "are diagnostics only. This data cannot confirm entry flow."
         )
     except DataUnavailable as exc:
         out["taker_delta"] = str(exc)
@@ -757,7 +765,7 @@ def assemble(coin, deep=False, now_ms=None):
         out["candles"], out["btc_candles"],
         out.get("taker_delta"), out.get("book"))
 
-    out["flow"] = flow_mod.classify(out["candles"], out.get("taker_delta"))
+    out["flow"] = flow_mod.classify(out["candles"], out.get("taker_delta"), now_ms=now_ms)
 
     # Strip-BTC idiosyncrasy gate (Step 1c) — reuses regime's btc_corr so the
     # two reads agree. CUT-only: beta-driven move => cut one conviction tier.

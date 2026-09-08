@@ -11,14 +11,16 @@ P = flow.DEFAULT_PARAMS
 def k(o, c, v, h=None, l=None):
     h = h if h is not None else max(o, c)
     l = l if l is not None else min(o, c)
-    return {"o": o, "h": h, "l": l, "c": c, "v": v}
+    return {"o": o, "h": h, "l": l, "c": c, "v": v, "closed": True}
 
 
 def td(**windows):
     """Build a taker_delta dict: td(**{'5m': (buy_share, coverage)})."""
     out = {}
     for w, (bs, cov) in windows.items():
-        out[w] = {"buy_share_pct": bs, "coverage_pct": cov, "delta_usdc": 0.0}
+        out[w] = {"buy_share_pct": bs, "coverage_pct": cov, "delta_usdc": 0.0,
+                  "capture_complete": True, "reliable": True, "trade_count": 10,
+                  "sample_age_ms": 1000, "source": "test_verified_feed"}
     return out
 
 
@@ -114,3 +116,66 @@ def test_classify_never_raises_on_garbage():
     assert flow.classify("nope", "DATA UNAVAILABLE")["coverage_ok"] is False
     assert flow.classify({}, {})["aggressor_bias"] is None
     assert flow.classify(None, None)["volume_climax"] is None
+
+
+def test_legacy_percentage_does_not_establish_capture_reliability():
+    legacy = {"5m": {"coverage_pct": 100, "buy_share_pct": 90}}
+    f = flow.classify({}, legacy)
+    assert f["coverage_ok"] is False
+    assert f["capture_reliable"] is False
+    assert f["aggressor_bias"] is None
+    assert f["delta_divergence"] is None
+
+
+def test_unreliable_nested_windows_do_not_change_reliable_near_flow():
+    tape = td(**{"5m": (80, 100), "15m": (1, 100), "1h": (1, 100)})
+    tape["15m"]["reliable"] = False
+    tape["1h"]["capture_complete"] = None
+    f = flow.classify({}, tape)
+    assert f["coverage_ok"] is True
+    assert f["aggressor_bias"] == "buyers"
+    assert f["avg_buy_share_pct"] == 80
+    assert f["reliable_windows"] == ["5m"]
+
+
+def test_wide_reliable_window_does_not_clear_unreliable_execution_window():
+    tape = td(**{"5m": (80, 100), "1h": (80, 100)})
+    tape["5m"]["reliable"] = False
+    assert flow.classify({}, tape)["coverage_ok"] is False
+
+
+def test_stale_empty_or_rest_buckets_cannot_confirm_flow():
+    for overrides in ({"sample_age_ms": 60_001}, {"sample_age_ms": -1},
+                      {"trade_count": 0}, {"source": "recent_trades_rest"}):
+        tape = td(**{"5m": (90, 100)})
+        tape["5m"].update(overrides)
+        f = flow.classify({}, tape)
+        assert f["coverage_ok"] is False
+        assert f["aggressor_bias"] is None
+
+
+def test_forming_volume_spike_is_excluded_until_exchange_close():
+    base = [k(100, 100, 100) for _ in range(20)]
+    spike = {**k(100, 110, 10_000), "T": 10_000, "closed": False}
+    tape = td(**{"5m": (80, 100)})
+    f = flow.classify({"5m": base + [spike]}, tape, now_ms=10_000)
+    assert f["closed_bar_count"] == 20
+    assert f["volume_climax"] is None
+    assert f["breakout_vol_ok"] is False
+    after = flow.classify({"5m": base + [spike]}, tape, now_ms=10_001)
+    assert after["volume_climax"]["direction"] == "up"
+    assert after["breakout_vol_ok"] is True
+
+
+def test_legacy_closure_fallback_excludes_last_and_lone_bar():
+    bar = {key: value for key, value in k(100, 100, 100).items() if key != "closed"}
+    assert flow.closed_candles([bar]) == []
+    assert flow.closed_candles([bar, bar]) == [bar]
+
+
+def test_invalid_directional_share_cannot_be_certified_as_reliable():
+    for share in (float("inf"), float("-inf"), float("nan"), True, -1, 101, None, "bad"):
+        tape = td(**{"5m": (share, 100)})
+        result = flow.classify({}, tape)
+        assert result["capture_reliable"] is False
+        assert result["aggressor_bias"] is None
