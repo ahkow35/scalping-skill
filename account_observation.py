@@ -81,14 +81,43 @@ def stop_coverage(position, orders):
     }
 
 
+SCOPES = {
+    "disabled": "named wallet, standard-mode USDC perpetual balances; excludes spot, vaults and other wallets/subaccounts",
+    "unifiedAccount": "named wallet, unified-account spot USDC balance plus perp unrealized P&L; "
+                      "other spot tokens, vaults and other wallets/subaccounts excluded; any spot activity blocks reconciliation",
+}
+
+
+def unified_usdc_balance(snapshot):
+    """USDC total/hold from the spot clearinghouse, the only unified balance in scope.
+
+    The spot state carries no exchange timestamp, so spot/perp coherence is not
+    checkable here; a race between the two reads surfaces as a reconciliation
+    residual instead. Other tokens are not USDC and never count as equity.
+    """
+    spot = snapshot.get("spot")
+    if not isinstance(spot, dict) or not isinstance(spot.get("balances"), list):
+        raise AccountDataError("unified account spot balances missing; equity unknown")
+    rows = [row for row in spot["balances"] if isinstance(row, dict) and row.get("coin") == "USDC"]
+    if len(rows) != 1 or type(rows[0].get("token")) is not int or rows[0]["token"] != 0:
+        raise AccountDataError("unified USDC balance missing or ambiguous")
+    total = number(rows[0].get("total"), "USDC balance")
+    hold = number(rows[0].get("hold"), "USDC hold")
+    if total < 0 or hold < 0:
+        raise AccountDataError("negative USDC balance or hold")
+    return total, hold
+
+
 def normalize_snapshot(snapshot, wallet, now_ms, max_age_ms):
     """Return validated observations and explicit equity-support limitations."""
     if not isinstance(snapshot, dict) or snapshot.get("wallet") != validate_wallet(wallet):
         raise AccountDataError("snapshot belongs to another wallet or is malformed")
     issues = []
+    mode = snapshot.get("mode")
+    unified = mode == "unifiedAccount"
     # 'default' is an exchange-selected mode, not evidence of separate balances.
-    if snapshot.get("mode") != "disabled":
-        issues.append(f"unsupported account mode {snapshot.get('mode')!r}; standard mode required for equity aggregation")
+    if mode not in SCOPES:
+        issues.append(f"unsupported account mode {mode!r}; standard or unified account required for equity aggregation")
     venues = snapshot.get("venues")
     if not isinstance(venues, dict) or "" not in venues:
         raise AccountDataError("core perpetual account observation missing")
@@ -111,7 +140,10 @@ def normalize_snapshot(snapshot, wallet, now_ms, max_age_ms):
         if not isinstance(summary, dict) or not isinstance(raw_positions, list):
             raise AccountDataError(f"{dex or 'core'} account schema incomplete")
         balance = number(summary.get("accountValue"), "account equity")
-        equity += balance
+        # Unified mode: the per-dex accountValue is not a separate balance, so
+        # adding it to the spot USDC total would double count.
+        if not unified:
+            equity += balance
         active = bool(balance or raw_positions or orders)
         if active and (type(meta.get("collateralToken")) is not int or meta["collateralToken"] != 0):
             issues.append(f"{dex or 'core'} collateral is not verified USDC")
@@ -142,16 +174,21 @@ def normalize_snapshot(snapshot, wallet, now_ms, max_age_ms):
             positions.append(position)
             unrealized += upnl
             stops.append(stop_coverage(position, orders))
+    if unified:
+        usdc, hold = unified_usdc_balance(snapshot)
+        if hold:
+            issues.append(f"USDC hold {hold:g} on a perps-only unified account: open spot orders; equity unknown")
+        equity = usdc + unrealized
     asof = number(snapshot.get("asof_ms"), "snapshot timestamp")
     if asof != max(times):
         raise AccountDataError("aggregate snapshot timestamp disagrees with venue observations")
     return {
-        "wallet": wallet, "asof_ms": int(asof), "mode": snapshot.get("mode"),
+        "wallet": wallet, "asof_ms": int(asof), "mode": mode,
         "equity_usdc": equity if not issues else None,
         "unrealized_pnl_usdc": unrealized if not issues else None,
         "positions": positions, "stops": stops, "issues": issues,
         "venues": sorted(venues), "pending_entry_orders": pending_entries,
-        "scope": "named wallet, standard-mode USDC perpetual balances; excludes spot, vaults and other wallets/subaccounts",
+        "scope": SCOPES.get(mode, SCOPES["disabled"]),
     }
 
 
@@ -181,13 +218,17 @@ def accounting_events(snapshot, since_ms):
     """
     if number(snapshot.get("history_start_ms"), "history start") > since_ms:
         raise AccountDataError("history starts after the equity baseline")
+    unified = snapshot.get("mode") == "unifiedAccount"
     closed, fees, funding, transfers, count = 0.0, 0.0, 0.0, 0.0, 0
     for fill in _events(snapshot, "fills", since_ms):
         coin = fill.get("coin", "")
         if not isinstance(coin, str) or not coin:
             raise AccountDataError("fill coin missing or malformed")
         if str(coin).startswith("@") or "/" in str(coin) or fill.get("dir") in {"Buy", "Sell"}:
-            continue  # spot is outside the supported independent perp balances
+            if unified:
+                # A spot fill moves the same USDC balance the perps draw on.
+                raise AccountDataError("spot fill on a unified account monitored as perps-only; equity change unreconciled")
+            continue  # standard mode: spot is a separate balance outside scope
         if (coin.split(":")[0] if ":" in coin else "") not in snapshot["venues"]:
             raise AccountDataError("fill belongs to an unobserved venue")
         if fill.get("tid") is None or str(fill.get("feeToken", "")).strip() != "USDC":
@@ -215,7 +256,7 @@ def accounting_events(snapshot, since_ms):
             transfers += number(delta.get("usdc"), "deposit")
         elif kind == "withdraw":
             transfers -= number(delta.get("usdc"), "withdrawal")
-        elif kind == "accountClassTransfer" and isinstance(delta.get("toPerp"), bool):
+        elif kind == "accountClassTransfer" and isinstance(delta.get("toPerp"), bool) and not unified:
             transfers += (1 if delta["toPerp"] else -1) * number(delta.get("usdc"), "class transfer")
         elif kind in {"internalTransfer", "subAccountTransfer"}:
             wallet = snapshot["wallet"]

@@ -4,7 +4,7 @@ import pytest
 
 from account_api import AccountDataError
 from account_risk import evaluate, failure_result
-from test_account_observation import WALLET, snapshot, stop
+from test_account_observation import WALLET, snapshot, spot, stop
 
 
 MIDNIGHT = int(datetime.fromisoformat("2026-09-07T00:00:10+08:00").timestamp() * 1000)
@@ -98,3 +98,19 @@ def test_first_near_midnight_check_cannot_hide_prebaseline_loss():
     report, _ = observe(data)
     assert report["status"] == "WARMUP"
     assert not report["entry_allowed"]
+
+
+def test_unified_account_day_reconciles_spot_usdc_against_perp_fills():
+    first = snapshot(now=MIDNIGHT - 20_000, mode="unifiedAccount", equity=0)
+    first["spot"] = spot(usdc="7000")
+    report, state = observe(first)
+    assert report["status"] == "WARMUP" and report["observation"]["equity_usdc"] == 7000
+    later = snapshot(now=MIDNIGHT, mode="unifiedAccount", equity=0, size=10, upnl=-2,
+                     orders=[stop(trigger=97)])
+    later["spot"] = spot(usdc="6996.5")
+    later["fills"] = [{"coin": "HYPE", "tid": 1, "time": MIDNIGHT - 10_000, "feeToken": "USDC",
+                       "closedPnl": "-3", "fee": "0.5"}]
+    report, state = observe(later, state)
+    assert report["status"] == "CLEAR"
+    assert report["daily"]["net_pnl_usdc"] == pytest.approx(-5.5)
+    assert report["daily"]["reconciliation_residual_usdc"] == pytest.approx(0)

@@ -1,3 +1,6 @@
+import http.client
+import urllib.request
+
 import pytest
 
 from account_api import AccountDataError, fetch_history, fetch_snapshot, post_info, validate_wallet
@@ -90,3 +93,38 @@ def test_api_agent_address_is_not_treated_as_an_empty_trading_account():
     with pytest.raises(AccountDataError, match="API-agent"):
         fetch_snapshot(WALLET, NOW - 1000,
                        post=lambda payload: {"role": "agent"}, clock=lambda: NOW)
+
+
+def test_unified_mode_fetches_spot_balances_and_disabled_mode_does_not():
+    for mode, expected in (("unifiedAccount", 1), ("disabled", 0)):
+        calls = []
+
+        def exchange(payload, mode=mode):
+            calls.append(payload)
+            if payload["type"] == "userAbstraction":
+                return mode
+            if payload["type"] == "spotClearinghouseState":
+                return {"balances": [{"coin": "USDC", "token": 0, "total": "7000", "hold": "0"}]}
+            return _exchange(payload)
+
+        result = fetch_snapshot(WALLET, NOW - 1000, post=exchange, clock=lambda: NOW)
+        spot_calls = [payload for payload in calls if payload["type"] == "spotClearinghouseState"]
+        assert len(spot_calls) == expected
+        assert all(payload["user"] == WALLET for payload in spot_calls)
+        assert ("spot" in result) == bool(expected)
+
+
+def test_truncated_http_response_is_reported_not_raised(monkeypatch):
+    class Truncated:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, *args):
+            raise http.client.IncompleteRead(b"{", 100)
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: Truncated())
+    with pytest.raises(AccountDataError, match="perpDexs unavailable"):
+        post_info({"type": "perpDexs"})

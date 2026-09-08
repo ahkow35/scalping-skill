@@ -1,5 +1,24 @@
 # Changelog — scalp skill
 
+## 2026-09-08 — account monitor: unified-account mode supported
+`account_monitor.py` previously reported `UNSUPPORTED` for any wallet in
+Hyperliquid's `unifiedAccount` mode, because the perp clearinghouse state shows
+$0 there — the USDC lives in the spot clearinghouse and perps draw margin from
+it. Unified mode is now a supported scope, treated as **perps-only**: equity =
+spot USDC `total` + Σ perp `unrealizedPnl` (per-dex `accountValue` is not added,
+to avoid double counting); a USDC `hold` makes equity unknown; a spot fill or an
+`accountClassTransfer` since the baseline blocks reconciliation instead of being
+skipped. `fetch_snapshot` reads `spotClearinghouseState` only in unified mode,
+so standard-mode requests are unchanged. `portfolioMargin` / `dexAbstraction` /
+`default` stay unsupported. Also: `http.client.HTTPException` (e.g.
+`IncompleteRead` from a truncated proxy response) is now reported as
+`DATA_UNAVAILABLE` instead of escaping as a traceback. The equity definition is
+guarded by the existing reconciliation identity (residual > 0.05 USDC fails
+closed) and is verified live only once a small position has been opened and
+closed with zero residual. 18 new tests; suite 368 → 386 green.
+Files: `account_api.py`, `account_observation.py`, `ACCOUNT-MONITOR.md`,
+`tests/test_account_api.py`, `tests/test_account_observation.py`,
+`tests/test_account_risk.py`.
 ## 2026-09-01 — scalp2 correlation-aware aggregate-risk cap (#5)
 A single scan could surface up to `MAX_CARDS` (3) cards, each carrying a full
 per-attempt risk budget — so taking two cards on coins that move together
