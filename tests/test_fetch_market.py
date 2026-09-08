@@ -4,6 +4,71 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import fetch_market as fm
 
 
+def _trade(time, side="B", tid=1):
+    return {"time": time, "side": side, "tid": tid, "px": "100", "sz": "2"}
+
+
+def test_old_cached_trade_cannot_create_coverage_for_empty_current_window():
+    now = 10_000_000
+    result = fm.bucket_taker_delta([_trade(now - 6 * 60_000)], now)["5m"]
+    assert result["trade_count"] == 0
+    assert result["coverage_pct"] is None
+    assert result["capture_complete"] is None
+    assert result["reliable"] is False
+    assert result["sample_span_ms"] == 0
+    assert result["sample_age_ms"] is None
+    assert result["sample_fresh"] is False
+    assert result["buy_share_pct"] is None
+
+
+def test_rest_sample_span_is_not_capture_coverage_and_excludes_future_trades():
+    now = 10_000_000
+    trades = [_trade(now - 300_000), _trade(now - 10_000, "A", 2),
+              _trade(now + 1, tid=3)]
+    result = fm.bucket_taker_delta(trades, now)["5m"]
+    assert result["trade_count"] == 2
+    assert result["buy_usdc"] == 200
+    assert result["sell_usdc"] == 200
+    assert result["sample_span_ms"] == 290_000
+    assert result["sample_span_pct"] == 96.7
+    assert result["sample_age_ms"] == 10_000
+    assert result["sample_fresh"] is True
+    assert result["max_observed_gap_ms"] == 290_000
+    assert result["observed_gap_count"] == 1
+    assert result["coverage_pct"] is None
+    assert result["reliable"] is False
+
+
+def test_empty_and_stale_rest_windows_remain_unreliable():
+    now = 10_000_000
+    assert all(bucket["reliable"] is False for bucket in fm.bucket_taker_delta([], now).values())
+    result = fm.bucket_taker_delta([_trade(now - 120_000)], now)["5m"]
+    assert result["trade_count"] == 1
+    assert result["sample_fresh"] is False
+    assert result["sample_span_ms"] == 0
+    assert result["coverage_pct"] is None
+
+
+def test_trade_cache_discards_future_observations(tmp_path, monkeypatch):
+    monkeypatch.setattr(fm, "TRADE_CACHE_DIR", str(tmp_path))
+    now = 10_000_000
+    valid = _trade(now - 1)
+    assert fm.merge_trade_cache("HYPE", [valid, _trade(now + 1, tid=2)], now) == [valid]
+
+
+def test_fetch_candles_preserves_exchange_time_and_marks_closed(monkeypatch):
+    start = 1779102720000
+    rows = [{"t": start, "T": start + 299_999, "o": "1", "h": "2",
+             "l": "1", "c": "2", "v": "100"}]
+    monkeypatch.setattr(fm, "_post_json", lambda *args: rows)
+    forming = fm.fetch_candles("HYPE", "5m", start, start + 299_999)[0]
+    assert forming["t"] == "2026-05-18 11:12 UTC"
+    assert forming["t_ms"] == start
+    assert forming["T"] == start + 299_999
+    assert forming["closed"] is False
+    assert fm.fetch_candles("HYPE", "5m", start, start + 300_000)[0]["closed"] is True
+
+
 def test_iso_utc_is_utc_not_local():
     # 2026-05-18 11:12 UTC == 1779102720000 ms
     ms = 1779102720000

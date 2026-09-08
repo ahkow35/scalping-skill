@@ -18,6 +18,7 @@ CLI usage:
 """
 
 import json
+import math
 import os
 import sys
 import time
@@ -143,6 +144,7 @@ def resolve_audit_entry(trade_id, outcome_r, exit_reason, lesson=None,
 ACTION_VERDICTS = (
     "LONG-NOW", "LONG-CLOSE", "LONG-PROBE",
     "SHORT-NOW", "SHORT-CLOSE", "SHORT-PROBE",
+    "FADE-LONG-NOW", "FADE-SHORT-NOW",
 )
 
 
@@ -184,14 +186,72 @@ def list_open_entries(now_ms=None, path=None):
     return out
 
 
+def _finite_r(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _entry_outcome_exclusion(entry):
+    """Classify outcomes that cannot be evidence for actual ENTRY performance.
+
+    Legacy action resolves are trader-reported fills, not exchange proof.
+    A separate counterfactual block never overrides a real resolved outcome.
+    New paper records should declare execution_mode='paper' (or outcome.source).
+    """
+    outcome = entry.get("outcome")
+    if not isinstance(outcome, dict) or not outcome:
+        return "unresolved"
+    if entry.get("mode") != "ENTRY":
+        return "non_entry_mode"
+    if entry.get("verdict") not in ACTION_VERDICTS:
+        return "non_action_verdict"
+    for block in (entry, outcome):
+        if (block.get("paper") or block.get("paper_only") or block.get("simulated")
+                or any(str(block.get(field, "")).lower()
+                       in ("paper", "simulation", "simulated", "counterfactual", "backtest")
+                       for field in ("execution_mode", "source"))):
+            return "paper_or_counterfactual"
+        if block.get("filled") is False:
+            return "unfilled"
+        for field in ("exit_reason", "status"):
+            label = str(block.get(field, "")).strip().lower().replace("_", "-")
+            if label in ("unfilled", "no-fill", "not-filled", "no-trade",
+                         "cancelled", "canceled"):
+                return "unfilled"
+    if _finite_r(outcome.get("outcome_r")) is None:
+        return "invalid_outcome_r"
+    return None
+
+
+def _setup_key(entry, setup=None):
+    """Namespace A/B by system, strategy family and direction."""
+    label = setup or entry.get("setup") or entry.get("trigger_used") or "UNKNOWN"
+    return "/".join(str(part) for part in (
+        entry.get("system") or "legacy", entry.get("setup_family") or "directional",
+        entry.get("side") or "unknown", label))
+
+
+def _r_stats(rs):
+    n = len(rs)
+    return {
+        "n": n,
+        "win_rate": round(sum(1 for r in rs if r > 0) / n, 3) if n else None,
+        "expectancy_r": round(sum(rs) / n, 3) if n else None,
+        "total_r": round(sum(rs), 3),
+    }
+
+
 def compute_summary(since_days=None, path=None, now_ms=None, system=None):
     """Aggregate stats across audit entries.
 
     Returns:
-      total_entries, resolved, open
+      total_entries, resolved (actual ENTRY outcomes only), resolved_rows, open
       verdict_distribution: {verdict: count}  (across ALL entries in window)
-      by_setup: {setup_name: {n, win_rate, expectancy_r, total_r}}
-                (across RESOLVED entries only)
+      by_setup: {system/family/side/setup: {n, win_rate, expectancy_r, total_r}}
+                (across manually resolved actual ENTRY trades only)
 
     `setup_name` priority: payload.setup -> payload.trigger_used -> verdict.
     `system`, when set, restricts aggregation to entries whose `system` field
@@ -205,42 +265,40 @@ def compute_summary(since_days=None, path=None, now_ms=None, system=None):
     if system is not None:
         entries = [e for e in entries if e.get("system") == system]
 
-    verdict_counts = {}
+    verdict_counts: dict[str, int] = {}
     for e in entries:
         v = e.get("verdict", "UNKNOWN")
         verdict_counts[v] = verdict_counts.get(v, 0) + 1
 
-    resolved = [e for e in entries if e.get("outcome")]
-    by_setup = {}
+    resolved_rows = [e for e in entries if e.get("outcome")]
+    resolved: list[dict] = []
+    excluded: dict[str, int] = {}
+    resolved_by_mode: dict[str, int] = {}
+    for e in resolved_rows:
+        mode = e.get("mode") or "UNKNOWN"
+        resolved_by_mode[mode] = resolved_by_mode.get(mode, 0) + 1
+        reason = _entry_outcome_exclusion(e)
+        if reason is None:
+            resolved.append(e)
+        else:
+            excluded[reason] = excluded.get(reason, 0) + 1
+    by_setup: dict[str, list[float]] = {}
     for e in resolved:
-        setup = e.get("setup") or e.get("trigger_used") or e.get("verdict", "UNKNOWN")
+        setup = _setup_key(e)
         r = float(e["outcome"]["outcome_r"])
         by_setup.setdefault(setup, []).append(r)
 
-    setup_stats = {}
+    setup_stats: dict[str, dict] = {}
     for setup, rs in by_setup.items():
-        n = len(rs)
-        wins = sum(1 for r in rs if r > 0)
-        setup_stats[setup] = {
-            "n": n,
-            "win_rate": round(wins / n, 3) if n else None,
-            "expectancy_r": round(sum(rs) / n, 3) if n else None,
-            "total_r": round(sum(rs), 3),
-        }
+        setup_stats[setup] = _r_stats(rs)
 
-    by_family = {}
+    by_family: dict[str, list[float]] = {}
     for e in resolved:
         fam = e.get("setup_family", "directional")
         by_family.setdefault(fam, []).append(float(e["outcome"]["outcome_r"]))
-    family_stats = {}
+    family_stats: dict[str, dict] = {}
     for fam, rs in by_family.items():
-        n = len(rs)
-        family_stats[fam] = {
-            "n": n,
-            "win_rate": round(sum(1 for r in rs if r > 0) / n, 3) if n else None,
-            "expectancy_r": round(sum(rs) / n, 3) if n else None,
-            "total_r": round(sum(rs), 3),
-        }
+        family_stats[fam] = _r_stats(rs)
 
     # "open" mirrors list_open_entries: counterfactually-closed non-action
     # rows are not open — only live positions / armed action verdicts are.
@@ -253,6 +311,12 @@ def compute_summary(since_days=None, path=None, now_ms=None, system=None):
     return {
         "total_entries": len(entries),
         "resolved": len(resolved),
+        "resolved_rows": len(resolved_rows),
+        "resolved_by_mode": resolved_by_mode,
+        "excluded_from_entry_performance": excluded,
+        "performance_basis": "Trader-reported actual ENTRY outcomes; not exchange "
+                             "reconciled. Legacy R denominators and cost treatment "
+                             "are unspecified; these are not verified net returns.",
         "open": open_n,
         "verdict_distribution": verdict_counts,
         "by_setup": setup_stats,
@@ -262,59 +326,83 @@ def compute_summary(since_days=None, path=None, now_ms=None, system=None):
 
 
 def _counterfactual_stats(entries):
-    """Gate-value aggregates over replay-scored entries.
+    """Hypothetical hindsight maxima, with net and legacy gross kept apart.
 
-    wait.missed_r  — R the WAITs sat out (positive = the gate cost you)
-    veto.avoided_r — R the VETOs dodged (negative = the gate saved you)
-    by_setup       — counterfactual expectancy per `<side>-<trigger label>`
-
-    Aggregates are NET of trading costs: prefer the replay's `net_best_r` /
-    per-trigger `net_r` when present, falling back to gross `best_r` / `r` for
-    counterfactuals scored before the cost model existed (re-run
-    `replay.py --force` to upgrade them).
+    Stored best_r/net_best_r are read for compatibility. Selecting the best
+    trigger after the outcome is known is not a tradable gate-value estimate.
+    Missing net scores never fall back into a net aggregate as gross returns.
     """
-    scored = [e for e in entries if e.get("counterfactual")]
+    attached = [e for e in entries if isinstance(e.get("counterfactual"), dict)]
 
-    def _best(cf):
-        v = cf.get("net_best_r")
-        return v if v is not None else cf.get("best_r")
+    def best(cf, net):
+        key = "hypothetical_best_net_r" if net else "hypothetical_best_gross_r"
+        legacy = "net_best_r" if net else "best_r"
+        return _finite_r(cf[key] if key in cf else cf.get(legacy))
+
+    def is_legacy_gross(cf):
+        return "net_best_r" not in cf and "hypothetical_best_net_r" not in cf
+
+    def has_filled_result(cf):
+        return (best(cf, True) is not None or best(cf, False) is not None
+                or any(_finite_r(result.get("r")) is not None
+                       or _finite_r(result.get("net_r")) is not None
+                       for result in (cf.get("per_trigger") or {}).values()
+                       if isinstance(result, dict)))
+
+    def has_simulation(cf):
+        return (has_filled_result(cf)
+                or any(result.get("status") == "unfilled"
+                       for result in (cf.get("per_trigger") or {}).values()
+                       if isinstance(result, dict)))
 
     def bucket(verdicts):
-        rows = [e for e in scored if e.get("verdict") in verdicts]
-        fired = [e for e in rows if _best(e["counterfactual"]) is not None]
+        rows = [e["counterfactual"] for e in attached if e.get("verdict") in verdicts]
+        net = [best(cf, True) for cf in rows if best(cf, True) is not None]
+        gross = [best(cf, False) for cf in rows
+                 if is_legacy_gross(cf) and best(cf, False) is not None]
         return {
             "n": len(rows),
-            "fired": len(fired),
-            "total_best_r": round(sum(_best(e["counterfactual"])
-                                      for e in fired), 3),
+            "scored": sum(has_simulation(cf) for cf in rows),
+            "filled": sum(has_filled_result(cf) for cf in rows),
+            "unfilled": sum(has_simulation(cf) and not has_filled_result(cf)
+                            for cf in rows),
+            "unavailable": sum(not has_simulation(cf) for cf in rows),
+            "net_available": len(net),
+            "legacy_gross_only_available": len(gross),
+            "total_hypothetical_best_net_r": round(sum(net), 3) if net else None,
+            "total_hypothetical_best_legacy_gross_r": round(sum(gross), 3)
+                                                    if gross else None,
         }
 
     wait = bucket(("WAIT",))
     veto = bucket(("VETOED", "NO-TRADE", "HALT"))
 
-    by_setup = {}
-    for e in scored:
+    by_setup: dict[str, list[float]] = {}
+    legacy_gross_by_setup: dict[str, list[float]] = {}
+    for e in attached:
         for label, res in (e["counterfactual"].get("per_trigger") or {}).items():
-            r = res.get("net_r") if res.get("net_r") is not None else res.get("r")
+            if not isinstance(res, dict):
+                continue
+            r = _finite_r(res.get("net_r"))
+            dest = by_setup
+            if "net_r" not in res:
+                r, dest = _finite_r(res.get("r")), legacy_gross_by_setup
             if r is None:
                 continue
-            by_setup.setdefault(f"{e.get('side')}-{label}", []).append(r)
-    setup_stats = {}
-    for setup, rs in by_setup.items():
-        setup_stats[setup] = {
-            "n": len(rs),
-            "win_rate": round(sum(1 for r in rs if r > 0) / len(rs), 3),
-            "expectancy_r": round(sum(rs) / len(rs), 3),
-            "total_r": round(sum(rs), 3),
-        }
+            dest.setdefault(_setup_key(e, label), []).append(r)
 
     return {
-        "scored": len(scored),
-        "wait": {"n": wait["n"], "fired": wait["fired"],
-                 "missed_r": wait["total_best_r"]},
-        "veto": {"n": veto["n"], "fired": veto["fired"],
-                 "avoided_r": veto["total_best_r"]},
-        "by_setup": setup_stats,
+        "attached": len(attached),
+        "scored": sum(has_simulation(e["counterfactual"]) for e in attached),
+        "r_denominator": "original_price_stop_distance",
+        "interpretation": "Hypothetical best trigger selected with hindsight; "
+                          "not missed/avoided profit or evidence for loosening gates. "
+                          "Legacy gross-only results are excluded from net aggregates.",
+        "wait": wait,
+        "veto": veto,
+        "by_setup": {setup: _r_stats(rs) for setup, rs in by_setup.items()},
+        "legacy_gross_by_setup": {setup: _r_stats(rs)
+                                  for setup, rs in legacy_gross_by_setup.items()},
     }
 
 
@@ -336,7 +424,8 @@ def passive_expectancy(path=None, min_samples=PASSIVE_MIN_SAMPLES):
                  stop firing it (size_mult = 0.0).
     """
     rs = [float(e["outcome"]["outcome_r"]) for e in _load_entries(path)
-          if e.get("setup_family") == "passive-fade" and e.get("outcome")]
+          if e.get("setup_family") == "passive-fade"
+          and _entry_outcome_exclusion(e) is None]
     n = len(rs)
     if n == 0:
         return {"state": "UNPROVEN", "n": 0, "win_rate": None,

@@ -239,12 +239,13 @@ def test_summary_counterfactual_section(tmp_path):
     cf = s["counterfactual"]
     assert cf["scored"] == 2
     assert cf["wait"]["n"] == 1
-    assert cf["wait"]["fired"] == 1
-    assert cf["wait"]["missed_r"] == pytest.approx(2.5)
+    assert cf["wait"]["filled"] == 1
+    assert cf["wait"]["total_hypothetical_best_net_r"] is None
+    assert cf["wait"]["total_hypothetical_best_legacy_gross_r"] == pytest.approx(2.5)
     assert cf["veto"]["n"] == 1
-    assert cf["veto"]["avoided_r"] == pytest.approx(-1.0)
-    assert cf["by_setup"]["long-A"]["n"] == 2
-    assert cf["by_setup"]["long-A"]["expectancy_r"] == pytest.approx(0.75)
+    assert cf["veto"]["total_hypothetical_best_legacy_gross_r"] == pytest.approx(-1.0)
+    assert cf["legacy_gross_by_setup"]["legacy/directional/long/A"]["n"] == 2
+    assert cf["legacy_gross_by_setup"]["legacy/directional/long/A"]["expectancy_r"] == pytest.approx(0.75)
 
 
 def test_list_open_excludes_counterfactually_resolved_nonaction(tmp_path):
@@ -393,8 +394,8 @@ def test_summary_prefers_net_r_when_present(tmp_path):
     }, path=p)
     s = audit_log.compute_summary(path=p)
     cf = s["counterfactual"]
-    assert cf["wait"]["missed_r"] == pytest.approx(2.435)        # net, not 2.5
-    assert cf["by_setup"]["long-A"]["expectancy_r"] == pytest.approx(2.435)
+    assert cf["wait"]["total_hypothetical_best_net_r"] == pytest.approx(2.435)
+    assert cf["by_setup"]["legacy/directional/long/A"]["expectancy_r"] == pytest.approx(2.435)
 
 
 def test_directional_entry_still_scored_after_passive_guard():
