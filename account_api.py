@@ -6,6 +6,7 @@ other account modes still produce observations, never an inferred equity.
 """
 
 import concurrent.futures
+import http.client
 import json
 import re
 import time
@@ -16,7 +17,7 @@ import urllib.request
 INFO_URL = "https://api.hyperliquid.xyz/info"
 READ_TYPES = frozenset({
     "userRole", "userAbstraction", "perpDexs", "meta", "clearinghouseState",
-    "frontendOpenOrders", "userFillsByTime", "userFunding",
+    "spotClearinghouseState", "frontendOpenOrders", "userFillsByTime", "userFunding",
     "userNonFundingLedgerUpdates",
 })
 MAX_HISTORY_REQUESTS = 128
@@ -45,7 +46,7 @@ def post_info(payload):
     try:
         with urllib.request.urlopen(request, timeout=12) as response:
             return json.load(response)
-    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+    except (OSError, urllib.error.URLError, http.client.HTTPException, json.JSONDecodeError) as exc:
         raise AccountDataError(f"{payload['type']} unavailable: {exc}") from exc
 
 
@@ -107,6 +108,11 @@ def fetch_snapshot(wallet, since_ms, *, post=post_info, clock=None):
     if not isinstance(role, dict) or role.get("role") not in {"user", "subAccount"}:
         raise AccountDataError("address is not a trading user/subaccount; do not use an API-agent address")
     mode = post({"type": "userAbstraction", "user": wallet})
+    spot = None
+    if mode == "unifiedAccount":
+        # Unified accounts hold their USDC in the spot clearinghouse; per-dex
+        # perp balances are not meaningful there. Positions still come per dex.
+        spot = post({"type": "spotClearinghouseState", "user": wallet})
     raw_dexes = post({"type": "perpDexs"})
     if not isinstance(raw_dexes, list) or not raw_dexes or raw_dexes[0] is not None:
         raise AccountDataError("perp DEX discovery unavailable or malformed")
@@ -147,10 +153,13 @@ def fetch_snapshot(wallet, since_ms, *, post=post_info, clock=None):
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         histories = dict(zip(kinds, pool.map(
             lambda kind: fetch_history(kind, wallet, since_ms, asof, post=post), kinds)))
-    return {
+    result = {
         "version": 1, "wallet": wallet, "mode": mode,
         "started_at_ms": started, "received_at_ms": clock(), "asof_ms": asof,
         "history_start_ms": int(since_ms), "venues": venues,
         "fills": histories["userFillsByTime"], "funding": histories["userFunding"],
         "ledger": histories["userNonFundingLedgerUpdates"],
     }
+    if spot is not None:
+        result["spot"] = spot
+    return result
