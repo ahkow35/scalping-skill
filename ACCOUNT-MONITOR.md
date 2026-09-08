@@ -18,7 +18,12 @@ Exit codes: 0 means eligible for further skill checks, 3 means a latched HALT, 2
 
 ## Accounting and scope
 
-The monitor reads the exchange's states, fills, funding, ledger and open orders, including manually originated activity in the monitored scope. It supports explicitly standard (`disabled` abstraction) USDC perpetual balances across advertised perp venues. It does **not** sum unified/portfolio-margin balances: those modes, unspecified modes, and active non-USDC collateral are unsupported and block entries. Spot, vault investments and other wallet/subaccount addresses are outside this version's scope. Never switch account modes merely to make this monitor pass.
+The monitor reads the exchange's states, fills, funding, ledger and open orders, including manually originated activity in the monitored scope. Two account modes are supported:
+
+- **Standard** (`disabled` abstraction): equity is the sum of USDC perpetual balances across advertised perp venues. Spot is a separate balance and is ignored, including spot fills.
+- **Unified account** (`unifiedAccount`): equity is the spot-clearinghouse USDC balance plus perp unrealized P&L. Per-dex perp `accountValue` is deliberately not added (it is not a separate balance). The account is treated as **perps-only**: a USDC `hold` (open spot order) makes equity unknown, and any spot fill or `accountClassTransfer` observed since the baseline blocks reconciliation for the day. Other spot tokens never count as equity. The spot state carries no exchange timestamp, so spot/perp read coherence is not checkable; a race between the two reads shows up as a reconciliation residual and fails closed.
+
+Portfolio margin, unspecified modes, and active non-USDC collateral are unsupported and block entries. Vault investments and other wallet/subaccount addresses are outside scope. Never switch account modes merely to make this monitor pass.
 
 Daily observed P&L is equity change minus net external cash flows, reconciled against closed P&L minus fees plus funding plus the change in unrealized P&L. Fees already include builder fees. Unexplained differences above 0.05 USDC, unhandled ledger events, stale observations, saturated history that cannot be paginated, and data errors block entries. Exchange history retention and non-atomic endpoint snapshots mean this is not a complete historical accounting archive.
 

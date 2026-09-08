@@ -70,7 +70,7 @@ def test_unhashable_or_boolean_order_ids_cannot_crash_or_count():
     assert not stop_coverage(position(), [stop(oid=[]), stop(oid=True)])["fully_covered"]
 
 
-@pytest.mark.parametrize("mode", ["unifiedAccount", "portfolioMargin", "dexAbstraction", "default", None])
+@pytest.mark.parametrize("mode", ["portfolioMargin", "dexAbstraction", "default", None])
 def test_shared_or_unspecified_balances_are_not_summed_as_equity(mode):
     result = normalize_snapshot(snapshot(mode=mode), WALLET, NOW, 90_000)
     assert result["equity_usdc"] is None and result["issues"]
@@ -126,3 +126,92 @@ def test_unknown_ledger_type_blocks_reconciliation():
     data["ledger"] = [{"time": NOW, "delta": {"type": "mysteryTransfer", "usdc": "100"}}]
     with pytest.raises(AccountDataError, match="unreconciled"):
         accounting_events(data, NOW - 1000)
+
+
+def spot(usdc="7000", hold="0", extra=()):
+    balances = [{"coin": "USDC", "token": 0, "total": usdc, "hold": hold, "entryNtl": "0.0"},
+                {"coin": "VAPOR", "token": 42, "total": "41041.3", "hold": "0.0", "entryNtl": "2887.6"}]
+    return {"balances": balances + list(extra), "tokenToAvailableAfterMaintenance": [[0, usdc]]}
+
+
+def unified(**changes):
+    data = snapshot(mode="unifiedAccount", equity=0, **changes)
+    data["spot"] = spot()
+    return data
+
+
+def test_unified_equity_is_spot_usdc_plus_unrealized_and_ignores_other_tokens():
+    result = normalize_snapshot(unified(size=10, upnl=25), WALLET, NOW, 90_000)
+    assert result["equity_usdc"] == 7025
+    assert result["unrealized_pnl_usdc"] == 25
+    assert result["issues"] == []
+    assert len(result["positions"]) == 1 and len(result["stops"]) == 1
+    assert "unified" in result["scope"]
+
+
+def test_unified_ignores_perp_venue_account_value_to_avoid_double_counting():
+    data = unified()
+    data["venues"][""]["state"]["marginSummary"]["accountValue"] = "500"
+    assert normalize_snapshot(data, WALLET, NOW, 90_000)["equity_usdc"] == 7000
+
+
+def test_unified_missing_spot_balances_never_look_like_zero_equity():
+    data = unified()
+    del data["spot"]
+    with pytest.raises(AccountDataError, match="spot"):
+        normalize_snapshot(data, WALLET, NOW, 90_000)
+
+
+@pytest.mark.parametrize("balances", [
+    [],
+    [{"coin": "USDC", "token": 0, "total": "1", "hold": "0"}, {"coin": "USDC", "token": 0, "total": "2", "hold": "0"}],
+    [{"coin": "USDC", "token": 5, "total": "1", "hold": "0"}],
+    [{"coin": "USDC", "token": 0, "total": "nan", "hold": "0"}],
+])
+def test_unified_ambiguous_or_invalid_usdc_balance_fails_closed(balances):
+    data = unified()
+    data["spot"]["balances"] = balances
+    with pytest.raises(AccountDataError):
+        normalize_snapshot(data, WALLET, NOW, 90_000)
+
+
+def test_unified_spot_hold_means_spot_activity_and_unknown_equity():
+    data = unified()
+    data["spot"] = spot(hold="5")
+    result = normalize_snapshot(data, WALLET, NOW, 90_000)
+    assert result["equity_usdc"] is None and any("hold" in issue for issue in result["issues"])
+
+
+def test_disabled_mode_still_sums_perp_balances_and_ignores_spot_block():
+    data = snapshot(equity=1000)
+    data["spot"] = spot()
+    assert normalize_snapshot(data, WALLET, NOW, 90_000)["equity_usdc"] == 1000
+
+
+@pytest.mark.parametrize("coin", ["@107", "VAPOR/USDC"])
+def test_unified_spot_fill_blocks_reconciliation(coin):
+    data = unified()
+    data["fills"] = [{"coin": coin, "tid": 1, "time": NOW, "feeToken": "USDC",
+                      "closedPnl": "0", "fee": "1", "dir": "Buy"}]
+    with pytest.raises(AccountDataError, match="spot"):
+        accounting_events(data, NOW - 1000)
+
+
+def test_disabled_mode_still_skips_spot_fills():
+    data = snapshot()
+    data["fills"] = [{"coin": "@107", "tid": 1, "time": NOW, "feeToken": "USDC",
+                      "closedPnl": "0", "fee": "1", "dir": "Buy"}]
+    assert accounting_events(data, NOW - 1000)["fill_count"] == 0
+
+
+def test_unified_class_transfer_is_unreconciled():
+    data = unified()
+    data["ledger"] = [{"time": NOW, "delta": {"type": "accountClassTransfer", "usdc": "20", "toPerp": True}}]
+    with pytest.raises(AccountDataError, match="unreconciled"):
+        accounting_events(data, NOW - 1000)
+
+
+def test_unified_deposit_still_counts_as_cash_flow():
+    data = unified()
+    data["ledger"] = [{"time": NOW, "delta": {"type": "deposit", "usdc": "100"}}]
+    assert accounting_events(data, NOW - 1000)["net_cash_flow_usdc"] == 100
