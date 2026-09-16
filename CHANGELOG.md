@@ -1,5 +1,33 @@
 # Changelog — scalp skill
 
+## 2026-09-16 — midnight watcher live; risk-dashboard design (Sections 1–2 approved, 3 pending)
+Account-monitor baseline is now anchored nightly: `scripts/midnight_watch.sh`
+(caffeinate + `watch --interval-seconds 15 --count 30`) fired by
+`~/Library/LaunchAgents/com.nyanyk.scalp-midnight.plist` at 23:55, with a
+`pmset repeat wakeorpoweron MTWRFSU 23:55:00` set by Nyan on 2026-09-11.
+`logs/midnight-watch.log` shows `near_reset_observation` on 09-15 and 09-16.
+Two limits found the hard way: each `check` takes ~100 s (30 polls took 57 min,
+not 7), so the bracket depends on the wake being on time; and an open USDC
+spot order makes `evaluate()` return the old state untouched, so a resting
+spot order at midnight defeats the bracket. Both are documented in
+ACCOUNT-MONITOR notes / wiki.
+
+Design-only (no code): a private risk dashboard + Telegram alerts. Decided —
+collector runs on **Railway** (Hetzner VPS declined; Mac sleeps; iPhone can't
+host a loop); here.now hosts the page with email-allowlist access and
+**Site Data** as the mailbox (verified against live docs: no server compute,
+proxy routes + account variables exist, Site Data CRUD exists); alert rules =
+no stop ×2 cycles, stop vanished, budget 50%/100%, position >24 h,
+liquidation within 15%, monitor blind >5 min, plus a daily summary;
+Telegram is the channel. Ownership split (Section 3) still awaiting Nyan:
+collector owns account state, Mac `/scalp` stays sole audit-log writer, page
+writes only resolve requests. Rejected: external API + proxy route (public
+endpoint returning balances), Mac-only, and Herdr (a session-persistence
+runtime, not an always-on host). Opportunity pings from scan2 deferred:
+0 of 107 audit rows are resolved, so there is no evidence any card pays.
+Files: `scripts/midnight_watch.sh`, `scripts/com.nyanyk.scalp-midnight.plist`,
+`.audit_log.jsonl` (+5 rows: PONS HALT, 3× MANAGE, 1× EXIT).
+
 ## 2026-09-08 — account monitor: unified-account mode supported
 `account_monitor.py` previously reported `UNSUPPORTED` for any wallet in
 Hyperliquid's `unifiedAccount` mode, because the perp clearinghouse state shows
