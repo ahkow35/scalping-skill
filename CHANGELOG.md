@@ -1,5 +1,21 @@
 # Changelog — scalp skill
 
+## 2026-09-25 — one-candle rule paper backtest: no edge
+Paper-tested the "one-candle rule" from a Scarface Trades video (daily trend + retest of
+the last opposing 1m candle in the first NY-open hour, 2R target) on 16 months of Binance
+HYPEUSDT 1m data, net of `costs.py`. Rules and pass criterion pre-registered in
+`one_candle_spec.md` before running. Result: 61 trades, −0.23R/trade (CI −0.60…+0.12),
+inside the random-entry placebo range; the video's candle-trail exit was worst (−0.47R);
+NY hour leaned better than other hours but CIs overlap. Verdict FAIL — not adopted.
+Rejected: Hyperliquid candles as the data source (only ~5000 bars ≈ 17 days of 5m).
+Side-finding, NOT fixed (needs Nyan's OK): the skill's fixed 13:30–15:30 UTC US-open
+window is an hour early in US winter (EST → 14:30 UTC).
+Also noticed: the 2026-09-25 midnight bracket produced a partial_day baseline
+(first baseline 16:07 UTC; watcher rc=2), so new entries were WARMUP-blocked all day.
+Files: `one_candle_spec.md`, `one_candle_bt.py`, `one_candle_results.json` (new);
+`.audit_log.jsonl` (+2 rows: HYPE long HALT, HYPE long WAIT under owner override);
+`profile.json` equity 6559 → 5145.
+
 ## 2026-09-16 — midnight watcher live; risk-dashboard design (Sections 1–2 approved, 3 pending)
 Account-monitor baseline is now anchored nightly: `scripts/midnight_watch.sh`
 (caffeinate + `watch --interval-seconds 15 --count 30`) fired by
