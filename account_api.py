@@ -6,12 +6,11 @@ other account modes still produce observations, never an inferred equity.
 """
 
 import concurrent.futures
-import http.client
 import json
 import re
 import time
-import urllib.error
-import urllib.request
+
+import requests
 
 
 INFO_URL = "https://api.hyperliquid.xyz/info"
@@ -39,14 +38,16 @@ def post_info(payload):
     """Only public read methods are accepted, even if a caller is mistaken."""
     if payload.get("type") not in READ_TYPES:
         raise AccountDataError("not an allowed read-only account query")
-    request = urllib.request.Request(
-        INFO_URL, data=json.dumps(payload).encode(), method="POST",
-        headers={"Content-Type": "application/json", "User-Agent": "scalp-account-monitor/1"},
-    )
+    # requests, not urllib: urllib mishandles HL's chunked responses through the
+    # sandbox proxy (IncompleteRead on perpDexs). Same fix as fetch_market.py.
     try:
-        with urllib.request.urlopen(request, timeout=12) as response:
-            return json.load(response)
-    except (OSError, urllib.error.URLError, http.client.HTTPException, json.JSONDecodeError) as exc:
+        response = requests.post(
+            INFO_URL, json=payload, timeout=12,
+            headers={"User-Agent": "scalp-account-monitor/1"},
+        )
+        response.raise_for_status()
+        return response.json()
+    except (requests.RequestException, ValueError) as exc:
         raise AccountDataError(f"{payload['type']} unavailable: {exc}") from exc
 
 
