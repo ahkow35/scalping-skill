@@ -1,7 +1,5 @@
-import http.client
-import urllib.request
-
 import pytest
+import requests
 
 from account_api import AccountDataError, fetch_history, fetch_snapshot, post_info, validate_wallet
 
@@ -115,16 +113,9 @@ def test_unified_mode_fetches_spot_balances_and_disabled_mode_does_not():
 
 
 def test_truncated_http_response_is_reported_not_raised(monkeypatch):
-    class Truncated:
-        def __enter__(self):
-            return self
+    def truncated(*args, **kwargs):
+        raise requests.exceptions.ChunkedEncodingError("IncompleteRead(3972 bytes read, 17019 more expected)")
 
-        def __exit__(self, *exc):
-            return False
-
-        def read(self, *args):
-            raise http.client.IncompleteRead(b"{", 100)
-
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: Truncated())
+    monkeypatch.setattr(requests, "post", truncated)
     with pytest.raises(AccountDataError, match="perpDexs unavailable"):
         post_info({"type": "perpDexs"})
