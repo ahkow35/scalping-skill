@@ -1,5 +1,49 @@
 # Changelog — scalp skill
 
+## 2026-09-25 — one-candle rule paper backtest: no edge
+Paper-tested the "one-candle rule" from a Scarface Trades video (daily trend + retest of
+the last opposing 1m candle in the first NY-open hour, 2R target) on 16 months of Binance
+HYPEUSDT 1m data, net of `costs.py`. Rules and pass criterion pre-registered in
+`one_candle_spec.md` before running. Result: 61 trades, −0.23R/trade (CI −0.60…+0.12),
+inside the random-entry placebo range; the video's candle-trail exit was worst (−0.47R);
+NY hour leaned better than other hours but CIs overlap. Verdict FAIL — not adopted.
+Rejected: Hyperliquid candles as the data source (only ~5000 bars ≈ 17 days of 5m).
+Side-finding, NOT fixed (needs Nyan's OK): the skill's fixed 13:30–15:30 UTC US-open
+window is an hour early in US winter (EST → 14:30 UTC).
+Also noticed: the 2026-09-25 midnight bracket produced a partial_day baseline
+(first baseline 16:07 UTC; watcher rc=2), so new entries were WARMUP-blocked all day.
+Files: `one_candle_spec.md`, `one_candle_bt.py`, `one_candle_results.json` (new);
+`.audit_log.jsonl` (+2 rows: HYPE long HALT, HYPE long WAIT under owner override);
+`profile.json` equity 6559 → 5145.
+
+## 2026-09-16 — midnight watcher live; risk-dashboard design (Sections 1–2 approved, 3 pending)
+Account-monitor baseline is now anchored nightly: `scripts/midnight_watch.sh`
+(caffeinate + `watch --interval-seconds 15 --count 30`) fired by
+`~/Library/LaunchAgents/com.nyanyk.scalp-midnight.plist` at 23:55, with a
+`pmset repeat wakeorpoweron MTWRFSU 23:55:00` set by Nyan on 2026-09-11.
+`logs/midnight-watch.log` shows `near_reset_observation` on 09-15 and 09-16.
+Two limits found the hard way: each `check` takes ~100 s (30 polls took 57 min,
+not 7), so the bracket depends on the wake being on time; and an open USDC
+spot order makes `evaluate()` return the old state untouched, so a resting
+spot order at midnight defeats the bracket. Both are documented in
+ACCOUNT-MONITOR notes / wiki.
+
+Design-only (no code): a private risk dashboard + Telegram alerts. Decided —
+collector runs on **Railway** (Hetzner VPS declined; Mac sleeps; iPhone can't
+host a loop); here.now hosts the page with email-allowlist access and
+**Site Data** as the mailbox (verified against live docs: no server compute,
+proxy routes + account variables exist, Site Data CRUD exists); alert rules =
+no stop ×2 cycles, stop vanished, budget 50%/100%, position >24 h,
+liquidation within 15%, monitor blind >5 min, plus a daily summary;
+Telegram is the channel. Ownership split (Section 3) still awaiting Nyan:
+collector owns account state, Mac `/scalp` stays sole audit-log writer, page
+writes only resolve requests. Rejected: external API + proxy route (public
+endpoint returning balances), Mac-only, and Herdr (a session-persistence
+runtime, not an always-on host). Opportunity pings from scan2 deferred:
+0 of 107 audit rows are resolved, so there is no evidence any card pays.
+Files: `scripts/midnight_watch.sh`, `scripts/com.nyanyk.scalp-midnight.plist`,
+`.audit_log.jsonl` (+5 rows: PONS HALT, 3× MANAGE, 1× EXIT).
+
 ## 2026-09-08 — account monitor: unified-account mode supported
 `account_monitor.py` previously reported `UNSUPPORTED` for any wallet in
 Hyperliquid's `unifiedAccount` mode, because the perp clearinghouse state shows
@@ -19,6 +63,33 @@ closed with zero residual. 18 new tests; suite 368 → 386 green.
 Files: `account_api.py`, `account_observation.py`, `ACCOUNT-MONITOR.md`,
 `tests/test_account_api.py`, `tests/test_account_observation.py`,
 `tests/test_account_risk.py`.
+## 2026-09-01 — scalp2 correlation-aware aggregate-risk cap (#5)
+A single scan could surface up to `MAX_CARDS` (3) cards, each carrying a full
+per-attempt risk budget — so taking two cards on coins that move together
+silently multiplied real risk on one thesis, and a long-here/short-there pair on
+correlated coins was an incoherent fleet. Neither was capped. Fix: a pure
+post-filter in `card2.build_cards`, inserted between the existing `-rr` sort and
+the `MAX_CARDS` slice (no existing gate touched). `scan2._coin_read` now threads
+a 15m close series (`closes_15m`) into each read; `_corr_clusters` computes
+plain-Python log-return Pearson correlation (no numpy) and union-find connected
+components, clustering coins at `|rho| ≥ CORR_THRESHOLD` (0.7) over
+`CORR_WINDOW_BARS` (24) bars. Within each cluster only the highest-net-R:R card
+survives; suppressed cards get a `no_trade_reasons` line naming the kept coin and
+rho. Fail-open by design: a coin with <25 closes, a flat/zero-variance series, or
+a missing `closes_15m` key never correlates and survives as its own singleton
+(div-by-zero guarded) — correlation that can't be computed never drops a real
+setup. Design choice: keep-one-per-cluster, NOT split-budget-across-legs (one
+managed position beats two half-size correlated ones — same risk, double the
+taker fees and management surface; matches the "cut size, never widen" ethos).
+Enforces both the aggregate-risk cap and one-direction-per-correlated-fleet in a
+single move. Built via build-to-pr (PR #5, reviewed PASS/medium, 2 low nits
+squashed), merged to main (squash `4aca9962`). 11 new tests
+(`tests/test_card2_correlation.py`); suite green.
+Files: `card2.py`, `scan2.py`, `scalp2.md`, `tests/test_card2_correlation.py`.
+
+Deferred by Nyan's choice (not built): fail-closed-if-native-stop-absent and
+broker-first position reconciliation on restart — both need his Hyperliquid
+wallet address (public info) in scalp2 config; reopen anytime.
 
 ## 2026-08-24 — strip-BTC gate promoted to a deterministic helper
 Promoted Step 1c from a prose/model-applied gate to a deterministic code helper,

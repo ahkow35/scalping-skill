@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.nyanyk.scalp-midnight</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string><string>-lc</string>
+    <string>/Users/nyanyk/Claude/research/scalp/scripts/midnight_watch.sh</string>
+  </array>
+  <!-- Daily 23:55 local. Must match the pmset repeat wake so launchd fires as
+       soon as the machine is up; the wrapper then caffeinates through
+       00:00 SGT, the account_monitor reset boundary. -->
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>23</integer>
+        <key>Minute</key><integer>55</integer></dict>
+  <key>StandardOutPath</key>
+  <string>/Users/nyanyk/Claude/research/scalp/logs/midnight-watch.out</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/nyanyk/Claude/research/scalp/logs/midnight-watch.err</string>
+</dict>
+</plist>
