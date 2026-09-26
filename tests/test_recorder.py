@@ -69,8 +69,8 @@ def test_recorder_dedupes_trades_by_tid_writes_only_once(tmp_path):
 
     path = rec.file_path(str(tmp_path), "HYPE", "trades", rec.day_str_utc(MIDNIGHT))
     with open(path) as f:
-        lines = [json.loads(l) for l in f if l.strip()]
-    tids = [l["data"]["tid"] for l in lines]
+        lines = [json.loads(line) for line in f if line.strip()]
+    tids = [line["data"]["tid"] for line in lines]
     assert tids == ["abc", "xyz"]  # the duplicate "abc" resend was dropped
 
 
@@ -82,7 +82,7 @@ def test_recorder_preserves_users_buyer_seller_field(tmp_path):
     fr.files.close_all()
     path = rec.file_path(str(tmp_path), "HYPE", "trades", rec.day_str_utc(MIDNIGHT))
     with open(path) as f:
-        rows = [json.loads(l) for l in f if l.strip()]
+        rows = [json.loads(line) for line in f if line.strip()]
     assert rows[0]["data"]["users"] == ["0xbuyer", "0xseller"]
 
 
@@ -96,7 +96,7 @@ def test_emit_gaps_writes_one_record_per_coin_channel(tmp_path):
         for channel in rec.CHANNELS:
             path = rec.file_path(str(tmp_path), coin, channel, rec.day_str_utc(MIDNIGHT))
             with open(path) as f:
-                rows = [json.loads(l) for l in f if l.strip()]
+                rows = [json.loads(line) for line in f if line.strip()]
             assert len(rows) == 1
             assert rows[0]["record_type"] == "gap"
             assert rows[0]["coin"] == coin
@@ -112,7 +112,7 @@ def test_emit_gaps_carries_last_seen_exchange_ts_after_data(tmp_path):
     fr.files.close_all()
     path = rec.file_path(str(tmp_path), "HYPE", "l2Book", rec.day_str_utc(MIDNIGHT))
     with open(path) as f:
-        rows = [json.loads(l) for l in f if l.strip()]
+        rows = [json.loads(line) for line in f if line.strip()]
     data_rows = [r for r in rows if r["record_type"] == "l2Book"]
     gap_rows = [r for r in rows if r["record_type"] == "gap"]
     assert len(data_rows) == 1 and len(gap_rows) == 1
@@ -169,7 +169,7 @@ def test_flow_file_set_rotation_reopens_same_day_without_truncating(tmp_path):
     files.close_all()
     path = rec.file_path(str(tmp_path), "HYPE", "trades", day)
     with open(path) as f:
-        rows = [json.loads(l) for l in f if l.strip()]
+        rows = [json.loads(line) for line in f if line.strip()]
     assert [r["n"] for r in rows] == [1, 2]
 
 
@@ -355,7 +355,7 @@ def test_dispatch_message_routes_trades_l2book_bbo(tmp_path):
     for channel in rec.CHANNELS:
         path = rec.file_path(str(tmp_path), "HYPE", channel, rec.day_str_utc(MIDNIGHT))
         with open(path) as f:
-            rows = [json.loads(l) for l in f if l.strip()]
+            rows = [json.loads(line) for line in f if line.strip()]
         assert len(rows) == 1
 
 
