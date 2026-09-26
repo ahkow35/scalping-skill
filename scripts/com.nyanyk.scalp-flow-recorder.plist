@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.nyanyk.scalp-flow-recorder</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string><string>-lc</string>
+    <string>/Users/nyanyk/Claude/research/scalp/scripts/flow_recorder.sh</string>
+  </array>
+  <!-- Research-only WS tape recorder (recorder.py) — does NOT feed the live
+       /scalp flow gate. Runs continuously: start at load and restart on any
+       exit (crash, watchdog-forced reconnect that still exits the process,
+       etc). ThrottleInterval caps a crash loop at one restart per 30s. -->
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/nyanyk/Claude/research/scalp/logs/flow-recorder.out</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/nyanyk/Claude/research/scalp/logs/flow-recorder.err</string>
+</dict>
+</plist>

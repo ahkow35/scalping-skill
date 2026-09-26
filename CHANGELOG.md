@@ -1,5 +1,44 @@
 # Changelog — scalp skill
 
+## 2026-09-27 — WebSocket flow recorder revived (research only, PR A)
+Brought `recorder.py` + its tests + `PLAN-flow-recorder-2026-07-12.md` over from
+the local-only July branch `fix/flow-honesty` onto main, per `tasks/todo.md`'s
+plan: keeps all three streams (trades, l2Book, bbo), writes an append-only tape
+to `.flow_data/` (gitignored), never deletes data. Does NOT feed the live
+`/scalp` flow gate — `/scalp` verdicts and `flow.py`/`fetch_market.py`'s
+`sample_pct`/conviction logic are unchanged; wiring the gate is a separate,
+later decision (PR B).
+Kept one piece of the July `sample_pct` commit: `fetch_market.fetch_candles`
+now carries HL's own per-candle trade count `n`, which `recorder.verify_sample_pct`
+needs for its self-check (main previously dropped this field, silently
+returning 0/None). Dropped the rest of that commit (the `coverage_pct`→
+`sample_pct` rename) — PR #7 solved the same honesty problem differently.
+New for this revival, beyond the July branch: a receive watchdog (default 30s,
+`--watchdog-s`) forces a reconnect — through the normal GAP-writing path — when
+a stream goes silent, covering the half-open-socket-after-sleep case that used
+to hang forever; connection errors are now logged instead of silently
+swallowed. Day-rotation compression: `FlowFileSet` gzips a finished UTC day's
+file in place (atomically) on rotation and on startup for any crash leftovers;
+today's file always stays plain; `verify_sample_pct` and a shared reader read
+both forms. A disk-floor check (default 10 GB, `--disk-floor-gb`) is
+alert-only — `disk_low`/free GB in `status.json` and a log warning, never a
+delete. `status.json` also now reports per-stream lag, reconnects in the last
+24h and total gap seconds in the last 24h; the per-coin trade-id dedupe set
+clears at each UTC day roll to bound memory over a long session (HL replays
+~30s of trades on subscribe, so readers must dedupe by tid across files
+regardless).
+Added `scripts/flow_recorder.sh` (pinned interpreter, `exec caffeinate -s`
+so launchd's SIGTERM reaches the recorder) and
+`scripts/com.nyanyk.scalp-flow-recorder.plist` (RunAtLoad, KeepAlive,
+30s throttle) — NOT installed; that is a separate, pending decision.
+Full suite green (417 tests, up from 386 on main; 31 in `tests/test_recorder.py`),
+no live network. Live acceptance: ~3-minute HYPE capture on this Mac, clean
+SIGTERM shutdown, `--verify` 72/72 trades = 100.0% sample_pct over the one
+whole UTC minute the capture fully spanned — matching July's 945/945. A
+shorter (~2 min) first attempt returned "recorded span shorter than one whole
+minute" instead of a number; that is the whole-minute-edge-trimming guard
+working as designed on a very short run, not a bug.
+
 ## 2026-09-25 — one-candle rule paper backtest: no edge
 Paper-tested the "one-candle rule" from a Scarface Trades video (daily trend + retest of
 the last opposing 1m candle in the first NY-open hour, 2R target) on 16 months of Binance

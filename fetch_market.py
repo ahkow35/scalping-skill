@@ -515,10 +515,15 @@ def fetch_candles(coin, interval, start_ms, end_ms):
     rows = _post_json(HL_INFO, {"type": "candleSnapshot", "req": {
         "coin": coin, "interval": interval,
         "startTime": start_ms, "endTime": end_ms}}, "hyperliquid")
+    # n = HL's own per-candle trade count. Kept alongside t_ms/T so
+    # recorder.verify_sample_pct can compare recorded trades against the
+    # exchange's own tally (its --verify acceptance check); None (never a
+    # silent 0) when the API response omits it.
     return [{"t": iso_utc(k["t"]), "t_ms": int(k["t"]), "T": int(k["T"]),
              "closed": int(k["T"]) < end_ms,
              "o": float(k["o"]), "h": float(k["h"]),
-             "l": float(k["l"]), "c": float(k["c"]), "v": float(k["v"])}
+             "l": float(k["l"]), "c": float(k["c"]), "v": float(k["v"]),
+             "n": int(k["n"]) if k.get("n") is not None else None}
             for k in rows]
 
 
