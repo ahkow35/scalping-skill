@@ -277,16 +277,24 @@ def underwater_adds(snapshot, since_ms, positions):
     position at a price worse than its running entry at that moment.
 
     The running average entry is reconstructed per coin from the day's own
-    fills, seeded once a fill shows `startPosition == 0` (a fresh open from
-    flat). If the fetched fills never show that coin flat — the position was
+    fills, using each fill's own `startPosition` (the exchange's ground truth
+    for the position size immediately before that fill) rather than a locally
+    accumulated tally, so a fill skipped for missing data cannot desync the
+    reconstruction from the real position. A fill with `startPosition == 0`
+    (a fresh open from flat) resets the running entry to that fill's price —
+    a same-day close-then-reopen is never compared against the earlier,
+    now-irrelevant entry. A reduce leaves the average entry unchanged; a
+    reduce that exceeds the prior size (a flip) restarts it at this fill's
+    price. If the fetched fills never show a coin flat — the position was
     already open before the fetched window — the pre-window entry price is
     unknown, so every add on that coin is instead compared against the
-    position's CURRENT `entryPx` from the live observation. That live entryPx
-    already reflects every fill up to now, not just the one being checked, so
-    this fallback is an approximation of "entry at that moment", not an exact
-    same-instant comparison. This is a warning heuristic, not an accounting
-    identity: fills missing side/size/price/startPosition are skipped rather
-    than failing the monitor.
+    position's CURRENT `entryPx` from the live observation (or skipped if the
+    coin holds no live position, i.e. it was already fully closed). That live
+    entryPx already reflects every fill up to now, not just the one being
+    checked, so this fallback is an approximation of "entry at that moment",
+    not an exact same-instant comparison. This is a warning heuristic, not an
+    accounting identity: spot fills and fills missing side/size/price/
+    startPosition are skipped rather than failing the monitor.
     """
     entry_by_coin = {position["coin"]: position["entry"] for position in positions}
     running: dict[str, dict] = {}
@@ -296,6 +304,8 @@ def underwater_adds(snapshot, since_ms, positions):
         coin, side = fill.get("coin"), fill.get("side")
         if not isinstance(coin, str) or not coin or side not in ("B", "A"):
             continue
+        if coin.startswith("@") or "/" in coin or fill.get("dir") in {"Buy", "Sell"}:
+            continue  # spot fill, not a perp position
         try:
             size = abs(number(fill.get("sz"), "fill size"))
             price = number(fill.get("px"), "fill price")
@@ -304,16 +314,14 @@ def underwater_adds(snapshot, since_ms, positions):
         except AccountDataError:
             continue
         sign = 1 if side == "B" else -1
+        if start == 0:
+            running[coin] = {"entry": price, "approx": False}
+            continue
         state = running.get(coin)
         if state is None:
-            if start == 0:
-                state = {"entry": None, "size": 0.0, "approx": False}
-            elif coin in entry_by_coin:
-                state = {"entry": entry_by_coin[coin], "size": abs(start), "approx": True}
-            else:
-                state = {"entry": None, "size": abs(start), "approx": False}
+            state = {"entry": entry_by_coin.get(coin), "approx": True}
             running[coin] = state
-        is_add = start != 0 and (start > 0) == (sign > 0)
+        is_add = (start > 0) == (sign > 0)
         if is_add and state["entry"] is not None:
             worse = (sign > 0 and price < state["entry"]) or (sign < 0 and price > state["entry"])
             if worse:
@@ -322,13 +330,11 @@ def underwater_adds(snapshot, since_ms, positions):
                 approx = " (approximate: compared to current entryPx, not a reconstructed same-day entry)" if state["approx"] else ""
                 warnings.append(f"{coin} added to a losing {direction} at {price:g} ({iso}); "
                                  f"entry was {state['entry']:g}{approx}")
-        if not state["approx"]:
-            if state["entry"] is None:
-                state["entry"], state["size"] = price, size
-            elif is_add:
-                new_size = state["size"] + size
-                state["entry"] = (state["entry"] * state["size"] + price * size) / new_size
-                state["size"] = new_size
-            else:
-                state["size"] = max(0.0, state["size"] - size)
+        if state["approx"]:
+            continue
+        if is_add:
+            state["entry"] = (state["entry"] * abs(start) + price * size) / (abs(start) + size)
+        elif size > abs(start):
+            state["entry"] = price  # reduce-and-flip: a new position at this fill's price
+        # a pure reduce (size <= abs(start)) leaves the average entry unchanged
     return warnings

@@ -191,6 +191,32 @@ def test_fresh_open_from_flat_adds_no_warning():
     assert not any("added to a losing" in reason for reason in report["reasons"])
 
 
+def test_close_then_reopen_then_profitable_add_produces_no_false_warning():
+    _, state = start_day()
+    data = snapshot(now=MIDNIGHT + 1000, equity=995, upnl=-5, size=15)
+    data["fills"] = [
+        fill(501, MIDNIGHT - 15_000, "B", 10, 100, 0),    # open long 10 @ 100
+        fill(502, MIDNIGHT - 12_000, "A", 10, 100, 10),   # close flat @ 100
+        fill(503, MIDNIGHT - 8_000, "B", 10, 80, 0),      # reopen long 10 @ 80
+        fill(504, MIDNIGHT + 200, "B", 5, 90, 10),        # add @ 90 — profitable vs the 80 reopen entry
+    ]
+    report, _ = observe(data, state)
+    assert not any("added to a losing" in reason for reason in report["reasons"])
+
+
+def test_spot_fills_do_not_trigger_a_perp_underwater_warning():
+    _, state = start_day()
+    data = snapshot(now=MIDNIGHT + 1000, equity=1000, upnl=0, size=0)
+    data["fills"] = [
+        {"coin": "@107", "tid": 601, "time": MIDNIGHT - 10_000, "side": "B", "sz": "10", "px": "100",
+         "startPosition": "10", "dir": "Buy", "closedPnl": "0", "fee": "0", "feeToken": "USDC"},
+        {"coin": "@107", "tid": 602, "time": MIDNIGHT + 200, "side": "B", "sz": "10", "px": "90",
+         "startPosition": "20", "dir": "Buy", "closedPnl": "0", "fee": "0", "feeToken": "USDC"},
+    ]
+    report, _ = observe(data, state)
+    assert not any("added to a losing" in reason for reason in report["reasons"])
+
+
 def test_oversized_and_underwater_add_warnings_do_not_change_status_or_entry_allowed():
     _, state = start_day()
     config = {**CONFIG, "max_position_notional_usdc": 500}
