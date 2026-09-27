@@ -189,7 +189,9 @@ def evaluate(snapshot, config, state=None, *, now_ms, max_age_ms=90_000, reset_g
             if notional > cap:
                 report["reasons"].append(
                     f"{position['coin']} position notional {notional:,.2f} USDC exceeds size cap {cap:,.2f} USDC")
-    report["reasons"].extend(underwater_adds(snapshot, day["start_ms"], observation["positions"]))
+    # The risk day includes a fill stamped exactly at its start; the event
+    # filter's lower bound is exclusive, hence the - 1.
+    report["reasons"].extend(underwater_adds(snapshot, day["start_ms"] - 1, observation["positions"]))
     report["entry_allowed"] = report["status"] == "CLEAR"
     report["reasons"].append("read-only observation; does not block manual orders or guarantee stop fills")
     candidate["last_observation"] = {key: observation[key] for key in (

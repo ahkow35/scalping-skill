@@ -242,6 +242,18 @@ def test_midday_first_check_still_sees_the_days_earlier_underwater_add():
     assert history_start({**CONFIG, "timezone": "Asia/Singapore"}, state, noon + 30_000) == state["day"]["start_ms"] < noon
 
 
+def test_opening_fill_exactly_at_day_start_counts_for_the_underwater_check():
+    noon = MIDNIGHT + 12 * 3_600_000
+    day_start = MIDNIGHT - 10_000                         # 00:00:00 Singapore time
+    data = snapshot(now=noon, equity=1000, upnl=0, size=0)
+    data["fills"] = [fill(901, day_start, "B", 10, 100, 0),
+                     fill(902, day_start + 1000, "B", 10, 90, 10),
+                     fill(903, day_start + 2000, "A", 20, 95, 20)]
+    report, _ = observe(data)
+    assert any("added to a losing long at 90" in reason and "approximate" not in reason
+               for reason in report["reasons"])
+
+
 def test_oversized_and_underwater_add_warnings_do_not_change_status_or_entry_allowed():
     _, state = start_day()
     config = {**CONFIG, "max_position_notional_usdc": 500}
