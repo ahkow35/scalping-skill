@@ -9,3 +9,4 @@ __pycache__/
 .worktrees/
 .account_monitor/
 evals/snapshots.jsonl
+.flow_data/
