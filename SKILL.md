@@ -254,5 +254,8 @@ Each /scalp run dedupes by `tid` and appends. This sparse REST sample cannot
 establish complete capture, even after repeated calls. Per-window span,
 freshness and gap diagnostics are not coverage proof: `coverage_pct` and
 `capture_complete` remain null, `reliable` is false. Old cached trades cannot
-validate a current window. A continuous feed with reconnect/gap accounting is
-a prerequisite for the later paper-only signal experiment, not implemented here.
+validate a current window. A research recorder now exists (`recorder.py`,
+holds a WebSocket connection open for trades/l2Book/bbo and writes an
+append-only tape to `.flow_data/`) but it does NOT feed this live flow
+gate — it is for the later paper-only signal experiment. REST samples remain
+unreliable for the gate exactly as above.
