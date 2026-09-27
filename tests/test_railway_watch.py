@@ -35,9 +35,9 @@ def test_classify_unsupported_mode_as_config():
     assert rw.classify(report) == "config"
 
 
-def test_classify_config_required_as_config():
+def test_classify_config_required_as_config(tmp_path):
     import account_monitor as monitor
-    report = monitor.check("does-not-exist", fetch=lambda *a: pytest.fail("must not fetch"))
+    report = monitor.check(tmp_path / "does-not-exist", fetch=lambda *a: pytest.fail("must not fetch"))
     assert report["status"] == "CONFIG_REQUIRED"
     assert rw.classify(report) == "config"
 
