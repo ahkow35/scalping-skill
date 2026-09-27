@@ -24,10 +24,12 @@ NOT run behavioral preflight.
 
 ### `/scalp account check`
 
-For `/scalp account check`, run `python3 account_monitor.py check` from the
-skill repository and report its status and limitations; then STOP. For account
-configuration, read `ACCOUNT-MONITOR.md` and obtain the public trading wallet
-and owner-selected daily loss limit. Never request a private key or place orders.
+For `/scalp account check`, run `python3 account_monitor.py remote-check --json`
+from the skill repository and report its status and limitations; then STOP.
+The local `python3 account_monitor.py check` remains available to run by hand.
+For account configuration, read `ACCOUNT-MONITOR.md` and obtain the public
+trading wallet and owner-selected daily loss limit. Never request a private
+key or place orders.
 
 ### `/scalp summary [--since-days N]` (audit journal)
 
@@ -184,12 +186,14 @@ Follow `scalp-core.md` + the direction module exactly.
 - `/loop` invocations default to TINY unless QUICK/DEEP is explicit.
 - Coin arg defaults to HYPE.
 - **Account preflight runs before every new entry**, including passive mode:
-  run `python3 account_monitor.py check --json` from the skill repository.
-  Only a fresh `entry_allowed: true` permits further entry checks. Missing
-  configuration, unsupported account mode, errors and unknown data block new
-  entries. Report the exact status; do not infer CLEAR from silence or a cached
-  result. MANAGE and protective analysis must still proceed. Read
-  `ACCOUNT-MONITOR.md` for scope, partial-day baselines and stop limitations.
+  run `python3 account_monitor.py remote-check --json` from the skill
+  repository (reads the always-on Railway watcher; the local `check --json`
+  remains available to run by hand). Only a fresh `entry_allowed: true`
+  permits further entry checks. Missing configuration, unsupported account
+  mode, errors and unknown data block new entries. Report the exact status;
+  do not infer CLEAR from silence or a cached result. MANAGE and protective
+  analysis must still proceed. Read `ACCOUNT-MONITOR.md` for scope,
+  partial-day baselines and stop limitations.
   This read-only latch cannot block manual trades or place/cancel orders.
   Use observed equity for current sizing, retaining the owner's profile risk
   cap. Proposed after-cost stopped loss must also fit within

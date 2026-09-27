@@ -1,0 +1,408 @@
+"""remote-check: fail-closed preflight against the always-on Railway watcher's
+GET /report. No network and no macOS Keychain access anywhere here — the HTTP
+GET and the Keychain reader are always injected fakes.
+"""
+import json
+
+import pytest
+import requests
+
+import account_monitor as monitor
+from test_account_observation import WALLET
+
+
+URL = "https://scalping-skill-production.up.railway.app"
+NOW = 1_700_000_000_000
+SECRET = "watcher-secret-token-xyz"
+
+WATCHER_REPORT = {"status": "CLEAR", "entry_allowed": True, "read_only": True,
+                   "orders_changed": False, "daily_breach_latched": False,
+                   "reasons": [], "checked_at_ms": NOW - 5_000}
+WATCHER_HALT = {**WATCHER_REPORT, "status": "HALT", "entry_allowed": False}
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, payload=None, malformed=False):
+        self.status_code = status_code
+        self._payload = payload
+        self._malformed = malformed
+
+    def json(self):
+        if self._malformed:
+            raise ValueError("expecting value: line 1 column 1")
+        return self._payload
+
+
+def envelope(produced_at_ms, report=WATCHER_REPORT):
+    return {"produced_at_ms": produced_at_ms, "report": report}
+
+
+def clock(now=NOW):
+    return lambda: now
+
+
+def no_token():
+    return None
+
+
+def fixed_token(value=SECRET):
+    return lambda: value
+
+
+def refusing_keychain():
+    pytest.fail("keychain must not be consulted when SCALP_WATCHER_TOKEN is set")
+
+
+# --------------------------------------------------------------------------
+# Success path
+# --------------------------------------------------------------------------
+
+def test_fresh_report_passes_through_entry_allowed_as_watcher_said():
+    def get(url, headers=None, timeout=None):
+        assert url == URL + "/report"
+        assert headers["Authorization"] == f"Bearer {SECRET}"
+        assert timeout == monitor.WATCHER_REQUEST_TIMEOUT_S
+        return FakeResponse(200, envelope(NOW - 5_000))
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "CLEAR"
+    assert report["entry_allowed"] is True
+    assert report["source"] == "railway"
+    assert report["report_age_s"] == pytest.approx(5.0)
+
+
+def test_watcher_halt_passes_through_as_blocked():
+    def get(url, headers=None, timeout=None):
+        return FakeResponse(200, envelope(NOW - 1_000, WATCHER_HALT))
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "HALT"
+    assert report["entry_allowed"] is False
+
+
+# --------------------------------------------------------------------------
+# Fail-closed: freshness
+# --------------------------------------------------------------------------
+
+def test_stale_report_blocks():
+    def get(url, headers=None, timeout=None):
+        return FakeResponse(200, envelope(NOW - 75_000))
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert not report["entry_allowed"]
+    assert report.get("observation") is None
+    assert "75 s old" in report["reasons"][0]
+    assert "limit 60 s" in report["reasons"][0]
+
+
+def test_future_dated_report_blocks():
+    def get(url, headers=None, timeout=None):
+        return FakeResponse(200, envelope(NOW + 10_000))
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert not report["entry_allowed"]
+    assert "future" in report["reasons"][0]
+
+
+def test_report_within_freshness_window_is_not_blocked():
+    def get(url, headers=None, timeout=None):
+        return FakeResponse(200, envelope(NOW - 59_000))
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "CLEAR"
+    assert report["entry_allowed"] is True
+
+
+# --------------------------------------------------------------------------
+# Fail-closed: transport / HTTP status
+# --------------------------------------------------------------------------
+
+def test_401_gives_refused_token_reason():
+    def get(url, headers=None, timeout=None):
+        return FakeResponse(401)
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert not report["entry_allowed"]
+    assert "refused the token" in report["reasons"][0]
+
+
+def test_503_gives_unavailable():
+    def get(url, headers=None, timeout=None):
+        return FakeResponse(503)
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert not report["entry_allowed"]
+    assert "503" in report["reasons"][0]
+
+
+def test_connection_error_gives_unreachable():
+    def get(url, headers=None, timeout=None):
+        raise requests.exceptions.ConnectionError("refused")
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert not report["entry_allowed"]
+    assert "unreachable" in report["reasons"][0]
+
+
+def test_timeout_also_gives_unreachable():
+    def get(url, headers=None, timeout=None):
+        raise requests.exceptions.Timeout("timed out")
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert "unreachable" in report["reasons"][0]
+
+
+def test_malformed_json_gives_unavailable():
+    def get(url, headers=None, timeout=None):
+        return FakeResponse(200, malformed=True)
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert not report["entry_allowed"]
+
+
+def test_missing_produced_at_ms_gives_unavailable():
+    def get(url, headers=None, timeout=None):
+        return FakeResponse(200, {"report": WATCHER_REPORT})
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert not report["entry_allowed"]
+
+
+def test_missing_report_field_gives_unavailable():
+    def get(url, headers=None, timeout=None):
+        return FakeResponse(200, {"produced_at_ms": NOW})
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert not report["entry_allowed"]
+
+
+# --------------------------------------------------------------------------
+# Fail-closed: missing configuration
+# --------------------------------------------------------------------------
+
+def test_missing_url_gives_config_required(tmp_path):
+    def forbidden(*args, **kwargs):
+        pytest.fail("must not call the watcher with no URL configured")
+    report = monitor.remote_check(tmp_path, env={}, get=forbidden, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "CONFIG_REQUIRED"
+    assert not report["entry_allowed"]
+    assert report.get("observation") is None
+
+
+def test_missing_token_env_unset_keychain_fails_gives_config_required(tmp_path):
+    def forbidden(*args, **kwargs):
+        pytest.fail("must not call the watcher with no token available")
+    report = monitor.remote_check(
+        tmp_path, env={"SCALP_WATCHER_URL": URL}, get=forbidden, keychain=no_token, clock=clock())
+    assert report["status"] == "CONFIG_REQUIRED"
+    assert not report["entry_allowed"]
+
+
+def test_keychain_supplies_token_when_env_unset():
+    def get(url, headers=None, timeout=None):
+        assert headers["Authorization"] == f"Bearer {SECRET}"
+        return FakeResponse(200, envelope(NOW - 1_000))
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL}, get=get, keychain=fixed_token(), clock=clock())
+    assert report["entry_allowed"] is True
+
+
+# --------------------------------------------------------------------------
+# URL resolution: env overrides config, old configs keep working
+# --------------------------------------------------------------------------
+
+def test_env_url_overrides_config(tmp_path):
+    monitor.atomic_json(tmp_path / "config.json", {"wallet": WALLET, "daily_loss_usdc": 100,
+                                                     "watcher_url": "https://config-url.example.com"})
+    seen = {}
+    def get(url, headers=None, timeout=None):
+        seen["url"] = url
+        return FakeResponse(200, envelope(NOW - 1_000))
+    monitor.remote_check(tmp_path, env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+                          get=get, keychain=refusing_keychain, clock=clock())
+    assert seen["url"] == URL + "/report"
+
+
+def test_config_url_used_when_env_unset(tmp_path):
+    monitor.atomic_json(tmp_path / "config.json", {"wallet": WALLET, "daily_loss_usdc": 100,
+                                                     "watcher_url": URL})
+    seen = {}
+    def get(url, headers=None, timeout=None):
+        seen["url"] = url
+        return FakeResponse(200, envelope(NOW - 1_000))
+    report = monitor.remote_check(tmp_path, env={"SCALP_WATCHER_TOKEN": SECRET},
+                                   get=get, keychain=refusing_keychain, clock=clock())
+    assert seen["url"] == URL + "/report"
+    assert report["entry_allowed"] is True
+
+
+def test_old_config_without_watcher_url_keeps_working(tmp_path):
+    # A config saved before this field existed — exactly the CONFIG fixture
+    # used throughout the account_risk/account_monitor tests.
+    monitor.atomic_json(tmp_path / "config.json", {"wallet": WALLET, "daily_loss_usdc": 100})
+    def forbidden(*args, **kwargs):
+        pytest.fail("must not call the watcher with no URL resolvable")
+    report = monitor.remote_check(tmp_path, env={}, get=forbidden, keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "CONFIG_REQUIRED"
+    assert not report["entry_allowed"]
+
+
+def test_corrupt_local_config_does_not_block_env_supplied_url(tmp_path):
+    (tmp_path / "config.json").write_text("not json")
+    def get(url, headers=None, timeout=None):
+        return FakeResponse(200, envelope(NOW - 1_000))
+    report = monitor.remote_check(tmp_path, env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+                                   get=get, keychain=refusing_keychain, clock=clock())
+    assert report["entry_allowed"] is True
+
+
+# --------------------------------------------------------------------------
+# The token must never appear in any output, success or failure
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("get,keychain_fn", [
+    (lambda url, headers=None, timeout=None: FakeResponse(200, envelope(NOW - 1_000)), None),
+    (lambda url, headers=None, timeout=None: FakeResponse(401), None),
+    (lambda url, headers=None, timeout=None: FakeResponse(503), None),
+    (lambda url, headers=None, timeout=None: (_ for _ in ()).throw(requests.exceptions.ConnectionError("x")), None),
+    (lambda url, headers=None, timeout=None: FakeResponse(200, malformed=True), None),
+    (lambda url, headers=None, timeout=None: FakeResponse(200, envelope(NOW - 999_000)), None),
+])
+def test_token_never_appears_in_output(get, keychain_fn):
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    dumped = json.dumps(report)
+    assert SECRET not in dumped
+    assert SECRET not in monitor.render(report)
+
+
+def test_token_never_appears_when_sourced_from_keychain():
+    def get(url, headers=None, timeout=None):
+        return FakeResponse(200, envelope(NOW - 1_000))
+    report = monitor.remote_check(env={"SCALP_WATCHER_URL": URL}, get=get,
+                                   keychain=fixed_token(), clock=clock())
+    assert SECRET not in json.dumps(report)
+    assert SECRET not in monitor.render(report)
+
+
+def test_keychain_reader_never_raises_and_never_leaks(monkeypatch, capsys):
+    class FakeCompleted:
+        returncode = 1
+        stdout = ""
+        stderr = "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain."
+
+    monkeypatch.setattr(monitor.subprocess, "run", lambda *a, **k: FakeCompleted())
+    assert monitor.read_keychain_watcher_token() is None
+    assert capsys.readouterr().out == ""
+
+    def raises(*a, **k):
+        raise OSError("no such command")
+    monkeypatch.setattr(monitor.subprocess, "run", raises)
+    assert monitor.read_keychain_watcher_token() is None
+
+
+def test_keychain_reader_returns_stripped_stdout(monkeypatch):
+    class FakeCompleted:
+        returncode = 0
+        stdout = SECRET + "\n"
+        stderr = ""
+    monkeypatch.setattr(monitor.subprocess, "run", lambda *a, **k: FakeCompleted())
+    assert monitor.read_keychain_watcher_token() == SECRET
+
+
+# --------------------------------------------------------------------------
+# configure --watcher-url validation and old-config compatibility
+# --------------------------------------------------------------------------
+
+def test_configure_accepts_https_watcher_url(tmp_path):
+    code = monitor.main(["--data-dir", str(tmp_path), "configure", "--wallet", WALLET,
+                          "--daily-loss-usdc", "100", "--watcher-url", URL])
+    assert code == 0
+    saved = monitor.read_json(tmp_path / "config.json")
+    assert saved["watcher_url"] == URL
+
+
+def test_configure_rejects_non_https_watcher_url(tmp_path):
+    code = monitor.main(["--data-dir", str(tmp_path), "configure", "--wallet", WALLET,
+                          "--daily-loss-usdc", "100", "--watcher-url", "http://insecure.example.com"])
+    assert code == 2
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_configure_without_watcher_url_still_works(tmp_path):
+    code = monitor.main(["--data-dir", str(tmp_path), "configure", "--wallet", WALLET,
+                          "--daily-loss-usdc", "100"])
+    assert code == 0
+    saved = monitor.read_json(tmp_path / "config.json")
+    assert saved.get("watcher_url") is None
+
+
+def test_validate_watcher_url_rejects_garbage():
+    with pytest.raises(monitor.AccountDataError):
+        monitor.validate_watcher_url("not-a-url")
+    with pytest.raises(monitor.AccountDataError):
+        monitor.validate_watcher_url("ftp://example.com")
+    assert monitor.validate_watcher_url(None) is None
+    assert monitor.validate_watcher_url("https://example.com/") == "https://example.com"
+
+
+# --------------------------------------------------------------------------
+# CLI wiring: remote-check exit codes, never a silent local fallback
+# --------------------------------------------------------------------------
+
+def test_cli_remote_check_exit_zero_on_entry_allowed(monkeypatch, capsys):
+    monkeypatch.setattr(monitor, "remote_check", lambda data_dir: {**WATCHER_REPORT, "source": "railway",
+                                                                     "report_age_s": 1.0})
+    code = monitor.main(["remote-check", "--json"])
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["source"] == "railway"
+
+
+def test_cli_remote_check_exit_three_on_halt(monkeypatch, capsys):
+    monkeypatch.setattr(monitor, "remote_check", lambda data_dir: {**WATCHER_HALT, "source": "railway",
+                                                                     "report_age_s": 1.0})
+    code = monitor.main(["remote-check", "--json"])
+    assert code == 3
+
+
+def test_cli_remote_check_exit_two_on_config_required(monkeypatch, capsys):
+    def fake_remote_check(data_dir):
+        report = monitor.failure_result("watcher URL not configured")
+        report["status"] = "CONFIG_REQUIRED"
+        return report
+    monkeypatch.setattr(monitor, "remote_check", fake_remote_check)
+    code = monitor.main(["remote-check", "--json"])
+    assert code == 2
+
+
+def test_cli_remote_check_never_calls_local_check(monkeypatch, capsys):
+    def forbidden(*args, **kwargs):
+        pytest.fail("remote-check must never fall back to a local check()")
+    monkeypatch.setattr(monitor, "check", forbidden)
+    monkeypatch.setattr(monitor, "remote_check", lambda data_dir: {**WATCHER_REPORT, "source": "railway",
+                                                                     "report_age_s": 1.0})
+    code = monitor.main(["remote-check", "--json"])
+    assert code == 0
