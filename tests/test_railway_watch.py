@@ -1,3 +1,4 @@
+from datetime import datetime
 import io
 import json
 
@@ -481,3 +482,92 @@ def test_unknown_path_is_404():
     handler = rw.make_handler(state, "token")
     response = invoke(handler, b"GET /orders HTTP/1.1\r\nAuthorization: Bearer token\r\n\r\n")
     assert b"404" in status_line(response)
+
+
+# ---------------------------------------------------------------------------
+# Background delivery: the outbox, the pinger, and the daily alive summary
+# ---------------------------------------------------------------------------
+
+def test_outbox_keeps_a_failed_message_and_retries_it_in_order():
+    up = {"ok": False}
+    delivered = []
+
+    def deliver(message):
+        if not up["ok"]:
+            return False
+        delivered.append(message)
+        return True
+
+    box = rw.Outbox(deliver)
+    box.put("ALL CLEAR: HYPE long position stop coverage is unprotected (0/10)")
+    box.put("PROBLEM: HYPE added to a losing long")
+    assert box.drain_once() is False                 # Telegram down: nothing lost
+    assert len(box.pending()) == 2
+    up["ok"] = True
+    assert box.drain_once() is True
+    assert delivered == ["ALL CLEAR: HYPE long position stop coverage is unprotected (0/10)",
+                         "PROBLEM: HYPE added to a losing long"]
+    assert box.pending() == []
+
+
+def test_outbox_treats_a_raising_delivery_as_a_failure():
+    box = rw.Outbox(lambda message: 1 / 0)
+    box.put("x")
+    assert box.drain_once() is False
+    assert box.pending() == ["x"]
+
+
+def test_outbox_drops_the_oldest_message_when_full(caplog):
+    box = rw.Outbox(lambda message: False, max_pending=2)
+    for message in ("a", "b", "c"):
+        box.put(message)
+    assert box.pending() == ["b", "c"]
+    assert "dropped the oldest" in caplog.text
+
+
+def test_background_pinger_keeps_at_most_one_ping_in_flight():
+    import threading
+    release = threading.Event()
+    started = []
+
+    def slow_ping():
+        started.append(1)
+        release.wait(2)
+
+    pinger = rw.BackgroundPinger(slow_ping)
+    pinger()
+    pinger()                                         # previous still running: skipped
+    release.set()
+    for _ in range(100):
+        if pinger._busy.acquire(blocking=False):
+            pinger._busy.release()
+            break
+        import time
+        time.sleep(0.01)
+    assert started == [1]
+
+
+def test_loop_survives_a_report_that_cannot_be_published():
+    reports = iter([{"status": "DATA_UNAVAILABLE", "reasons": ["x"]}] * 2)
+    clocks = iter([MIDNIGHT + i * 30_000 for i in range(10)])
+
+    def broken_publish(now_ms, report):
+        raise ValueError("not serializable")
+
+    pings = []
+    rw.loop(make_watcher(), data_dir="unused", check=lambda _dir: next(reports),
+            send=lambda message: None, ping=lambda: pings.append(1), on_report=broken_publish,
+            clock=lambda: next(clocks), sleep=lambda s: None, iterations=2)
+    assert len(pings) == 2
+
+
+def test_alive_summary_fires_once_at_nine_local_and_not_on_deploy_day():
+    nine_sgt = int(datetime.fromisoformat("2026-09-08T09:00:00+08:00").timestamp() * 1000)
+    w = make_watcher()
+    w.boot(nine_sgt - 86_400_000 + 3_600_000)         # deployed 10:00 the day before
+    report = {"status": "CLEAR", "observation": {"equity_usdc": 5145.07}}
+    assert w.alive_summary(report, nine_sgt - 86_400_000 + 7_200_000) == []   # deploy day
+    assert w.alive_summary(report, nine_sgt - 60_000) == []                   # 08:59
+    assert w.alive_summary(report, nine_sgt) == [
+        "watcher alive — status CLEAR | equity 5,145.07 USDC"]
+    assert w.alive_summary(report, nine_sgt + 30_000) == []                   # once a day

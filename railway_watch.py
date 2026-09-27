@@ -32,6 +32,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +54,8 @@ FAST_INTERVAL_S = 15
 REPEAT_INTERVAL_MS = 30 * 60 * 1000
 FAILURE_THRESHOLD_MS = 5 * 60 * 1000
 ALIVE_HOUR, ALIVE_MINUTE = 9, 0
+OUTBOX_RETRY_S = 60
+OUTBOX_MAX_PENDING = 200
 DEFAULT_TIMEZONE = "Asia/Singapore"
 
 
@@ -237,9 +240,91 @@ class Watcher:
 
 
 # ---------------------------------------------------------------------------
-# Telegram and the dead-man ping — a slow or failing send never blocks or
-# slows the loop; failures are logged without the token or full URL.
+# Telegram and the dead-man ping — both run off the check loop's thread, so
+# a slow or failing send never blocks or slows a check; failures are logged
+# without the token or full URL.
 # ---------------------------------------------------------------------------
+
+class Outbox:
+    """Queue of messages delivered in order by a background thread.
+
+    `put` never blocks. A message that fails to deliver stays at the head of
+    the queue and is retried every `retry_s` seconds — so a failed ALL CLEAR
+    or one-shot underwater alert is not lost. If the queue passes
+    `max_pending` during a long outage, the oldest message is dropped (and
+    logged) so memory stays bounded."""
+
+    def __init__(self, deliver, *, retry_s=OUTBOX_RETRY_S, max_pending=OUTBOX_MAX_PENDING):
+        self._deliver = deliver
+        self._retry_s = retry_s
+        self._max_pending = max_pending
+        self._pending = deque()
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+
+    def put(self, message):
+        with self._lock:
+            self._pending.append(message)
+            if len(self._pending) > self._max_pending:
+                self._pending.popleft()
+                logger.warning("outbox full; dropped the oldest unsent message")
+        self._wake.set()
+
+    def pending(self):
+        with self._lock:
+            return list(self._pending)
+
+    def drain_once(self):
+        """Deliver queued messages in order until one fails or the queue is
+        empty. Returns True if the queue was emptied."""
+        while True:
+            with self._lock:
+                if not self._pending:
+                    return True
+                message = self._pending[0]
+            try:
+                delivered = self._deliver(message)
+            except Exception:
+                logger.exception("outbox delivery raised")
+                delivered = False
+            if not delivered:
+                return False
+            with self._lock:
+                if self._pending and self._pending[0] is message:
+                    self._pending.popleft()
+
+    def run_forever(self):
+        while True:
+            self._wake.wait()
+            self._wake.clear()
+            if not self.drain_once():
+                self._wake.wait(self._retry_s)
+                self._wake.set()
+
+    def start(self):
+        threading.Thread(target=self.run_forever, daemon=True, name="outbox").start()
+
+
+class BackgroundPinger:
+    """Fires the dead-man ping on a background thread, at most one in flight,
+    so a slow health-check host never delays a check."""
+
+    def __init__(self, ping):
+        self._ping = ping
+        self._busy = threading.Lock()
+
+    def __call__(self):
+        if not self._busy.acquire(blocking=False):
+            return  # previous ping still running; the next pass pings again
+        def work():
+            try:
+                self._ping()
+            except Exception:
+                logger.exception("healthcheck ping failed")
+            finally:
+                self._busy.release()
+        threading.Thread(target=work, daemon=True, name="ping").start()
+
 
 def send_telegram(token, chat_id, text, *, timeout=TELEGRAM_TIMEOUT_S, post=requests.post):
     try:
@@ -383,7 +468,10 @@ def loop(watcher, *, data_dir, check, send, ping, on_report=None,
             report = {"status": "DATA_UNAVAILABLE", "reasons": ["unexpected watcher error"]}
             produced = False
         if on_report is not None:
-            on_report(now_ms, report)
+            try:
+                on_report(now_ms, report)
+            except Exception:
+                logger.exception("could not publish the latest report")
         for message in watcher.step(report, now_ms):
             _safe_send(send, message)
         for message in watcher.alive_summary(report, now_ms):
@@ -420,11 +508,14 @@ def run():
     report_token = os.environ.get("REPORT_TOKEN")
     port = int(os.environ.get("PORT", "8080"))
 
-    def send(text):
+    def deliver(text):
         if bot_token and chat_id:
-            send_telegram(bot_token, chat_id, text)
-        else:
-            logger.warning("Telegram not configured; message suppressed: %s", text)
+            return send_telegram(bot_token, chat_id, text)
+        logger.warning("Telegram not configured; message suppressed: %s", text)
+        return True
+
+    outbox = Outbox(deliver)
+    outbox.start()
 
     state = ReportState()
     server = ThreadingHTTPServer(("0.0.0.0", port), make_handler(state, report_token))
@@ -435,8 +526,9 @@ def run():
 
     watcher = Watcher(timezone=timezone_name)
     try:
-        loop(watcher, data_dir=data_dir, check=account_monitor.check, send=send,
-             ping=lambda: ping_healthcheck(healthcheck_url), on_report=state.update)
+        loop(watcher, data_dir=data_dir, check=account_monitor.check, send=outbox.put,
+             ping=BackgroundPinger(lambda: ping_healthcheck(healthcheck_url)),
+             on_report=state.update)
     finally:
         server.shutdown()
 
