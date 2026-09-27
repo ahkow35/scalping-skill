@@ -571,3 +571,36 @@ def test_alive_summary_fires_once_at_nine_local_and_not_on_deploy_day():
     assert w.alive_summary(report, nine_sgt) == [
         "watcher alive — status CLEAR | equity 5,145.07 USDC"]
     assert w.alive_summary(report, nine_sgt + 30_000) == []                   # once a day
+
+
+# ---------------------------------------------------------------------------
+# Cross-review round 1: no all-clear without evidence
+# ---------------------------------------------------------------------------
+
+def test_unknown_open_risk_does_not_clear_an_active_excess_risk_alert():
+    w = make_watcher()
+    _, state = start_day()
+    report, _ = observe(snapshot(now=MIDNIGHT + 1000, equity=970, upnl=-30, size=10,
+                                 orders=[stop(trigger=60)]), state)
+    w.step(report, MIDNIGHT + 1000)
+    assert "EXCESS_OPEN_RISK" in w.active
+    # Another position loses its stop: the monitor reports risk as unknown.
+    unknown = {**report, "open_trigger_distance_risk_usdc": None}
+    messages = w.step(unknown, MIDNIGHT + 2000)
+    assert not any(m.startswith("ALL CLEAR") and "trigger-distance" in m for m in messages)
+    assert "EXCESS_OPEN_RISK" in w.active
+
+
+def test_unsupported_read_does_not_announce_monitor_recovery():
+    from account_risk import failure_result
+    w = make_watcher()
+    for minutes in range(6):
+        w.step(failure_result("offline"), MIDNIGHT + minutes * 60_000)
+    assert "MONITOR_FAILURE" in w.active
+    unsupported, _ = observe(snapshot(now=MIDNIGHT + 6 * 60_000, mode="portfolioMargin"))
+    messages = w.step(unsupported, MIDNIGHT + 6 * 60_000)
+    assert not any(m.startswith("ALL CLEAR") for m in messages)
+    assert "MONITOR_FAILURE" in w.active
+    recovered, _ = start_day()
+    messages = w.step(recovered, MIDNIGHT + 7 * 60_000)
+    assert any(m.startswith("ALL CLEAR") and "not produced a reading" in m for m in messages)

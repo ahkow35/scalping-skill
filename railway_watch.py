@@ -188,7 +188,10 @@ class Watcher:
                            now_ms, messages)
         else:
             self.first_failure_ms = None
-            self._clear("MONITOR_FAILURE", now_ms, messages)
+            if kind == "evaluated":
+                # Only a usable reading ends a monitor failure; a config or
+                # unsupported read still leaves the account unmonitored.
+                self._clear("MONITOR_FAILURE", now_ms, messages)
 
         if kind == "config":
             reasons = report.get("reasons") or []
@@ -201,9 +204,15 @@ class Watcher:
             self._sync_group("STOP:", stop_problems(report), now_ms, messages)
             self._sync_group("OVERSIZED:", oversized_problems(report), now_ms, messages)
             current = account_problems(report)
+            risk_known = (report.get("open_trigger_distance_risk_usdc") is not None
+                          and report.get("remaining_daily_budget_usdc") is not None)
             for pid in ("HALT", "EXCESS_OPEN_RISK"):
                 if pid in current:
                     self._note(pid, current[pid], now_ms, messages)
+                elif pid == "EXCESS_OPEN_RISK" and not risk_known:
+                    # Unknown risk (e.g. another position lost its stop) is
+                    # not evidence the excess ended; keep any active alert.
+                    continue
                 else:
                     self._clear(pid, now_ms, messages)
             for key, message in underwater_events(report).items():
