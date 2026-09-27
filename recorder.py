@@ -153,19 +153,48 @@ def _gzip_file_atomic(path):
     If the day is already archived (the wall clock stepped back across UTC
     midnight and the day was reopened), the old archive's bytes are kept and
     the new rows are added as a second gzip member — gzip readers decode
-    concatenated members as one stream, so nothing is ever overwritten."""
+    concatenated members as one stream, so nothing is ever overwritten.
+
+    A member always ends with a newline (a crash fragment is terminated), so
+    a later member can never glue its first record onto a partial line. If a
+    crash hit between committing the archive and removing the plain file, the
+    archive already ends with exactly this file's bytes; that case is
+    detected and the plain file is just removed, not appended twice."""
     gz_path = path + ".gz"
     tmp_path = gz_path + ".tmp"
+    member_tail = b"\n" if _ends_mid_line(path) else b""
+    if os.path.exists(gz_path) and _gz_ends_with(gz_path, path, member_tail):
+        os.remove(path)
+        return
     with open(tmp_path, "wb") as raw:
         if os.path.exists(gz_path):
             with open(gz_path, "rb") as old:
                 shutil.copyfileobj(old, raw)
         with open(path, "rb") as src, gzip.GzipFile(fileobj=raw, mode="wb") as dst:
             shutil.copyfileobj(src, dst)
+            dst.write(member_tail)
         raw.flush()
         os.fsync(raw.fileno())
     os.replace(tmp_path, gz_path)
     os.remove(path)
+
+
+def _gz_ends_with(gz_path, path, member_tail):
+    """True if the decompressed archive ends with `path`'s bytes (+ the
+    newline a fragment would have been given) — i.e. this plain file was
+    already committed by an interrupted rotation. Only runs when both files
+    exist, which is rare, so reading the archive through is acceptable.
+    Records carry millisecond receive stamps, so an unrelated file matching
+    the archive's tail byte-for-byte doesn't happen in practice."""
+    with open(path, "rb") as f:
+        want = f.read() + member_tail
+    if not want:
+        return True
+    tail = b""
+    with gzip.open(gz_path, "rb") as g:
+        for chunk in iter(lambda: g.read(1 << 20), b""):
+            tail = (tail + chunk)[-len(want):]
+    return tail == want
 
 
 def _ends_mid_line(path):
@@ -334,6 +363,7 @@ class FlowRecorder:
         # it untouched, so an outage is counted once however many retries it
         # takes.
         self._down_since_ms = None
+        self._last_outage_end_ms = None
         self._connected = False
         self._stop = None             # set in run() (needs a live loop)
 
@@ -394,8 +424,11 @@ class FlowRecorder:
         message received. No-op if an outage is already open, so failed
         retries during a long outage don't add reconnects or gap time."""
         if self._down_since_ms is None:
-            self._down_since_ms = (self._last_recv_ms if self._last_recv_ms is not None
-                                   else self.clock())
+            # Start from the later of the last message and the last outage's
+            # end: a reconnect that drops again before any data arrives must
+            # not reopen time already counted.
+            marks = [t for t in (self._last_recv_ms, self._last_outage_end_ms) if t is not None]
+            self._down_since_ms = max(marks) if marks else self.clock()
 
     def end_outage(self, end_ms, reconnected=True):
         """Close the open outage (if any): write GAP records into every file,
@@ -408,6 +441,7 @@ class FlowRecorder:
         if reconnected:
             self._reconnect_ts.append(end_ms)
         self._down_since_ms = None
+        self._last_outage_end_ms = end_ms
 
     def _prune_old_events(self, now_ms_):
         # Keep a 48h buffer (double the 24h window status reports) so a

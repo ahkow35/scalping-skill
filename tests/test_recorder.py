@@ -677,3 +677,50 @@ def test_gap_seconds_clipped_to_window_and_includes_current_outage(tmp_path):
     clock["t"] = MIDNIGHT + 25 * 3600_000       # 25h outage ends
     fr.end_outage(clock["t"])
     assert fr.status()["gap_seconds_24h"] == 24 * 3600.0
+
+
+# ── cross-review round 2 (Codex) regressions ────────────────────────────────
+
+def test_archived_partial_line_cannot_swallow_a_later_member_gap(tmp_path):
+    d = rec.day_str_utc(MIDNIGHT - 1)
+    path = rec.file_path(str(tmp_path), "HYPE", "bbo", d)
+    with open(path, "w") as f:
+        f.write(json.dumps({"record_type": "bbo", "coin": "HYPE"}) + "\n")
+        f.write('{"record_type": "bbo", "co')       # crash fragment
+    rec._gzip_file_atomic(path)                      # archived as-is at restart
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: MIDNIGHT - 1)
+    fr.emit_gaps(reconnect_ms=MIDNIGHT - 1)          # clock back in day D
+    fr.files.close_all()
+    rec._gzip_file_atomic(path)                      # re-archived: 2nd member
+    assert [r["record_type"] for r in rec.iter_jsonl_records(path)] == ["bbo", "gap"]
+
+
+def test_rotation_interrupted_before_removing_plain_does_not_duplicate(tmp_path):
+    path = str(tmp_path / "HYPE_bbo_2026-01-01.jsonl")
+    with open(path, "w") as f:
+        f.write(json.dumps({"record_type": "bbo", "recv_ts_ms": 1}) + "\n")
+    real_remove = os.remove
+    os.remove = lambda p: None                       # crash after os.replace
+    try:
+        rec._gzip_file_atomic(path)
+    finally:
+        os.remove = real_remove
+    assert os.path.exists(path) and os.path.exists(path + ".gz")
+    rec._gzip_file_atomic(path)                      # startup recovery pass
+    assert not os.path.exists(path)
+    assert len(list(rec.iter_jsonl_records(path))) == 1
+
+
+def test_reconnect_that_drops_before_data_does_not_recount_the_gap(tmp_path):
+    clock = {"t": MIDNIGHT}
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: clock["t"])
+    fr.handle_snapshot("bbo", "HYPE", {"coin": "HYPE", "time": MIDNIGHT})
+    fr.mark_disconnected()
+    clock["t"] = MIDNIGHT + 10_000
+    fr.end_outage(clock["t"])                        # handshake ok, no data yet
+    fr.mark_disconnected()                           # drops again
+    clock["t"] = MIDNIGHT + 20_000
+    fr.end_outage(clock["t"])
+    st = fr.status()
+    assert st["gap_seconds_24h"] == 20.0
+    assert st["reconnects_24h"] == 2
