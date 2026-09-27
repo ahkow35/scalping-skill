@@ -1,5 +1,48 @@
 # Changelog — scalp skill
 
+## 2026-09-28 — always-on Railway watcher for the account monitor (PR A)
+Added `railway_watch.py`, a small always-on loop that calls
+`account_monitor.check()` directly (never the `watch` subcommand, never
+parsed text) and sends Telegram alerts, intended to run as a Railway
+service. It is strictly read-only: it cannot place, cancel or close an
+order, and adds no exchange read beyond the existing `account_api.READ_TYPES`.
+Polls every 30s normally, 15s from 23:58–00:02 configured-timezone time.
+Derives the current set of problems from structured fields only (per-coin
+stop coverage, the daily loss latch, open trigger-distance risk vs. the
+remaining budget, oversized positions, underwater adds, config/unsupported
+account modes, and the monitor's own read failures), alerts on appearance,
+repeats every 30 minutes while active, and sends an "all clear" only from a
+fully evaluated report — a failed report never clears a problem, since it
+carries no positions. Underwater adds are one-shot events, alerting once per
+occurrence (keyed by coin + fill time). Monitor failure needs 5 minutes of
+consecutive failed checks before alerting (a single blip never fires).
+`account_risk.evaluate()`'s report gained structured `oversized_positions`
+and `underwater_adds` fields alongside the existing reason text (built from
+the same structured items via the new `underwater_add_reason`, so the text
+is unchanged); existing tests pass unchanged. A stdlib-only HTTP server
+serves `GET /report` (the latest check report, Bearer-token protected,
+`hmac.compare_digest`, 401 on missing/wrong token, 503 when the token is
+unset — never open) and `GET /health` for Railway's own health check.
+Config is applied on boot from `MONITOR_WALLET`, `MONITOR_DAILY_LOSS_USDC`,
+`MONITOR_TIMEZONE`, `MONITOR_MAX_POSITION_NOTIONAL_USDC` and `DATA_DIR`,
+exiting non-zero with a clear message if wallet or loss limit is missing.
+`Dockerfile` (python:3.12-slim + tzdata) and `railway.json` (Dockerfile
+builder, `python3 railway_watch.py`, restart on failure, one replica) added
+for the Railway deploy; the recorder service is a later PR, not this one.
+Tests (`tests/test_railway_watch.py`, no network): classification of
+evaluated/config/failed reports including the accounting-mismatch trap
+(a failed report can still carry a stale `observation`); appear/repeat/clear
+for stop coverage, oversized positions, the daily halt latch and excess
+open risk; a failed report never producing an all-clear; the 5-minute
+failure rule including a single blip and an intervening success resetting
+it; config/unsupported problems not clearing on a failed read; the
+once-per-day underwater alert; the midnight fast-poll window boundaries;
+Telegram/healthcheck failures logged without the token or URL and never
+raising; the loop continuing after a send raises; config-from-env; and
+`/report` auth (no token, wrong token, right token, unset `REPORT_TOKEN`)
+exercised via a fake connection object, since this sandbox refuses real
+socket binds. ACCOUNT-MONITOR.md gained a Railway watcher section.
+
 ## 2026-09-27 — account monitor: oversized-position and add-while-underwater warnings
 Added two read-only WARNING reasons to `account_monitor.py`, motivated by a
 replay of the owner's real fills showing losses came from oversized positions

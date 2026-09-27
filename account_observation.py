@@ -272,9 +272,20 @@ def accounting_events(snapshot, since_ms):
             "fill_count": count}
 
 
+def underwater_add_reason(item):
+    """Build the existing human-readable reason text from a structured item."""
+    approx = (" (approximate: compared to current entryPx, not a reconstructed same-day entry)"
+              if item["approximate"] else "")
+    return (f"{item['coin']} added to a losing {item['direction']} at {item['price']:g} "
+            f"({item['fill_time_iso']}); entry was {item['entry']:g}{approx}")
+
+
 def underwater_adds(snapshot, since_ms, positions):
-    """Flag today's opening fills that added to an existing same-direction
-    position at a price worse than its running entry at that moment.
+    """Return structured items for today's opening fills that added to an
+    existing same-direction position at a price worse than its running entry
+    at that moment. Each item carries `coin`, `fill_time_ms`, `price`,
+    `entry`, `direction` and `approximate` (plus `fill_time_iso` for display);
+    `underwater_add_reason` renders the existing human-readable warning text.
 
     The running average entry is reconstructed per coin from the day's own
     fills, using each fill's own `startPosition` (the exchange's ground truth
@@ -298,7 +309,7 @@ def underwater_adds(snapshot, since_ms, positions):
     """
     entry_by_coin = {position["coin"]: position["entry"] for position in positions}
     running: dict[str, dict] = {}
-    warnings = []
+    items = []
     fills = sorted(_events(snapshot, "fills", since_ms), key=lambda row: row.get("time", 0))
     for fill in fills:
         coin, side = fill.get("coin"), fill.get("side")
@@ -326,10 +337,11 @@ def underwater_adds(snapshot, since_ms, positions):
             worse = (sign > 0 and price < state["entry"]) or (sign < 0 and price > state["entry"])
             if worse:
                 iso = datetime.fromtimestamp(time_ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                direction = "long" if sign > 0 else "short"
-                approx = " (approximate: compared to current entryPx, not a reconstructed same-day entry)" if state["approx"] else ""
-                warnings.append(f"{coin} added to a losing {direction} at {price:g} ({iso}); "
-                                 f"entry was {state['entry']:g}{approx}")
+                items.append({
+                    "coin": coin, "direction": "long" if sign > 0 else "short",
+                    "fill_time_ms": int(time_ms), "fill_time_iso": iso,
+                    "price": price, "entry": state["entry"], "approximate": state["approx"],
+                })
         if not is_add and size > abs(start):
             # reduce-and-flip: a new position at this fill's price, exact
             # even if the earlier entry was only approximate
@@ -337,4 +349,4 @@ def underwater_adds(snapshot, since_ms, positions):
         elif is_add and not state["approx"]:
             state["entry"] = (state["entry"] * abs(start) + price * size) / (abs(start) + size)
         # a pure reduce (size <= abs(start)) leaves the average entry unchanged
-    return warnings
+    return items

@@ -44,4 +44,21 @@ Two additional checks add reasons only — they never change `status` or `entry_
 
 Both are read-only warnings surfaced only in `reasons`; a later, separate decision may choose to make either blocking.
 
+## Railway watcher
+
+`railway_watch.py` runs this monitor as an always-on Railway service. It calls `account_monitor.check()` directly in a loop — every 30 seconds normally, every 15 seconds from 23:58 to 00:02 configured-timezone time so the watcher's own day baseline lands as a near-reset observation — and sends a Telegram alert when a problem appears (unprotected/partial stop coverage, the daily loss latch, open trigger-distance risk exceeding the remaining budget, an oversized position, an add to a losing position, or the monitor itself failing to read the account for over 5 minutes), repeating every 30 minutes while it lasts, with an "all clear" when a fully successful check shows it gone. It is read-only in the same sense as the rest of this file: it cannot place, cancel or close an order, and adds no exchange read beyond `account_api.READ_TYPES`.
+
+Environment variables it reads on boot (names only — values are Railway service secrets, never pasted into chat or committed):
+
+- `MONITOR_WALLET`, `MONITOR_DAILY_LOSS_USDC` — required; the watcher exits with a clear error and a non-zero status if either is missing.
+- `MONITOR_TIMEZONE` — optional, defaults to `Asia/Singapore`.
+- `MONITOR_MAX_POSITION_NOTIONAL_USDC` — optional oversized-position cap.
+- `DATA_DIR` — the Railway volume path for persistent state; without it the state lives next to the script and does not survive a redeploy.
+- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — the alert channel.
+- `HEALTHCHECK_PING_URL` — optional dead-man check, pinged after every loop pass that produced a report (good or failed).
+- `REPORT_TOKEN` — required to open `GET /report`; if unset that endpoint always returns 503 rather than serving without auth.
+- `PORT` — the port the small HTTP server listens on (`GET /report`, token-protected; `GET /health`, unauthenticated, for Railway's own health check; nothing else is served).
+
+**Merging to `main` redeploys the watcher** once Railway follows the main branch — a normal `git push` to a feature branch does not. **Never merge or deploy within 10 minutes of midnight Singapore time**: a restart across the boundary leaves the watcher's own day baseline partial for that day. `/report` is token-protected (`hmac.compare_digest` against `REPORT_TOKEN`, sent as `Authorization: Bearer <token>`); it is on Railway's public domain, so treat the token like any other credential.
+
 Source contracts: [Hyperliquid information endpoints](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint), [account abstraction modes](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes), and [take-profit/stop-loss orders](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/take-profit-and-stop-loss-orders-tp-sl).
