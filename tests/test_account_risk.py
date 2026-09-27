@@ -3,7 +3,7 @@ from datetime import datetime
 import pytest
 
 from account_api import AccountDataError
-from account_risk import evaluate, failure_result, validate_config
+from account_risk import evaluate, failure_result, history_start, validate_config
 from test_account_observation import WALLET, snapshot, spot, stop
 
 
@@ -215,6 +215,31 @@ def test_spot_fills_do_not_trigger_a_perp_underwater_warning():
     ]
     report, _ = observe(data, state)
     assert not any("added to a losing" in reason for reason in report["reasons"])
+
+
+def test_flip_after_a_pre_window_position_starts_an_exact_entry():
+    _, state = start_day()
+    data = snapshot(now=MIDNIGHT + 5000, equity=1000, upnl=0, size=0)
+    data["fills"] = [
+        fill(701, MIDNIGHT + 1000, "A", 20, 100, 10),     # long 10 from before today -> short 10 @ 100
+        fill(702, MIDNIGHT + 2000, "A", 10, 110, -10),    # add to the short @ 110 while under water
+        fill(703, MIDNIGHT + 3000, "B", 20, 105, -20),    # close flat
+    ]
+    report, _ = observe(data, state)
+    assert any("added to a losing short at 110" in reason and "approximate" not in reason
+               for reason in report["reasons"])
+
+
+def test_midday_first_check_still_sees_the_days_earlier_underwater_add():
+    noon = MIDNIGHT + 12 * 3_600_000
+    data = snapshot(now=noon, equity=900, upnl=-100, size=20, orders=[stop(trigger=80)])
+    data["fills"] = [fill(801, MIDNIGHT + 3_600_000, "B", 10, 110, 0),
+                     fill(802, MIDNIGHT + 7_200_000, "B", 10, 90, 10)]
+    report, state = observe(data)
+    assert report["daily"]["baseline_quality"] == "partial_day"
+    assert any("added to a losing long at 90" in reason for reason in report["reasons"])
+    # the next check fetches from the risk day's start, not the noon baseline
+    assert history_start({**CONFIG, "timezone": "Asia/Singapore"}, state, noon + 30_000) == state["day"]["start_ms"] < noon
 
 
 def test_oversized_and_underwater_add_warnings_do_not_change_status_or_entry_allowed():

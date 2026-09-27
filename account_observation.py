@@ -285,7 +285,7 @@ def underwater_adds(snapshot, since_ms, positions):
     a same-day close-then-reopen is never compared against the earlier,
     now-irrelevant entry. A reduce leaves the average entry unchanged; a
     reduce that exceeds the prior size (a flip) restarts it at this fill's
-    price. If the fetched fills never show a coin flat — the position was
+    price, and ends any approximation below. If the fetched fills never show a coin flat — the position was
     already open before the fetched window — the pre-window entry price is
     unknown, so every add on that coin is instead compared against the
     position's CURRENT `entryPx` from the live observation (or skipped if the
@@ -330,11 +330,11 @@ def underwater_adds(snapshot, since_ms, positions):
                 approx = " (approximate: compared to current entryPx, not a reconstructed same-day entry)" if state["approx"] else ""
                 warnings.append(f"{coin} added to a losing {direction} at {price:g} ({iso}); "
                                  f"entry was {state['entry']:g}{approx}")
-        if state["approx"]:
-            continue
-        if is_add:
+        if not is_add and size > abs(start):
+            # reduce-and-flip: a new position at this fill's price, exact
+            # even if the earlier entry was only approximate
+            running[coin] = {"entry": price, "approx": False}
+        elif is_add and not state["approx"]:
             state["entry"] = (state["entry"] * abs(start) + price * size) / (abs(start) + size)
-        elif size > abs(start):
-            state["entry"] = price  # reduce-and-flip: a new position at this fill's price
         # a pure reduce (size <= abs(start)) leaves the average entry unchanged
     return warnings

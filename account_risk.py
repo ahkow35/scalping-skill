@@ -46,7 +46,10 @@ def history_start(config, state, now_ms):
     validate_state(state)
     key, start, _ = day_bounds(now_ms, config["timezone"])
     if state and state.get("day", {}).get("key") == key:
-        return state["day"]["baseline_at_ms"]
+        # From the risk day's start, not just the baseline: a mid-day baseline
+        # must not hide the day's earlier fills from the underwater-add check.
+        # Accounting still filters to the baseline itself.
+        return min(state["day"]["start_ms"], state["day"]["baseline_at_ms"])
     if state and state.get("last_observation"):
         return min(start, state["last_observation"]["asof_ms"])
     return start
@@ -186,7 +189,7 @@ def evaluate(snapshot, config, state=None, *, now_ms, max_age_ms=90_000, reset_g
             if notional > cap:
                 report["reasons"].append(
                     f"{position['coin']} position notional {notional:,.2f} USDC exceeds size cap {cap:,.2f} USDC")
-    report["reasons"].extend(underwater_adds(snapshot, day["baseline_at_ms"], observation["positions"]))
+    report["reasons"].extend(underwater_adds(snapshot, day["start_ms"], observation["positions"]))
     report["entry_allowed"] = report["status"] == "CLEAR"
     report["reasons"].append("read-only observation; does not block manual orders or guarantee stop fills")
     candidate["last_observation"] = {key: observation[key] for key in (
