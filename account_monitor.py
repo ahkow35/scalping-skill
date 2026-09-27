@@ -5,10 +5,10 @@ import contextlib
 import fcntl
 import json
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
