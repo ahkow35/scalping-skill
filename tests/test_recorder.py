@@ -578,3 +578,102 @@ def test_verify_sample_pct_against_real_fetch_candles_shape(tmp_path, monkeypatc
     assert result["recorded_trades"] == 4
     assert result["candle_n_sum"] == 400  # only recoverable if fetch_candles kept 'n'
     assert result["sample_pct"] == 1.0
+
+
+# ── cross-review round 1 (Codex) regressions ────────────────────────────────
+
+def _trade(tid, t):
+    return {"coin": "HYPE", "tid": tid, "time": t, "side": "B", "px": "1", "sz": "1",
+            "users": ["a", "b"]}
+
+
+def test_clock_stepping_back_into_archived_day_never_overwrites_it(tmp_path):
+    clock = {"t": MIDNIGHT - 2000}
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: clock["t"])
+    fr.handle_trade("HYPE", _trade("orig", clock["t"]))
+    clock["t"] = MIDNIGHT + 1000          # roll: day D archived to .gz
+    fr.handle_trade("HYPE", _trade("next1", clock["t"]))
+    clock["t"] = MIDNIGHT - 1000          # clock steps back into day D
+    fr.handle_trade("HYPE", _trade("late", clock["t"]))
+    clock["t"] = MIDNIGHT + 3000          # roll again: D re-archived
+    fr.handle_trade("HYPE", _trade("next2", clock["t"]))
+    fr.files.close_all()
+    day_d = rec.file_path(str(tmp_path), "HYPE", "trades", rec.day_str_utc(MIDNIGHT - 1))
+    assert not os.path.exists(day_d)
+    assert [r["data"]["tid"] for r in rec.iter_jsonl_records(day_d)] == ["orig", "late"]
+
+
+def test_restart_after_partial_line_keeps_the_gap_record(tmp_path):
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: MIDNIGHT)
+    fr.handle_snapshot("bbo", "HYPE", {"coin": "HYPE", "time": MIDNIGHT})
+    fr.files.close_all()
+    path = rec.file_path(str(tmp_path), "HYPE", "bbo", rec.day_str_utc(MIDNIGHT))
+    with open(path, "a") as f:
+        f.write('{"record_type": "bbo", "coin": "HY')   # crash mid-write
+    fr2 = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: MIDNIGHT + 5000)
+    fr2.emit_gaps()                                     # restart marker
+    fr2.files.close_all()
+    types = [r["record_type"] for r in rec.iter_jsonl_records(path)]
+    assert types == ["bbo", "gap"]
+
+
+def _five_trades(tmp_path, start):
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: start)
+    for i in range(5):
+        fr.handle_trade("HYPE", _trade(f"t{i}", start + i * 60_000))
+    fr.files.close_all()
+
+
+def test_verify_reports_unknown_when_a_candle_count_is_missing(tmp_path, monkeypatch):
+    import fetch_market as fm
+    _five_trades(tmp_path, MIDNIGHT)
+    monkeypatch.setattr(fm, "fetch_candles", lambda coin, iv, s, e: [
+        {"t_ms": MIDNIGHT + i * 60_000, "n": (None if i == 1 else 1)} for i in range(5)])
+    result = rec.verify_sample_pct(str(tmp_path), "HYPE", window_min=5, now=MIDNIGHT + 5 * 60_000)
+    assert result["sample_pct"] is None
+    assert "1 of 4 minutes" in result["note"]
+
+
+def test_verify_reports_unknown_when_a_candle_is_absent(tmp_path, monkeypatch):
+    import fetch_market as fm
+    _five_trades(tmp_path, MIDNIGHT)
+    monkeypatch.setattr(fm, "fetch_candles", lambda coin, iv, s, e: [
+        {"t_ms": MIDNIGHT + i * 60_000, "n": 1} for i in (0, 2, 3)])
+    result = rec.verify_sample_pct(str(tmp_path), "HYPE", window_min=5, now=MIDNIGHT + 5 * 60_000)
+    assert result["sample_pct"] is None
+
+
+def test_verify_reads_every_day_of_a_multi_day_window(tmp_path, monkeypatch):
+    import fetch_market as fm
+    start = MIDNIGHT + DAY_MS - 60_000          # 1 min before the middle day
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: start)
+    for i in range(4):                          # trades land on the middle day
+        fr.handle_trade("HYPE", _trade(f"m{i}", MIDNIGHT + DAY_MS + i * 60_000))
+    fr.files.close_all()
+    # Records are filed by recv day; put them on the middle day explicitly.
+    mid = rec.day_str_utc(MIDNIGHT + DAY_MS)
+    src = rec.file_path(str(tmp_path), "HYPE", "trades", rec.day_str_utc(start))
+    rows = list(rec.iter_jsonl_records(src))
+    for p in (src, src + ".gz"):
+        if os.path.exists(p):
+            os.remove(p)
+    with open(rec.file_path(str(tmp_path), "HYPE", "trades", mid), "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    monkeypatch.setattr(fm, "fetch_candles", lambda coin, iv, s, e: [
+        {"t_ms": t, "n": 1} for t in range(s, e, 60_000)])
+    now = MIDNIGHT + 2 * DAY_MS + 60_000        # window spans days 0, 1, 2
+    result = rec.verify_sample_pct(str(tmp_path), "HYPE", window_min=48 * 60, now=now)
+    assert result["recorded_trades"] == 3       # whole minutes between first and last
+    assert result["sample_pct"] == 100.0
+
+
+def test_gap_seconds_clipped_to_window_and_includes_current_outage(tmp_path):
+    clock = {"t": MIDNIGHT}
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: clock["t"])
+    fr.handle_snapshot("bbo", "HYPE", {"coin": "HYPE", "time": MIDNIGHT})
+    fr.mark_disconnected()
+    clock["t"] += 3600_000                      # ongoing 1h outage
+    assert fr.status()["gap_seconds_24h"] == 3600.0
+    clock["t"] = MIDNIGHT + 25 * 3600_000       # 25h outage ends
+    fr.end_outage(clock["t"])
+    assert fr.status()["gap_seconds_24h"] == 24 * 3600.0

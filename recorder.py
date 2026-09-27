@@ -148,15 +148,35 @@ def _gzip_file_atomic(path):
     """Compress `path` to `path + '.gz'` via a temp file, fsync it, then
     rename into place and remove the plain file — only after the `.gz` is
     fully written and flushed to disk, so a crash mid-compress can never
-    leave a truncated `.gz` or lose the plain file."""
+    leave a truncated `.gz` or lose the plain file.
+
+    If the day is already archived (the wall clock stepped back across UTC
+    midnight and the day was reopened), the old archive's bytes are kept and
+    the new rows are added as a second gzip member — gzip readers decode
+    concatenated members as one stream, so nothing is ever overwritten."""
     gz_path = path + ".gz"
     tmp_path = gz_path + ".tmp"
-    with open(path, "rb") as src, gzip.open(tmp_path, "wb") as dst:
-        shutil.copyfileobj(src, dst)
-        dst.flush()
-        os.fsync(dst.fileno())
+    with open(tmp_path, "wb") as raw:
+        if os.path.exists(gz_path):
+            with open(gz_path, "rb") as old:
+                shutil.copyfileobj(old, raw)
+        with open(path, "rb") as src, gzip.GzipFile(fileobj=raw, mode="wb") as dst:
+            shutil.copyfileobj(src, dst)
+        raw.flush()
+        os.fsync(raw.fileno())
     os.replace(tmp_path, gz_path)
     os.remove(path)
+
+
+def _ends_mid_line(path):
+    """True if `path` is non-empty and its last byte isn't a newline — a
+    crash mid-write left a partial record there."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        if f.tell() == 0:
+            return False
+        f.seek(-1, os.SEEK_END)
+        return f.read(1) != b"\n"
 
 
 def _day_from_jsonl_path(path):
@@ -170,28 +190,23 @@ def _day_from_jsonl_path(path):
 
 
 def iter_jsonl_records(path):
-    """Yield decoded JSON records from `path`, transparently reading
-    `path + '.gz'` when the plain file doesn't exist — a rotated (finished)
-    day is stored compressed, today's file stays plain. Shared by
-    verify_sample_pct and any future reader; malformed lines are skipped."""
-    gz_path = path + ".gz"
-    if os.path.exists(path):
-        opener, mode = open, "r"
-        target = path
-    elif os.path.exists(gz_path):
-        opener, mode = gzip.open, "rt"
-        target = gz_path
-    else:
-        return
-    with opener(target, mode) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                continue
+    """Yield decoded JSON records for one day: first `path + '.gz'` (a
+    rotated, finished day), then the plain `path` (today's file). Both can
+    exist briefly if the clock stepped back into an archived day, so both are
+    read. Shared by verify_sample_pct and any future reader; malformed lines
+    are skipped."""
+    for opener, mode, target in ((gzip.open, "rt", path + ".gz"), (open, "r", path)):
+        if not os.path.exists(target):
+            continue
+        with opener(target, mode) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
 
 # ── append-only per (coin, channel, day) file handles with rotation ────────
@@ -227,7 +242,13 @@ class FlowFileSet:
                 cur[1].close()
                 _gzip_file_atomic(old_path)
             path = file_path(self.out_dir, coin, channel, day_str)
+            partial_tail = os.path.exists(path) and _ends_mid_line(path)
             f = open(path, "a")
+            if partial_tail:
+                # Terminate the crash fragment so the next record (usually the
+                # restart GAP) lands on its own line instead of being glued
+                # onto a malformed one and skipped by readers.
+                f.write("\n")
             self._handles[key] = (day_str, f)
         f = self._handles[key][1]
         f.write(json.dumps(record) + "\n")
@@ -307,7 +328,7 @@ class FlowRecorder:
         self._last_recv_ms = None
         self._last_recv_per_stream = {}  # "COIN:channel" -> ms
         self._reconnect_ts = []       # ms timestamps of reconnects (not cold start)
-        self._gap_events = []         # (ms, gap_seconds) — one per outage, wall-clock
+        self._gap_events = []         # (start_ms, end_ms) — one per closed outage
         # Local recv time the current outage began (last message before the
         # drop); None while connected. Failed retries inside one outage leave
         # it untouched, so an outage is counted once however many retries it
@@ -383,7 +404,7 @@ class FlowRecorder:
         if self._down_since_ms is None:
             return
         self.emit_gaps(reconnect_ms=end_ms)
-        self._gap_events.append((end_ms, max(0.0, (end_ms - self._down_since_ms) / 1000)))
+        self._gap_events.append((self._down_since_ms, end_ms))
         if reconnected:
             self._reconnect_ts.append(end_ms)
         self._down_since_ms = None
@@ -393,7 +414,7 @@ class FlowRecorder:
         # status check right at the edge of the window is never short.
         cutoff = now_ms_ - 2 * 24 * 3600 * 1000
         self._reconnect_ts = [t for t in self._reconnect_ts if t >= cutoff]
-        self._gap_events = [(t, s) for t, s in self._gap_events if t >= cutoff]
+        self._gap_events = [(s, e) for s, e in self._gap_events if e >= cutoff]
 
     def _disk_free_gb(self):
         try:
@@ -406,7 +427,14 @@ class FlowRecorder:
         self._prune_old_events(now)
         cutoff_24h = now - 24 * 3600 * 1000
         reconnects_24h = sum(1 for t in self._reconnect_ts if t >= cutoff_24h)
-        gap_seconds_24h = sum(s for t, s in self._gap_events if t >= cutoff_24h)
+        # Only the part of each outage inside the window counts, and an
+        # outage still in progress counts up to now — so a long outage can't
+        # exceed the window and a current one doesn't read as zero.
+        outages = list(self._gap_events)
+        if self._down_since_ms is not None:
+            outages.append((self._down_since_ms, now))
+        gap_seconds_24h = sum(max(0, min(e, now) - max(s, cutoff_24h))
+                              for s, e in outages) / 1000
         free_gb = self._disk_free_gb()
         disk_low = free_gb is not None and free_gb < self.disk_floor_gb
         if disk_low:
@@ -568,7 +596,9 @@ def verify_sample_pct(out_dir, coin, window_min=30, now=None):
 
     trade_ts = []
     seen_tids = set()
-    for day in (day_str_utc(win_start), day_str_utc(now)):
+    DAY = 86_400_000
+    days = [day_str_utc(d) for d in range((win_start // DAY) * DAY, now + 1, DAY)]
+    for day in days:
         path = file_path(out_dir, coin, "trades", day)
         for rec in iter_jsonl_records(path):
             if rec.get("record_type") != "trades":
@@ -602,8 +632,18 @@ def verify_sample_pct(out_dir, coin, window_min=30, now=None):
 
     recorded = sum(1 for t in trade_ts if span_start <= t < span_end)
     candles = fm.fetch_candles(coin, "1m", span_start, span_end)
-    n_sum = sum(c["n"] for c in candles
-                if c.get("n") is not None and span_start <= c["t_ms"] < span_end)
+    in_span = {c["t_ms"]: c.get("n") for c in candles if span_start <= c["t_ms"] < span_end}
+    minutes = (span_end - span_start) // MIN_MS
+    if len(in_span) != minutes or any(n is None for n in in_span.values()):
+        # A missing candle or count would drop that minute from the
+        # denominator while its recorded trades stay in the numerator,
+        # overstating completeness. Unknown is reported as unknown.
+        return {"coin": coin, "window_min": window_min, "recorded_trades": recorded,
+                "candle_n_sum": None, "sample_pct": None,
+                "note": f"exchange trade counts missing for "
+                        f"{minutes - sum(n is not None for n in in_span.values())} "
+                        f"of {minutes} minutes — completeness unknown"}
+    n_sum = sum(in_span.values())
     sample_pct = round(min(100.0, 100.0 * recorded / n_sum), 1) if n_sum > 0 else None
     return {
         "coin": coin,
