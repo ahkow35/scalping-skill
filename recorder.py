@@ -307,7 +307,12 @@ class FlowRecorder:
         self._last_recv_ms = None
         self._last_recv_per_stream = {}  # "COIN:channel" -> ms
         self._reconnect_ts = []       # ms timestamps of reconnects (not cold start)
-        self._gap_events = []         # (ms, gap_seconds) — one per known-last-seen GAP
+        self._gap_events = []         # (ms, gap_seconds) — one per outage, wall-clock
+        # Local recv time the current outage began (last message before the
+        # drop); None while connected. Failed retries inside one outage leave
+        # it untouched, so an outage is counted once however many retries it
+        # takes.
+        self._down_since_ms = None
         self._connected = False
         self._stop = None             # set in run() (needs a live loop)
 
@@ -362,14 +367,26 @@ class FlowRecorder:
                 rec = make_gap_record(coin, channel, last_seen, reconnect_ms)
                 day = day_str_utc(reconnect_ms)
                 self.files.write(coin, channel, rec, day)
-                if last_seen is not None:
-                    gap_s = max(0.0, (reconnect_ms - last_seen) / 1000)
-                    self._gap_events.append((reconnect_ms, gap_s))
 
-    def record_reconnect(self, reconnect_ms):
-        """Log one reconnect event (not the initial cold-start emit_gaps) for
-        the status file's `reconnects_24h`."""
-        self._reconnect_ts.append(reconnect_ms)
+    def mark_disconnected(self):
+        """A live connection just dropped: open an outage starting at the last
+        message received. No-op if an outage is already open, so failed
+        retries during a long outage don't add reconnects or gap time."""
+        if self._down_since_ms is None:
+            self._down_since_ms = (self._last_recv_ms if self._last_recv_ms is not None
+                                   else self.clock())
+
+    def end_outage(self, end_ms, reconnected=True):
+        """Close the open outage (if any): write GAP records into every file,
+        count its wall-clock length once toward `gap_seconds_24h`, and count
+        one reconnect unless it ended because the recorder is stopping."""
+        if self._down_since_ms is None:
+            return
+        self.emit_gaps(reconnect_ms=end_ms)
+        self._gap_events.append((end_ms, max(0.0, (end_ms - self._down_since_ms) / 1000)))
+        if reconnected:
+            self._reconnect_ts.append(end_ms)
+        self._down_since_ms = None
 
     def _prune_old_events(self, now_ms_):
         # Keep a 48h buffer (double the 24h window status reports) so a
@@ -452,6 +469,7 @@ class FlowRecorder:
                 try:
                     async with websockets.connect(WS_URL, ping_interval=None) as ws:
                         self._connected = True
+                        self.end_outage(self.clock())
                         backoff = RECONNECT_BASE_S
                         for sub in self._subscribe_messages():
                             await ws.send(json.dumps(sub))
@@ -468,12 +486,11 @@ class FlowRecorder:
                 except Exception as exc:
                     print(f"{iso_utc_ms(self.clock())} recorder: connection error "
                           f"({exc!r}) — reconnecting", file=sys.stderr)
+                if self._connected:
+                    self.mark_disconnected()
                 self._connected = False
                 if self._stop.is_set():
                     break
-                reconnect_ms = self.clock()
-                self.record_reconnect(reconnect_ms)
-                self.emit_gaps(reconnect_ms=reconnect_ms)
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=backoff)
                     break  # stop set during backoff wait
@@ -482,6 +499,12 @@ class FlowRecorder:
                 backoff = min(backoff * 2, RECONNECT_MAX_S)
         finally:
             status_task.cancel()
+            # Stopping mid-outage: close it so the tape records the hole up to
+            # shutdown (not a reconnect). A clean stop also leaves the final
+            # status saying disconnected — the break on _StopRequested skips
+            # the reset inside the loop.
+            self.end_outage(self.clock(), reconnected=False)
+            self._connected = False
             self.files.close_all()
             write_status(self.out_dir, self.status())
 

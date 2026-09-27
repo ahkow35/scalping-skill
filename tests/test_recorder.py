@@ -289,21 +289,150 @@ def test_status_tracks_reconnects_and_gap_seconds_in_24h(tmp_path):
     clock = {"t": MIDNIGHT}
     fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: clock["t"])
     fr.handle_snapshot("bbo", "HYPE", {"coin": "HYPE", "time": MIDNIGHT})
+    fr.mark_disconnected()
     clock["t"] += 5000
-    fr.record_reconnect(clock["t"])
-    fr.emit_gaps(reconnect_ms=clock["t"])  # last_seen was MIDNIGHT -> 5s gap
+    fr.end_outage(clock["t"])  # last recv was MIDNIGHT -> 5s gap
     st = fr.status()
     assert st["reconnects_24h"] == 1
     assert st["gap_seconds_24h"] == 5.0
 
 
+def test_one_outage_counts_once_however_many_retries(tmp_path):
+    # Regression: every failed retry used to count a reconnect and re-add the
+    # gap from the same last-seen point (1+2+4+... seconds), and gap time was
+    # summed per stream, so one outage was inflated many times over.
+    clock = {"t": MIDNIGHT}
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: clock["t"])
+    fr.handle_snapshot("bbo", "HYPE", {"coin": "HYPE", "time": MIDNIGHT})
+    fr.mark_disconnected()
+    for _ in range(5):  # failed retries inside the same outage
+        clock["t"] += 10_000
+        fr.mark_disconnected()
+    clock["t"] += 10_000
+    fr.end_outage(clock["t"])
+    st = fr.status()
+    assert st["reconnects_24h"] == 1
+    assert st["gap_seconds_24h"] == 60.0
+
+
+def test_end_outage_without_open_outage_is_a_noop(tmp_path):
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: MIDNIGHT)
+    fr.end_outage(MIDNIGHT)
+    fr.files.close_all()
+    st = fr.status()
+    assert st["reconnects_24h"] == 0
+    assert st["gap_seconds_24h"] == 0.0
+    assert not os.listdir(tmp_path) or os.listdir(tmp_path) == ["status.json"]
+
+
 def test_status_ignores_reconnects_older_than_24h(tmp_path):
     clock = {"t": MIDNIGHT}
     fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: clock["t"])
-    fr.record_reconnect(clock["t"])
+    fr.mark_disconnected()
+    fr.end_outage(clock["t"])
     clock["t"] += 25 * 3600 * 1000  # 25h later
     st = fr.status()
     assert st["reconnects_24h"] == 0
+
+
+# ── run(): end to end against a fake websocket ─────────────────────────────
+
+class _FakeWS:
+    """Delivers `messages`, then either drops (raise) or asks the recorder to
+    stop, mimicking a SIGTERM arriving mid-stream."""
+    def __init__(self, fr, messages, then):
+        self._fr, self._msgs, self._then = fr, list(messages), then
+
+    async def send(self, _):
+        pass
+
+    async def recv(self):
+        if self._msgs:
+            return json.dumps(self._msgs.pop(0))
+        if self._then == "drop":
+            raise ConnectionError("socket dropped")
+        self._fr._stop.set()
+        import asyncio
+        await asyncio.Event().wait()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _run_with_script(tmp_path, monkeypatch, clock, script):
+    """script: list of ("fail" | "fail_and_stop", t_ms) or
+    ("ws", t_ms, messages, then), consumed one per connect attempt; the clock
+    jumps to t_ms at each attempt."""
+    import asyncio
+    import types
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: clock["t"])
+    steps = list(script)
+
+    def connect(*_a, **_k):
+        step = steps.pop(0)
+        clock["t"] = step[1]
+        if step[0] == "fail_and_stop":
+            fr._stop.set()
+        if step[0] in ("fail", "fail_and_stop"):
+            raise OSError("network unreachable")
+        return _FakeWS(fr, step[2], step[3])
+
+    monkeypatch.setitem(sys.modules, "websockets", types.SimpleNamespace(connect=connect))
+    monkeypatch.setattr(rec, "RECONNECT_BASE_S", 0.001)
+    monkeypatch.setattr(rec, "RECONNECT_MAX_S", 0.001)
+    asyncio.run(fr.run())
+    with open(rec.status_path_for(str(tmp_path))) as f:
+        return fr, json.load(f)
+
+
+def _bbo(t):
+    return {"channel": "bbo", "data": {"coin": "HYPE", "time": t}}
+
+
+def test_run_long_outage_counts_one_reconnect_and_real_gap(tmp_path, monkeypatch):
+    clock = {"t": MIDNIGHT}
+    fr, st = _run_with_script(tmp_path, monkeypatch, clock, [
+        ("ws", MIDNIGHT, [_bbo(MIDNIGHT)], "drop"),
+        ("fail", MIDNIGHT + 10_000),
+        ("fail", MIDNIGHT + 20_000),
+        ("fail", MIDNIGHT + 30_000),
+        ("fail", MIDNIGHT + 40_000),
+        ("ws", MIDNIGHT + 90_000, [_bbo(MIDNIGHT + 90_000)], "stop"),
+    ])
+    assert st["reconnects_24h"] == 1
+    assert st["gap_seconds_24h"] == 90.0
+    # GAP records: the cold-start marker plus one for the single outage.
+    path = rec.file_path(str(tmp_path), "HYPE", "bbo", rec.day_str_utc(MIDNIGHT))
+    gaps = [r for r in rec.iter_jsonl_records(path) if r["record_type"] == "gap"]
+    assert len(gaps) == 2
+
+
+def test_run_clean_stop_writes_connected_false(tmp_path, monkeypatch):
+    clock = {"t": MIDNIGHT}
+    fr, st = _run_with_script(tmp_path, monkeypatch, clock, [
+        ("ws", MIDNIGHT, [_bbo(MIDNIGHT)], "stop"),
+    ])
+    assert st["connected"] is False
+    assert st["reconnects_24h"] == 0
+    assert st["gap_seconds_24h"] == 0.0
+
+
+def test_run_stop_mid_outage_records_gap_but_no_reconnect(tmp_path, monkeypatch):
+    clock = {"t": MIDNIGHT}
+    fr, st = _run_with_script(tmp_path, monkeypatch, clock, [
+        ("ws", MIDNIGHT, [_bbo(MIDNIGHT)], "drop"),
+        ("fail", MIDNIGHT + 10_000),
+        ("fail_and_stop", MIDNIGHT + 45_000),  # SIGTERM while still down
+    ])
+    assert st["connected"] is False
+    assert st["reconnects_24h"] == 0
+    assert st["gap_seconds_24h"] == 45.0
+    path = rec.file_path(str(tmp_path), "HYPE", "bbo", rec.day_str_utc(MIDNIGHT))
+    gaps = [r for r in rec.iter_jsonl_records(path) if r["record_type"] == "gap"]
+    assert len(gaps) == 2  # cold start + the outage closed at shutdown
 
 
 def test_status_lag_s_per_stream(tmp_path):
