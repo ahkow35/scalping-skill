@@ -162,10 +162,9 @@ def _gzip_file_atomic(path):
     detected and the plain file is just removed, not appended twice."""
     gz_path = path + ".gz"
     tmp_path = gz_path + ".tmp"
-    member_tail = b"\n" if _ends_mid_line(path) else b""
-    if os.path.exists(gz_path) and _gz_ends_with(gz_path, path, member_tail):
-        os.remove(path)
+    if _drop_if_already_archived(path):
         return
+    member_tail = b"\n" if _ends_mid_line(path) else b""
     with open(tmp_path, "wb") as raw:
         if os.path.exists(gz_path):
             with open(gz_path, "rb") as old:
@@ -177,6 +176,22 @@ def _gzip_file_atomic(path):
         os.fsync(raw.fileno())
     os.replace(tmp_path, gz_path)
     os.remove(path)
+
+
+def _drop_if_already_archived(path):
+    """Remove `path` and return True if an interrupted rotation already
+    committed exactly its bytes to `path + '.gz'`. Checked before a plain
+    file is compressed AND before it is reopened for append — otherwise a
+    leftover reopened as "today" (clock stepped back) would gain new rows,
+    stop matching the archive, and be appended to it a second time."""
+    gz_path = path + ".gz"
+    if not (os.path.exists(path) and os.path.exists(gz_path)):
+        return False
+    member_tail = b"\n" if _ends_mid_line(path) else b""
+    if not _gz_ends_with(gz_path, path, member_tail):
+        return False
+    os.remove(path)
+    return True
 
 
 def _gz_ends_with(gz_path, path, member_tail):
@@ -271,6 +286,7 @@ class FlowFileSet:
                 cur[1].close()
                 _gzip_file_atomic(old_path)
             path = file_path(self.out_dir, coin, channel, day_str)
+            _drop_if_already_archived(path)
             partial_tail = os.path.exists(path) and _ends_mid_line(path)
             f = open(path, "a")
             if partial_tail:

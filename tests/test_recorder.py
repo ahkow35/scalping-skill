@@ -711,6 +711,24 @@ def test_rotation_interrupted_before_removing_plain_does_not_duplicate(tmp_path)
     assert len(list(rec.iter_jsonl_records(path))) == 1
 
 
+def test_interrupted_rotation_leftover_reopened_as_today_is_not_reappended(tmp_path):
+    today = rec.day_str_utc(rec.now_ms())            # startup recovery skips today
+    path = rec.file_path(str(tmp_path), "HYPE", "bbo", today)
+    with open(path, "w") as f:
+        f.write(json.dumps({"record_type": "bbo", "recv_ts_ms": 1}) + "\n")
+    real_remove = os.remove
+    os.remove = lambda p: None                       # crash after os.replace
+    try:
+        rec._gzip_file_atomic(path)
+    finally:
+        os.remove = real_remove
+    files = rec.FlowFileSet(str(tmp_path))           # clock is back in that day
+    files.write("HYPE", "bbo", {"record_type": "gap"}, today)
+    files.close_all()
+    rec._gzip_file_atomic(path)
+    assert [r["record_type"] for r in rec.iter_jsonl_records(path)] == ["bbo", "gap"]
+
+
 def test_reconnect_that_drops_before_data_does_not_recount_the_gap(tmp_path):
     clock = {"t": MIDNIGHT}
     fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: clock["t"])
