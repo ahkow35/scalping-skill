@@ -7,12 +7,14 @@ This is a persistent warning latch and an entry preflight, **not an exchange-enf
 Use the actual public trading wallet, not an agent wallet, and a loss limit explicitly selected by the account owner. There is no default loss amount. From this repository:
 
 ```sh
-python3 account_monitor.py configure --wallet 0xYOUR_PUBLIC_WALLET --daily-loss-usdc YOUR_LIMIT
+python3 account_monitor.py configure --wallet 0xYOUR_PUBLIC_WALLET --daily-loss-usdc YOUR_LIMIT \
+  --watcher-url https://YOUR-RAILWAY-WATCHER.up.railway.app
 python3 account_monitor.py check --json
+python3 account_monitor.py remote-check --json
 python3 account_monitor.py watch --interval-seconds 30
 ```
 
-Alternatively configure `--daily-loss-pct YOUR_PERCENT`. Reset timezone defaults to `Asia/Singapore`; `--timezone` accepts an IANA timezone. Optionally configure `--max-position-notional-usdc YOUR_CAP` (an owner-selected per-position size warning; there is no default). Configuration and persistent per-wallet state live in ignored `.account_monitor/`. Do not delete state to clear a loss warning. Reconfiguration does not clear a same-day latch or increase that day's budget. No background service or notification subscription is installed automatically. Watch output is local only.
+Alternatively configure `--daily-loss-pct YOUR_PERCENT`. Reset timezone defaults to `Asia/Singapore`; `--timezone` accepts an IANA timezone. Optionally configure `--max-position-notional-usdc YOUR_CAP` (an owner-selected per-position size warning; there is no default) and `--watcher-url` (see "Remote preflight" below; also optional). `configure` always rewrites the whole saved config: any of these optional flags left off a given `configure` call resets to unconfigured for that call, the same way `--max-position-notional-usdc` already behaves — pass `--watcher-url` again on every reconfigure, or it drops. Configuration and persistent per-wallet state live in ignored `.account_monitor/`. Do not delete state to clear a loss warning. Reconfiguration does not clear a same-day latch or increase that day's budget. No background service or notification subscription is installed automatically. Watch output is local only.
 
 Exit codes: 0 means eligible for further skill checks, 3 means a latched HALT, 2 means another blocked/unknown state. CLEAR is not an entry signal.
 

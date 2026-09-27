@@ -135,16 +135,24 @@ def _local_config(data_dir):
     return config if isinstance(config, dict) else {}
 
 
-def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=requests.get,
-                  keychain=read_keychain_watcher_token, clock=None,
+def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=None,
+                  keychain=None, clock=None,
                   timeout=WATCHER_REQUEST_TIMEOUT_S):
     """One read-only preflight read from the always-on Railway watcher's
     /report, in the same report shape as check(), plus source and
     report_age_s. Fails closed on any missing config, transport error,
     malformed body or stale/future report — entry_allowed false, no
     observation — and never falls back to a local check(). Never prints,
-    logs or includes the token or the Authorization header."""
+    logs or includes the token or the Authorization header.
+
+    get and keychain default to None (resolved to requests.get and
+    read_keychain_watcher_token here, not bound as default-argument values)
+    so tests can intercept the real call path via monkeypatch even when
+    invoked indirectly through main(), with no default-argument binding
+    gotcha letting a real network or Keychain call slip through."""
     env = os.environ if env is None else env
+    get = requests.get if get is None else get
+    keychain = read_keychain_watcher_token if keychain is None else keychain
     clock = clock or (lambda: int(time.time() * 1000))
 
     def unavailable(reason, status="DATA_UNAVAILABLE"):

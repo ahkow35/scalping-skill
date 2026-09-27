@@ -398,6 +398,52 @@ def test_cli_remote_check_exit_two_on_config_required(monkeypatch, capsys):
     assert code == 2
 
 
+def test_cli_never_leaks_token_on_connection_error(monkeypatch, capsys):
+    """Drives the real main() -> remote_check() -> requests.get path (no
+    explicit get= injection at the call site, the way the CLI actually runs)
+    and checks the process's own stdout/stderr, not just the report dict."""
+    monkeypatch.setenv("SCALP_WATCHER_URL", URL)
+    monkeypatch.setenv("SCALP_WATCHER_TOKEN", SECRET)
+    def raising_get(*a, **k):
+        raise requests.exceptions.ConnectionError("refused")
+    monkeypatch.setattr(monitor.requests, "get", raising_get)
+    code = monitor.main(["remote-check", "--json"])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert SECRET not in captured.out
+    assert SECRET not in captured.err
+
+
+def test_cli_never_leaks_token_on_401(monkeypatch, capsys):
+    monkeypatch.setenv("SCALP_WATCHER_URL", URL)
+    monkeypatch.setenv("SCALP_WATCHER_TOKEN", SECRET)
+    monkeypatch.setattr(monitor.requests, "get", lambda *a, **k: FakeResponse(401))
+    code = monitor.main(["remote-check", "--json"])
+    assert code == 2
+    captured = capsys.readouterr()
+    assert SECRET not in captured.out
+    assert SECRET not in captured.err
+
+
+def test_cli_never_leaks_keychain_sourced_token(monkeypatch, capsys):
+    """Token sourced from the Keychain (env unset), driven through the real
+    CLI. subprocess.run is faked at the lowest level actually called by
+    read_keychain_watcher_token, so no real `security` invocation happens."""
+    class FakeCompleted:
+        returncode = 0
+        stdout = SECRET + "\n"
+        stderr = ""
+    monkeypatch.setenv("SCALP_WATCHER_URL", URL)
+    monkeypatch.delenv("SCALP_WATCHER_TOKEN", raising=False)
+    monkeypatch.setattr(monitor.subprocess, "run", lambda *a, **k: FakeCompleted())
+    monkeypatch.setattr(monitor.requests, "get",
+                         lambda *a, **k: FakeResponse(200, envelope(NOW - 1_000)))
+    monitor.main(["remote-check", "--json"])
+    captured = capsys.readouterr()
+    assert SECRET not in captured.out
+    assert SECRET not in captured.err
+
+
 def test_cli_remote_check_never_calls_local_check(monkeypatch, capsys):
     def forbidden(*args, **kwargs):
         pytest.fail("remote-check must never fall back to a local check()")
