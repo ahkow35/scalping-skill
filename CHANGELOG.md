@@ -1,5 +1,31 @@
 # Changelog — scalp skill
 
+## 2026-09-27 — account monitor: oversized-position and add-while-underwater warnings
+Added two read-only WARNING reasons to `account_monitor.py`, motivated by a
+replay of the owner's real fills showing losses came from oversized positions
+and from adding to losing positions — the monitor already flagged missing
+stops (`UNPROTECTED`) but not these. Both are reasons only: they never change
+`status` or `entry_allowed` (a later, separate decision may make either
+blocking). OVERSIZED: a new optional `max_position_notional_usdc` config field
+(`configure --max-position-notional-usdc`, validated like the other config
+fields; existing config files without it keep working) flags any open
+position whose notional (mark, or entry price if no mark, × absolute size)
+exceeds the cap; when the cap is not configured, one reminder reason is added
+instead. ADDED-WHILE-UNDERWATER: `account_observation.underwater_adds`
+reconstructs the running average entry from the current risk day's own fills
+(seeded when a fill shows `startPosition == 0`, i.e. a fresh open from flat)
+and flags an opening fill that added to an existing same-direction position at
+a price worse than that running entry, naming the coin, UTC fill time and
+price; when the day's fetched fills never show the coin flat, the live
+position `entryPx` is used as a documented approximation instead. Both checks
+run read-only, over data the monitor already fetches — no new endpoints
+beyond the existing `READ_TYPES`. Tests (`tests/test_account_risk.py`): over
+cap, under cap, cap not configured, old config without the field, underwater
+add long and short, a profitable add (no warning), a fresh open from flat (no
+warning), and that `status`/`entry_allowed` are unchanged by both warnings.
+Files: `account_observation.py`, `account_risk.py`, `account_monitor.py`,
+`tests/test_account_risk.py`, `ACCOUNT-MONITOR.md`.
+
 ## 2026-09-25 — one-candle rule paper backtest: no edge
 Paper-tested the "one-candle rule" from a Scarface Trades video (daily trend + retest of
 the last opposing 1m candle in the first NY-open hour, 2R target) on 16 months of Binance

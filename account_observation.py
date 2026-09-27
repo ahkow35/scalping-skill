@@ -2,6 +2,7 @@
 
 import json
 import math
+from datetime import datetime, timezone
 
 from account_api import AccountDataError, validate_wallet
 
@@ -269,3 +270,65 @@ def accounting_events(snapshot, since_ms):
     return {"closed_pnl_usdc": closed, "fees_usdc": fees, "funding_usdc": funding,
             "net_cash_flow_usdc": transfers, "realized_net_usdc": closed - fees + funding,
             "fill_count": count}
+
+
+def underwater_adds(snapshot, since_ms, positions):
+    """Flag today's opening fills that added to an existing same-direction
+    position at a price worse than its running entry at that moment.
+
+    The running average entry is reconstructed per coin from the day's own
+    fills, seeded once a fill shows `startPosition == 0` (a fresh open from
+    flat). If the fetched fills never show that coin flat — the position was
+    already open before the fetched window — the pre-window entry price is
+    unknown, so every add on that coin is instead compared against the
+    position's CURRENT `entryPx` from the live observation. That live entryPx
+    already reflects every fill up to now, not just the one being checked, so
+    this fallback is an approximation of "entry at that moment", not an exact
+    same-instant comparison. This is a warning heuristic, not an accounting
+    identity: fills missing side/size/price/startPosition are skipped rather
+    than failing the monitor.
+    """
+    entry_by_coin = {position["coin"]: position["entry"] for position in positions}
+    running: dict[str, dict] = {}
+    warnings = []
+    fills = sorted(_events(snapshot, "fills", since_ms), key=lambda row: row.get("time", 0))
+    for fill in fills:
+        coin, side = fill.get("coin"), fill.get("side")
+        if not isinstance(coin, str) or not coin or side not in ("B", "A"):
+            continue
+        try:
+            size = abs(number(fill.get("sz"), "fill size"))
+            price = number(fill.get("px"), "fill price")
+            start = number(fill.get("startPosition"), "fill start position")
+            time_ms = number(fill.get("time"), "fill time")
+        except AccountDataError:
+            continue
+        sign = 1 if side == "B" else -1
+        state = running.get(coin)
+        if state is None:
+            if start == 0:
+                state = {"entry": None, "size": 0.0, "approx": False}
+            elif coin in entry_by_coin:
+                state = {"entry": entry_by_coin[coin], "size": abs(start), "approx": True}
+            else:
+                state = {"entry": None, "size": abs(start), "approx": False}
+            running[coin] = state
+        is_add = start != 0 and (start > 0) == (sign > 0)
+        if is_add and state["entry"] is not None:
+            worse = (sign > 0 and price < state["entry"]) or (sign < 0 and price > state["entry"])
+            if worse:
+                iso = datetime.fromtimestamp(time_ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                direction = "long" if sign > 0 else "short"
+                approx = " (approximate: compared to current entryPx, not a reconstructed same-day entry)" if state["approx"] else ""
+                warnings.append(f"{coin} added to a losing {direction} at {price:g} ({iso}); "
+                                 f"entry was {state['entry']:g}{approx}")
+        if not state["approx"]:
+            if state["entry"] is None:
+                state["entry"], state["size"] = price, size
+            elif is_add:
+                new_size = state["size"] + size
+                state["entry"] = (state["entry"] * state["size"] + price * size) / new_size
+                state["size"] = new_size
+            else:
+                state["size"] = max(0.0, state["size"] - size)
+    return warnings
