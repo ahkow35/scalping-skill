@@ -1,5 +1,42 @@
 # Changelog — scalp skill
 
+## 2026-09-27 — account monitor: oversized-position and add-while-underwater warnings
+Added two read-only WARNING reasons to `account_monitor.py`, motivated by a
+replay of the owner's real fills showing losses came from oversized positions
+and from adding to losing positions — the monitor already flagged missing
+stops (`UNPROTECTED`) but not these. Both are reasons only: they never change
+`status` or `entry_allowed` (a later, separate decision may make either
+blocking). OVERSIZED: a new optional `max_position_notional_usdc` config field
+(`configure --max-position-notional-usdc`, validated like the other config
+fields; existing config files without it keep working) flags any open
+position whose notional (mark, or entry price if no mark, × absolute size)
+exceeds the cap; when the cap is not configured, one reminder reason is added
+instead. ADDED-WHILE-UNDERWATER: `account_observation.underwater_adds`
+reconstructs the running average entry from the current risk day's own fills
+(seeded when a fill shows `startPosition == 0`, i.e. a fresh open from flat)
+and flags an opening fill that added to an existing same-direction position at
+a price worse than that running entry, naming the coin, UTC fill time and
+price; when the day's fetched fills never show the coin flat, the live
+position `entryPx` is used as a documented approximation instead. Both checks
+run read-only, over data the monitor already fetches — no new endpoints
+beyond the existing `READ_TYPES`. The reconstruction uses each fill's own
+`startPosition` (exchange ground truth) rather than a locally accumulated
+tally, and resets on every fresh open from flat, so a same-day
+close-then-reopen-then-add is never compared against a stale prior entry;
+spot fills are excluded the same way `accounting_events` already excludes
+them. Tests (`tests/test_account_risk.py`): over cap, under cap, cap not
+configured, old config without the field, underwater add long and short, a
+profitable add (no warning), a fresh open from flat (no warning), a
+close-then-reopen-then-profitable-add (no warning — the regression this
+reconstruction guards against), a standard-mode spot fill sequence (no
+warning), and that `status`/`entry_allowed` are unchanged by both warnings.
+Files: `account_observation.py`, `account_risk.py`, `account_monitor.py`,
+`tests/test_account_risk.py`, `ACCOUNT-MONITOR.md`. Codex cross-review
+(2 rounds) then fixed three missed-warning paths: the check now covers the
+whole risk day even when the baseline began mid-day (same-day fetches start
+at the day's start; accounting still counts from the baseline), including a
+fill stamped exactly at the start, and a flip starts an exact entry.
+
 ## 2026-09-27 — WebSocket flow recorder revived (research only, PR A)
 Brought `recorder.py` + its tests + `PLAN-flow-recorder-2026-07-12.md` over from
 the local-only July branch `fix/flow-honesty` onto main, per `tasks/todo.md`'s

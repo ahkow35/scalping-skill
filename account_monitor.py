@@ -116,6 +116,9 @@ def main(argv=None):
     limit.add_argument("--daily-loss-usdc", type=float)
     limit.add_argument("--daily-loss-pct", type=float)
     configure.add_argument("--timezone", default="Asia/Singapore")
+    configure.add_argument("--max-position-notional-usdc", type=float, default=None,
+                            dest="max_position_notional_usdc",
+                            help="optional per-position notional warning cap (owner-selected; no default)")
     single = commands.add_parser("check", help="one fresh read-only observation")
     single.add_argument("--json", action="store_true")
     watch = commands.add_parser("watch", help="keep observing; prints locally only")
@@ -127,7 +130,8 @@ def main(argv=None):
         try:
             config = validate_config({"wallet": args.wallet, "timezone": args.timezone,
                                       "daily_loss_usdc": args.daily_loss_usdc,
-                                      "daily_loss_pct": args.daily_loss_pct})
+                                      "daily_loss_pct": args.daily_loss_pct,
+                                      "max_position_notional_usdc": args.max_position_notional_usdc})
             with observation_lock(args.data_dir):
                 existing = args.data_dir / (config["wallet"] + ".json")
                 if existing.exists() and read_json(existing).get("timezone") != config["timezone"]:

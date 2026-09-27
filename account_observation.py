@@ -2,6 +2,7 @@
 
 import json
 import math
+from datetime import datetime, timezone
 
 from account_api import AccountDataError, validate_wallet
 
@@ -269,3 +270,71 @@ def accounting_events(snapshot, since_ms):
     return {"closed_pnl_usdc": closed, "fees_usdc": fees, "funding_usdc": funding,
             "net_cash_flow_usdc": transfers, "realized_net_usdc": closed - fees + funding,
             "fill_count": count}
+
+
+def underwater_adds(snapshot, since_ms, positions):
+    """Flag today's opening fills that added to an existing same-direction
+    position at a price worse than its running entry at that moment.
+
+    The running average entry is reconstructed per coin from the day's own
+    fills, using each fill's own `startPosition` (the exchange's ground truth
+    for the position size immediately before that fill) rather than a locally
+    accumulated tally, so a fill skipped for missing data cannot desync the
+    reconstruction from the real position. A fill with `startPosition == 0`
+    (a fresh open from flat) resets the running entry to that fill's price —
+    a same-day close-then-reopen is never compared against the earlier,
+    now-irrelevant entry. A reduce leaves the average entry unchanged; a
+    reduce that exceeds the prior size (a flip) restarts it at this fill's
+    price, and ends any approximation below. If the fetched fills never show a coin flat — the position was
+    already open before the fetched window — the pre-window entry price is
+    unknown, so every add on that coin is instead compared against the
+    position's CURRENT `entryPx` from the live observation (or skipped if the
+    coin holds no live position, i.e. it was already fully closed). That live
+    entryPx already reflects every fill up to now, not just the one being
+    checked, so this fallback is an approximation of "entry at that moment",
+    not an exact same-instant comparison. This is a warning heuristic, not an
+    accounting identity: spot fills and fills missing side/size/price/
+    startPosition are skipped rather than failing the monitor.
+    """
+    entry_by_coin = {position["coin"]: position["entry"] for position in positions}
+    running: dict[str, dict] = {}
+    warnings = []
+    fills = sorted(_events(snapshot, "fills", since_ms), key=lambda row: row.get("time", 0))
+    for fill in fills:
+        coin, side = fill.get("coin"), fill.get("side")
+        if not isinstance(coin, str) or not coin or side not in ("B", "A"):
+            continue
+        if coin.startswith("@") or "/" in coin or fill.get("dir") in {"Buy", "Sell"}:
+            continue  # spot fill, not a perp position
+        try:
+            size = abs(number(fill.get("sz"), "fill size"))
+            price = number(fill.get("px"), "fill price")
+            start = number(fill.get("startPosition"), "fill start position")
+            time_ms = number(fill.get("time"), "fill time")
+        except AccountDataError:
+            continue
+        sign = 1 if side == "B" else -1
+        if start == 0:
+            running[coin] = {"entry": price, "approx": False}
+            continue
+        state = running.get(coin)
+        if state is None:
+            state = {"entry": entry_by_coin.get(coin), "approx": True}
+            running[coin] = state
+        is_add = (start > 0) == (sign > 0)
+        if is_add and state["entry"] is not None:
+            worse = (sign > 0 and price < state["entry"]) or (sign < 0 and price > state["entry"])
+            if worse:
+                iso = datetime.fromtimestamp(time_ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                direction = "long" if sign > 0 else "short"
+                approx = " (approximate: compared to current entryPx, not a reconstructed same-day entry)" if state["approx"] else ""
+                warnings.append(f"{coin} added to a losing {direction} at {price:g} ({iso}); "
+                                 f"entry was {state['entry']:g}{approx}")
+        if not is_add and size > abs(start):
+            # reduce-and-flip: a new position at this fill's price, exact
+            # even if the earlier entry was only approximate
+            running[coin] = {"entry": price, "approx": False}
+        elif is_add and not state["approx"]:
+            state["entry"] = (state["entry"] * abs(start) + price * size) / (abs(start) + size)
+        # a pure reduce (size <= abs(start)) leaves the average entry unchanged
+    return warnings

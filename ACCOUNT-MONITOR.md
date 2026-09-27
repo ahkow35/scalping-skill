@@ -12,7 +12,7 @@ python3 account_monitor.py check --json
 python3 account_monitor.py watch --interval-seconds 30
 ```
 
-Alternatively configure `--daily-loss-pct YOUR_PERCENT`. Reset timezone defaults to `Asia/Singapore`; `--timezone` accepts an IANA timezone. Configuration and persistent per-wallet state live in ignored `.account_monitor/`. Do not delete state to clear a loss warning. Reconfiguration does not clear a same-day latch or increase that day's budget. No background service or notification subscription is installed automatically. Watch output is local only.
+Alternatively configure `--daily-loss-pct YOUR_PERCENT`. Reset timezone defaults to `Asia/Singapore`; `--timezone` accepts an IANA timezone. Optionally configure `--max-position-notional-usdc YOUR_CAP` (an owner-selected per-position size warning; there is no default). Configuration and persistent per-wallet state live in ignored `.account_monitor/`. Do not delete state to clear a loss warning. Reconfiguration does not clear a same-day latch or increase that day's budget. No background service or notification subscription is installed automatically. Watch output is local only.
 
 Exit codes: 0 means eligible for further skill checks, 3 means a latched HALT, 2 means another blocked/unknown state. CLEAR is not an entry signal.
 
@@ -34,5 +34,14 @@ First use creates a **partial-day** baseline and stays WARMUP, even just after m
 Every open position must have sufficient remaining quantity in active, opposite-side, reduce-only stop orders, with triggers before liquidation and on the protective side of the observed mark. Parent-order children, duplicate IDs, original rather than remaining quantity, take profits, and unknown/dynamic zero sizes cannot manufacture coverage. Incomplete coverage blocks entries. Existing open trigger-distance risk exceeding the remaining daily budget also blocks entries; this estimate excludes execution costs.
 
 Coverage is **not** guaranteed execution: stops can slip, stop-limits can remain unfilled, and liquidation can precede an observation. Pending entry orders remain live even under HALT. The owner must separately place and verify appropriate exchange-side stops and stop opening manual trades when warned; this implementation does neither.
+
+## Sizing and add-while-underwater warnings
+
+Two additional checks add reasons only — they never change `status` or `entry_allowed`, and cannot block or permit anything by themselves:
+
+- **Oversized position**: if `--max-position-notional-usdc` is configured, any open position whose notional (mark price, or entry price if no mark is available, times absolute size) exceeds it adds a reason naming the coin, its notional and the cap. If the cap is not configured, every check adds a reason saying so instead — this is a reminder, not a warning about your positions.
+- **Added while underwater**: from the current risk day's fills (fetched from the day's start even when the baseline began mid-day), an opening fill that increased an existing same-direction position (a same-sign, nonzero prior position) at a price worse than that position's entry at the time adds a reason naming the coin, the fill time (UTC) and price. The running entry is reconstructed from the day's own fills when they show the coin starting flat or flipping direction; otherwise the live `entryPx` is used as an approximation (documented in code), since it reflects entry as of now, not as of that specific historical fill.
+
+Both are read-only warnings surfaced only in `reasons`; a later, separate decision may choose to make either blocking.
 
 Source contracts: [Hyperliquid information endpoints](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint), [account abstraction modes](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes), and [take-profit/stop-loss orders](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/take-profit-and-stop-loss-orders-tp-sl).

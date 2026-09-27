@@ -3,7 +3,7 @@ from datetime import datetime
 import pytest
 
 from account_api import AccountDataError
-from account_risk import evaluate, failure_result
+from account_risk import evaluate, failure_result, history_start, validate_config
 from test_account_observation import WALLET, snapshot, spot, stop
 
 
@@ -18,6 +18,21 @@ def observe(data, state=None, config=CONFIG):
 def start_day():
     _, state = observe(snapshot(now=MIDNIGHT - 20_000))
     return observe(snapshot(now=MIDNIGHT), state)
+
+
+def fill(tid, time, side, sz, px, start_position):
+    return {"coin": "HYPE", "tid": tid, "time": time, "side": side, "sz": str(sz), "px": str(px),
+            "startPosition": str(start_position), "closedPnl": "0", "fee": "0", "feeToken": "USDC"}
+
+
+def underwater_long_fills():
+    """Open 5 @ 100 from flat, then add 5 @ 90 — worse than the running entry."""
+    return [fill(101, MIDNIGHT - 10_000, "B", 5, 100, 0), fill(102, MIDNIGHT + 500, "B", 5, 90, 5)]
+
+
+def underwater_short_fills():
+    """Open 5 @ 100 from flat, then add 5 @ 110 — worse than the running entry."""
+    return [fill(201, MIDNIGHT - 10_000, "A", 5, 100, 0), fill(202, MIDNIGHT + 500, "A", 5, 110, -5)]
 
 
 def test_first_midday_observation_cannot_invent_start_of_day_equity():
@@ -114,3 +129,139 @@ def test_unified_account_day_reconciles_spot_usdc_against_perp_fills():
     assert report["status"] == "CLEAR"
     assert report["daily"]["net_pnl_usdc"] == pytest.approx(-5.5)
     assert report["daily"]["reconciliation_residual_usdc"] == pytest.approx(0)
+
+
+def test_oversized_position_adds_a_reason_naming_coin_notional_and_cap():
+    config = {**CONFIG, "max_position_notional_usdc": 500}
+    report, _ = observe(snapshot(now=MIDNIGHT, size=10), config=config)
+    reasons = " ".join(report["reasons"])
+    assert "HYPE" in reasons and "1,000.00" in reasons and "500.00" in reasons and "exceeds size cap" in reasons
+
+
+def test_position_under_cap_adds_no_oversized_reason():
+    config = {**CONFIG, "max_position_notional_usdc": 5000}
+    report, _ = observe(snapshot(now=MIDNIGHT, size=10), config=config)
+    assert not any("exceeds size cap" in reason for reason in report["reasons"])
+    assert not any("not configured" in reason for reason in report["reasons"])
+
+
+def test_missing_cap_adds_a_not_configured_reason():
+    report, _ = observe(snapshot(now=MIDNIGHT, size=10), config=CONFIG)
+    assert any("not configured" in reason for reason in report["reasons"])
+
+
+def test_old_config_without_cap_field_keeps_working():
+    result = validate_config({"wallet": WALLET, "daily_loss_usdc": 100})
+    assert result["max_position_notional_usdc"] is None
+
+
+def test_add_to_a_losing_long_adds_a_reason_naming_coin_time_and_price():
+    _, state = start_day()
+    data = snapshot(now=MIDNIGHT + 1000, equity=970, upnl=-30, size=10, orders=[stop(trigger=95)])
+    data["fills"] = underwater_long_fills()
+    report, _ = observe(data, state)
+    assert report["status"] == "CLEAR"
+    reasons = " ".join(report["reasons"])
+    assert "HYPE" in reasons and "90" in reasons and "added to a losing long" in reasons
+
+
+def test_add_to_a_losing_short_adds_a_reason_naming_coin_time_and_price():
+    _, state = start_day()
+    data = snapshot(now=MIDNIGHT + 1000, equity=970, upnl=-30, size=-10, orders=[stop(trigger=105, side="B")])
+    data["fills"] = underwater_short_fills()
+    report, _ = observe(data, state)
+    assert report["status"] == "CLEAR"
+    reasons = " ".join(report["reasons"])
+    assert "HYPE" in reasons and "110" in reasons and "added to a losing short" in reasons
+
+
+def test_add_to_a_winning_position_adds_no_warning():
+    _, state = start_day()
+    data = snapshot(now=MIDNIGHT + 1000, equity=970, upnl=-30, size=10, orders=[stop(trigger=95)])
+    data["fills"] = [fill(301, MIDNIGHT - 10_000, "B", 5, 100, 0), fill(302, MIDNIGHT + 500, "B", 5, 110, 5)]
+    report, _ = observe(data, state)
+    assert not any("added to a losing" in reason for reason in report["reasons"])
+
+
+def test_fresh_open_from_flat_adds_no_warning():
+    _, state = start_day()
+    data = snapshot(now=MIDNIGHT + 1000, equity=990, upnl=-10, size=10, orders=[stop(trigger=95)])
+    data["fills"] = [fill(401, MIDNIGHT + 500, "B", 10, 100, 0)]
+    report, _ = observe(data, state)
+    assert not any("added to a losing" in reason for reason in report["reasons"])
+
+
+def test_close_then_reopen_then_profitable_add_produces_no_false_warning():
+    _, state = start_day()
+    data = snapshot(now=MIDNIGHT + 1000, equity=995, upnl=-5, size=15)
+    data["fills"] = [
+        fill(501, MIDNIGHT - 15_000, "B", 10, 100, 0),    # open long 10 @ 100
+        fill(502, MIDNIGHT - 12_000, "A", 10, 100, 10),   # close flat @ 100
+        fill(503, MIDNIGHT - 8_000, "B", 10, 80, 0),      # reopen long 10 @ 80
+        fill(504, MIDNIGHT + 200, "B", 5, 90, 10),        # add @ 90 — profitable vs the 80 reopen entry
+    ]
+    report, _ = observe(data, state)
+    assert not any("added to a losing" in reason for reason in report["reasons"])
+
+
+def test_spot_fills_do_not_trigger_a_perp_underwater_warning():
+    _, state = start_day()
+    data = snapshot(now=MIDNIGHT + 1000, equity=1000, upnl=0, size=0)
+    data["fills"] = [
+        {"coin": "@107", "tid": 601, "time": MIDNIGHT - 10_000, "side": "B", "sz": "10", "px": "100",
+         "startPosition": "10", "dir": "Buy", "closedPnl": "0", "fee": "0", "feeToken": "USDC"},
+        {"coin": "@107", "tid": 602, "time": MIDNIGHT + 200, "side": "B", "sz": "10", "px": "90",
+         "startPosition": "20", "dir": "Buy", "closedPnl": "0", "fee": "0", "feeToken": "USDC"},
+    ]
+    report, _ = observe(data, state)
+    assert not any("added to a losing" in reason for reason in report["reasons"])
+
+
+def test_flip_after_a_pre_window_position_starts_an_exact_entry():
+    _, state = start_day()
+    data = snapshot(now=MIDNIGHT + 5000, equity=1000, upnl=0, size=0)
+    data["fills"] = [
+        fill(701, MIDNIGHT + 1000, "A", 20, 100, 10),     # long 10 from before today -> short 10 @ 100
+        fill(702, MIDNIGHT + 2000, "A", 10, 110, -10),    # add to the short @ 110 while under water
+        fill(703, MIDNIGHT + 3000, "B", 20, 105, -20),    # close flat
+    ]
+    report, _ = observe(data, state)
+    assert any("added to a losing short at 110" in reason and "approximate" not in reason
+               for reason in report["reasons"])
+
+
+def test_midday_first_check_still_sees_the_days_earlier_underwater_add():
+    noon = MIDNIGHT + 12 * 3_600_000
+    data = snapshot(now=noon, equity=900, upnl=-100, size=20, orders=[stop(trigger=80)])
+    data["fills"] = [fill(801, MIDNIGHT + 3_600_000, "B", 10, 110, 0),
+                     fill(802, MIDNIGHT + 7_200_000, "B", 10, 90, 10)]
+    report, state = observe(data)
+    assert report["daily"]["baseline_quality"] == "partial_day"
+    assert any("added to a losing long at 90" in reason for reason in report["reasons"])
+    # the next check fetches from the risk day's start, not the noon baseline
+    assert history_start({**CONFIG, "timezone": "Asia/Singapore"}, state, noon + 30_000) == state["day"]["start_ms"] < noon
+
+
+def test_opening_fill_exactly_at_day_start_counts_for_the_underwater_check():
+    noon = MIDNIGHT + 12 * 3_600_000
+    day_start = MIDNIGHT - 10_000                         # 00:00:00 Singapore time
+    data = snapshot(now=noon, equity=1000, upnl=0, size=0)
+    data["fills"] = [fill(901, day_start, "B", 10, 100, 0),
+                     fill(902, day_start + 1000, "B", 10, 90, 10),
+                     fill(903, day_start + 2000, "A", 20, 95, 20)]
+    report, _ = observe(data)
+    assert any("added to a losing long at 90" in reason and "approximate" not in reason
+               for reason in report["reasons"])
+
+
+def test_oversized_and_underwater_add_warnings_do_not_change_status_or_entry_allowed():
+    _, state = start_day()
+    config = {**CONFIG, "max_position_notional_usdc": 500}
+    data = snapshot(now=MIDNIGHT + 1000, equity=970, upnl=-30, size=10, orders=[stop(trigger=95)])
+    data["fills"] = underwater_long_fills()
+    report, _ = observe(data, state, config)
+    assert report["status"] == "CLEAR"
+    assert report["entry_allowed"] is True
+    reasons = " ".join(report["reasons"])
+    assert "exceeds size cap" in reasons
+    assert "added to a losing long" in reasons
