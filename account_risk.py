@@ -5,7 +5,9 @@ from datetime import datetime, time as day_time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from account_api import AccountDataError, validate_wallet
-from account_observation import accounting_events, normalize_snapshot, number, underwater_adds
+from account_observation import (
+    accounting_events, normalize_snapshot, number, underwater_add_reason, underwater_adds,
+)
 
 
 def validate_config(config):
@@ -178,8 +180,10 @@ def evaluate(snapshot, config, state=None, *, now_ms, max_age_ms=90_000, reset_g
         report["reasons"].append("pending non-reduce-only orders remain live; monitor cannot cancel them")
     # Position-size and add-while-underwater warnings are reasons only: they
     # never change status/entry_allowed above (a later, separate decision may
-    # make them blocking).
+    # make them blocking). Structured fields accompany the text so a caller
+    # (the Railway watcher) can read them without parsing reason strings.
     cap = config.get("max_position_notional_usdc")
+    oversized = []
     if cap is None:
         report["reasons"].append("position size cap not configured (max_position_notional_usdc)")
     else:
@@ -187,11 +191,15 @@ def evaluate(snapshot, config, state=None, *, now_ms, max_age_ms=90_000, reset_g
             price = position.get("mark") or position.get("entry")
             notional = abs(position["size"]) * price
             if notional > cap:
+                oversized.append({"coin": position["coin"], "notional_usdc": notional, "cap_usdc": cap})
                 report["reasons"].append(
                     f"{position['coin']} position notional {notional:,.2f} USDC exceeds size cap {cap:,.2f} USDC")
+    report["oversized_positions"] = oversized
     # The risk day includes a fill stamped exactly at its start; the event
     # filter's lower bound is exclusive, hence the - 1.
-    report["reasons"].extend(underwater_adds(snapshot, day["start_ms"] - 1, observation["positions"]))
+    underwater = underwater_adds(snapshot, day["start_ms"] - 1, observation["positions"])
+    report["underwater_adds"] = underwater
+    report["reasons"].extend(underwater_add_reason(item) for item in underwater)
     report["entry_allowed"] = report["status"] == "CLEAR"
     report["reasons"].append("read-only observation; does not block manual orders or guarantee stop fills")
     candidate["last_observation"] = {key: observation[key] for key in (
