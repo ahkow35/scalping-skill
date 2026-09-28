@@ -24,7 +24,7 @@ each exposed as a Railway variable on the bucket service.
 
 - **New service → same GitHub repo** (this one), named `recorder`.
 - Settings → Volumes → attach a volume at `/data`.
-- Build, start, health-check, restart and replica settings for both
+- Build, start, health-check and replica settings for both
   services live in `.railway/railway.ts` (Railway infrastructure-as-code).
   Preview with `railway config plan`, apply with `railway config apply`.
   Do not add a `railway.json` to this repo: Railway applies a repo-root one

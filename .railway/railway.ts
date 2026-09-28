@@ -5,6 +5,8 @@ import { bucket, defineRailway, github, preserve, project, service, volume } fro
 // 2026-12-01). A repo-root railway.json was also applied to every service
 // built from this repo, which made the recorder build the watcher's image.
 // Secrets stay in Railway: preserve() keeps each existing value unchanged.
+// Restart policy is left at Railway's default (on failure, 10 retries);
+// setting it explicitly stores nothing and leaves a permanent plan diff.
 export default defineRailway(() => {
   const repo = github("ahkow35/scalping-skill", { checkSuites: false });
 
@@ -20,7 +22,6 @@ export default defineRailway(() => {
     start: "python3 railway_record.py",
     healthcheck: "/health",
     healthcheckTimeout: 30,
-    deploy: { restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 10 },
     replicas: { "asia-southeast1-eqsg3a": 1 },
     volumeMounts: { "/data": recorderVolume },
     env: { PORT: preserve(), S3_ACCESS_KEY_ID: preserve(), S3_BUCKET: preserve(), S3_ENDPOINT: preserve(), S3_REGION: preserve(), S3_SECRET_ACCESS_KEY: preserve() },
@@ -33,7 +34,6 @@ export default defineRailway(() => {
     start: "python3 railway_watch.py",
     healthcheck: "/health",
     healthcheckTimeout: 30,
-    deploy: { restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 10 },
     replicas: { "asia-southeast1-eqsg3a": 1 },
     volumeMounts: { "/data": watcherVolume },
     env: {

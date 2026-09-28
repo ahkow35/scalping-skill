@@ -3,7 +3,7 @@
 ## 2026-09-28 — Railway settings moved to `.railway/railway.ts`
 The repo-root `railway.json` (the watcher's settings) was also applied to the
 new recorder service, so the recorder built the watcher's image and failed
-its health check. Both services' build, start, health-check, restart and
+its health check. Both services' build, start, health-check and
 replica settings now live in one Railway infrastructure-as-code file,
 `.railway/railway.ts`, applied with `railway config apply`; `railway.json`
 and `railway.recorder.json` are removed (Config as Code is deprecated and
