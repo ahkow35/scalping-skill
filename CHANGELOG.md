@@ -1,5 +1,54 @@
 # Changelog — scalp skill
 
+## 2026-09-28 — account preflight reads the Railway watcher (PR B)
+Added `account_monitor.py remote-check [--json]`, a read-only subcommand that
+reads the always-on Railway watcher's `GET /report` (PR A) instead of taking
+a local exchange reading. It resolves the watcher URL from env
+`SCALP_WATCHER_URL` (wins) or the local config's new optional `watcher_url`
+field (`configure --watcher-url`, validated as an https URL; old configs
+without it keep working), and the token from env `SCALP_WATCHER_TOKEN` or the
+macOS Keychain (`security find-generic-password -s
+scalp-watcher-report-token -w`, via subprocess with a short timeout). Neither
+the token nor the Authorization header is ever printed, logged or included in
+any output, including error messages. It returns the watcher's report
+unchanged in shape (the same fields `check --json` produces) plus
+`source: "railway"` and `report_age_s`, and fails closed — never falling back
+to a local check — on a missing URL/token (`CONFIG_REQUIRED`), an
+unreachable/non-200/malformed watcher response, or a report whose
+`produced_at_ms` is more than 60 seconds old or more than 5 seconds in the
+future (`DATA_UNAVAILABLE`, `entry_allowed: false`, no `observation`, a plain
+reason). A garbled answer also fails closed: an `entry_allowed` that is not a real
+true/false, a non-finite or non-numeric `produced_at_ms`, any NaN/Infinity in
+the body (including overflow such as `1e400`), a non-string configured
+`watcher_url`, a response containing the token (raw or JSON-escaped), or
+`entry_allowed: true` outside a complete `CLEAR` report (every invariant
+`account_risk.evaluate` guarantees when it grants entry). The env URL is https-validated too, before
+the token is sent, and redirects are not followed. Exit codes match `check`: 0 eligible, 3 HALT, 2 other blocked/unknown.
+`SKILL.md`'s account preflight (the Step 2 entry-preflight bullet and the
+`/scalp account check` admin command) now runs `remote-check --json` instead
+of `check --json`; every existing preflight rule is unchanged, and the local
+`check` remains documented as available to run by hand. `ACCOUNT-MONITOR.md`
+documents `remote-check`, the 60-second freshness rule, fail-closed behaviour,
+where the token comes from, and that the Mac's midnight-baseline launchd job
+(`scripts/midnight_watch.sh` / `com.nyanyk.scalp-midnight.plist`) becomes
+unnecessary once this is live and trusted — retiring it is a separate owner
+action, not done here. Tests
+(`tests/test_account_monitor_remote_check.py`, no network or Keychain access,
+the HTTP GET and the Keychain reader both injected): a fresh report passes
+`entry_allowed` through as the watcher said, including a pass-through HALT; a
+stale (>60s) or future-dated (>5s) report blocks; 401 reads "refused the
+token", 503 and a connection/timeout error read "unavailable"/"unreachable";
+malformed JSON and a missing `produced_at_ms`/`report` field block; a missing
+URL or an unresolvable token (env unset, Keychain fails) give
+`CONFIG_REQUIRED`; env URL overrides config URL; an old config without
+`watcher_url` and a corrupt local config both keep working; the token never
+appears in the JSON or rendered output across every success/failure path, nor
+in the raw Keychain-reader output; `configure --watcher-url` accepts an https
+URL and rejects `http://`; CLI wiring never falls back to `check()` for
+`remote-check` and its exit codes match. Scope: `account_risk.py`,
+`railway_watch.py`, the recorder and the launchd job are unchanged; read-only,
+no order placement.
+
 ## 2026-09-28 — always-on Railway watcher for the account monitor (PR A)
 Added `railway_watch.py`, a small always-on loop that calls
 `account_monitor.check()` directly (never the `watch` subcommand, never

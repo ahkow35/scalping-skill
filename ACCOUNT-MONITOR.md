@@ -7,12 +7,14 @@ This is a persistent warning latch and an entry preflight, **not an exchange-enf
 Use the actual public trading wallet, not an agent wallet, and a loss limit explicitly selected by the account owner. There is no default loss amount. From this repository:
 
 ```sh
-python3 account_monitor.py configure --wallet 0xYOUR_PUBLIC_WALLET --daily-loss-usdc YOUR_LIMIT
+python3 account_monitor.py configure --wallet 0xYOUR_PUBLIC_WALLET --daily-loss-usdc YOUR_LIMIT \
+  --watcher-url https://YOUR-RAILWAY-WATCHER.up.railway.app
 python3 account_monitor.py check --json
+python3 account_monitor.py remote-check --json
 python3 account_monitor.py watch --interval-seconds 30
 ```
 
-Alternatively configure `--daily-loss-pct YOUR_PERCENT`. Reset timezone defaults to `Asia/Singapore`; `--timezone` accepts an IANA timezone. Optionally configure `--max-position-notional-usdc YOUR_CAP` (an owner-selected per-position size warning; there is no default). Configuration and persistent per-wallet state live in ignored `.account_monitor/`. Do not delete state to clear a loss warning. Reconfiguration does not clear a same-day latch or increase that day's budget. No background service or notification subscription is installed automatically. Watch output is local only.
+Alternatively configure `--daily-loss-pct YOUR_PERCENT`. Reset timezone defaults to `Asia/Singapore`; `--timezone` accepts an IANA timezone. Optionally configure `--max-position-notional-usdc YOUR_CAP` (an owner-selected per-position size warning; there is no default) and `--watcher-url` (see "Remote preflight" below; also optional). `configure` always rewrites the whole saved config: any of these optional flags left off a given `configure` call resets to unconfigured for that call, the same way `--max-position-notional-usdc` already behaves — pass `--watcher-url` again on every reconfigure, or it drops. Configuration and persistent per-wallet state live in ignored `.account_monitor/`. Do not delete state to clear a loss warning. Reconfiguration does not clear a same-day latch or increase that day's budget. No background service or notification subscription is installed automatically. Watch output is local only.
 
 Exit codes: 0 means eligible for further skill checks, 3 means a latched HALT, 2 means another blocked/unknown state. CLEAR is not an entry signal.
 
@@ -60,5 +62,45 @@ Environment variables it reads on boot (names only — values are Railway servic
 - `PORT` — the port the small HTTP server listens on (`GET /report`, token-protected; `GET /health`, unauthenticated, for Railway's own health check; nothing else is served).
 
 **Merging to `main` redeploys the watcher** once Railway follows the main branch — a normal `git push` to a feature branch does not. **Never merge or deploy within 10 minutes of midnight Singapore time**: a restart across the boundary leaves the watcher's own day baseline partial for that day. `/report` is token-protected (`hmac.compare_digest` against `REPORT_TOKEN`, sent as `Authorization: Bearer <token>`); it is on Railway's public domain, so treat the token like any other credential.
+
+## Remote preflight (`remote-check`)
+
+`python3 account_monitor.py remote-check --json` reads the watcher's `/report`
+instead of taking a local exchange reading, and is what `/scalp`'s account
+preflight and `/scalp account check` now run. It returns the watcher's report
+unchanged in shape (the same fields `check --json` produces, so it reads
+identically) plus `source: "railway"` and `report_age_s`. The local `python3
+account_monitor.py check` still works and remains available to run by hand.
+
+It resolves the watcher URL from `SCALP_WATCHER_URL` if set (env wins), else
+the local config's optional `watcher_url` field (`configure --watcher-url
+YOUR_HTTPS_URL`, validated as an https URL; a config saved before this field
+existed keeps working — it just has no watcher URL to read). Either source
+must be an https URL, or the token is never sent (`CONFIG_REQUIRED`);
+redirects are not followed. The token comes
+from `SCALP_WATCHER_TOKEN` if set, else the macOS Keychain (`security
+find-generic-password -s scalp-watcher-report-token -w`). Neither the token
+nor the Authorization header is ever printed, logged, or included in any
+error message.
+
+It **fails closed** and never falls back to a local check: a missing URL or
+token, an unreachable or non-200 watcher, a malformed body, or a report whose
+`produced_at_ms` is more than **60 seconds** old or more than 5 seconds in
+the future all produce `status: DATA_UNAVAILABLE` (or `CONFIG_REQUIRED` for a
+missing URL/token), `entry_allowed: false`, and no `observation` — a plain
+reason names why (e.g. a 401 reads "watcher refused the token"). A garbled
+answer blocks too: `entry_allowed` that is not a real true/false, a broken
+`produced_at_ms`, any NaN, Infinity or overflowing number, a response that
+contains the token (raw or JSON-escaped), or permission outside a complete
+`CLEAR` report: status `CLEAR`, not latched, a `near_reset_observation`
+(full-day) baseline, positive equity, P&L inside the limit, a remaining budget
+equal to limit + P&L, and known open risk that fits it. Exit codes
+match `check`: 0 eligible, 3 HALT, 2 other blocked/unknown.
+
+Once this is live and trusted, the Mac's `scripts/midnight_watch.sh` /
+`com.nyanyk.scalp-midnight.plist` local nightly-baseline job becomes
+unnecessary — the watcher's own always-on loop already anchors its baseline
+across every midnight. Retiring that launchd job is a separate owner action,
+not done by this change.
 
 Source contracts: [Hyperliquid information endpoints](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint), [account abstraction modes](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes), and [take-profit/stop-loss orders](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/take-profit-and-stop-loss-orders-tp-sl).
