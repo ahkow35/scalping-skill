@@ -415,7 +415,10 @@ class RecorderPoller:
     timeout alone does not bound a body that trickles in slowly. The loop
     calls `tick` every pass; it starts a poll when one is due and hands back
     any finished result. A poll still running after `stuck_after_s` counts
-    as unreachable (None), at most once per interval, until it returns."""
+    as unreachable (None), at most once per interval, until it returns — and
+    its answer, when it finally lands, is read as unreachable too: a reply
+    that took that long describes a moment long gone and must never clear
+    an alert raised in the meantime."""
 
     def __init__(self, url, fetch, *, interval_s, stuck_after_s, spawn=_spawn_daemon):
         self._url = url
@@ -429,6 +432,7 @@ class RecorderPoller:
         self._last_stuck_ms = None
         self._has_result = False
         self._result = None
+        self._result_started_ms = None
 
     def tick(self, now_ms):
         """The statuses (zero or one) to feed Watcher.recorder_step now."""
@@ -447,6 +451,8 @@ class RecorderPoller:
         with self._lock:
             if self._has_result:
                 self._has_result = False
+                if now_ms - self._result_started_ms >= self._stuck_ms:
+                    return [None]
                 return [self._result]
             since = self._in_flight_since_ms
             if since is not None and now_ms - since >= self._stuck_ms and (
@@ -463,6 +469,7 @@ class RecorderPoller:
             status = None
         with self._lock:
             self._result, self._has_result = status, True
+            self._result_started_ms = self._in_flight_since_ms
             self._in_flight_since_ms = self._last_stuck_ms = None
 
 

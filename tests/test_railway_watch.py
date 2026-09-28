@@ -863,7 +863,7 @@ def test_a_stuck_recorder_poll_reads_as_unreachable_and_alerts():
     assert any("PROBLEM:" in m and "recorder" in m for m in sent)
 
 
-def test_poller_hands_back_a_late_result_once():
+def test_poller_reads_a_stuck_poll_as_unreachable_once_per_interval():
     threads = []
     poller = rw.RecorderPoller("http://x/status", lambda url: {"connected": True},
                                interval_s=60, stuck_after_s=120, spawn=threads.append)
@@ -871,9 +871,31 @@ def test_poller_hands_back_a_late_result_once():
     assert poller.tick(119_000) == []
     assert poller.tick(120_000) == [None]      # stuck -> unreachable
     assert poller.tick(150_000) == []          # at most once per interval
-    threads[0]()                               # the hung poll finally returns
-    assert poller.tick(160_000) == [{"connected": True}]
-    assert poller.tick(170_000) == []
+    assert poller.tick(180_000) == [None]
+
+
+def test_a_late_healthy_reply_never_clears_a_recorder_alert():
+    # Codex r2: a healthy reply that trickled in after the poll was already
+    # read as stuck described a moment long gone — it must not clear
+    # RECORDER_SILENT; only a fresh poll may.
+    threads = []
+    watcher = make_watcher()
+    poller = rw.RecorderPoller("http://x/status", lambda url: {"connected": True,
+                                                               "seconds_since_last_message": 1.0},
+                               interval_s=60, stuck_after_s=120, spawn=threads.append)
+    sent = []
+    t = MIDNIGHT
+    for now in range(t, t + 481_000, 60_000):
+        for status in poller.tick(now):
+            sent += watcher.recorder_step(status, now)
+    assert any("PROBLEM:" in m for m in sent)
+    sent.clear()
+    threads[0]()                                # the stale healthy reply lands
+    assert poller.tick(t + 500_000) == [None]   # read as unreachable, not healthy
+    assert len(threads) == 2                    # a fresh poll started on that same tick...
+    threads[1]()
+    status = poller.tick(t + 501_000)           # ...and its prompt reply counts
+    assert status == [{"connected": True, "seconds_since_last_message": 1.0}]
 
 
 def test_loop_polls_recorder_at_most_once_a_minute():
