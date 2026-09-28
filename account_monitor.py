@@ -137,7 +137,12 @@ def _local_config(data_dir):
 
 
 def _number(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # a JSON integer too large for a float
+        return False
 
 
 def _complete_clear(report):
@@ -155,9 +160,12 @@ def _complete_clear(report):
     equity = observation.get("equity_usdc")
     return (report.get("status") == "CLEAR"
             and report.get("daily_breach_latched") is False
-            and daily.get("baseline_quality") not in (None, "partial_day")
+            and daily.get("baseline_quality") == "near_reset_observation"
             and all(_number(v) for v in (risk, remaining, net_pnl, limit, equity))
             and equity > 0 and limit > 0 and net_pnl > -limit
+            # evaluate computes remaining as max(0, limit + net_pnl); an
+            # overstated remaining would let open risk look like it fits.
+            and abs(remaining - max(0, limit + net_pnl)) <= 0.01
             and 0 <= risk <= remaining)
 
 

@@ -92,9 +92,9 @@ reason names why (e.g. a 401 reads "watcher refused the token"). A garbled
 answer blocks too: `entry_allowed` that is not a real true/false, a broken
 `produced_at_ms`, any NaN, Infinity or overflowing number, a response that
 contains the token (raw or JSON-escaped), or permission outside a complete
-`CLEAR` report: status `CLEAR`, not latched, a full-day baseline, positive
-equity, P&L inside the limit, and known open risk that fits the remaining
-budget. Exit codes
+`CLEAR` report: status `CLEAR`, not latched, a `near_reset_observation`
+(full-day) baseline, positive equity, P&L inside the limit, a remaining budget
+equal to limit + P&L, and known open risk that fits it. Exit codes
 match `check`: 0 eligible, 3 HALT, 2 other blocked/unknown.
 
 Once this is live and trusted, the Mac's `scripts/midnight_watch.sh` /

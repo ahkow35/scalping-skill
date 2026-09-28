@@ -633,3 +633,39 @@ def test_escaped_token_echo_blocks_and_never_prints(where, capsys, monkeypatch):
     assert code == 2
     assert json.loads(out.out)["entry_allowed"] is False
     assert SECRET not in out.out + out.err
+
+
+# --------------------------------------------------------------------------
+# Cross-review round 3 (Codex): remaining budget must match limit + P&L;
+# baseline quality must be the recognised full-day value; huge ints block
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("override", [
+    {"daily": {**WATCHER_REPORT["daily"], "net_pnl_usdc": -90.0}},          # remaining 150 overstated (real 60)
+    {"remaining_daily_budget_usdc": 149.0},
+    {"daily": {**WATCHER_REPORT["daily"], "baseline_quality": "unknown"}},
+    {"daily": {**WATCHER_REPORT["daily"], "baseline_quality": False}},
+    {"daily": {**WATCHER_REPORT["daily"], "baseline_quality": {}}},
+])
+def test_round3_inconsistent_clear_blocks(override):
+    report = _remote(envelope(NOW - 1_000, {**WATCHER_REPORT, **override}))
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert report["entry_allowed"] is False
+
+
+def test_consistent_loss_day_still_permitted():
+    report = _remote(envelope(NOW - 1_000, {
+        **WATCHER_REPORT, "remaining_daily_budget_usdc": 60.0, "open_trigger_distance_risk_usdc": 60.0,
+        "daily": {**WATCHER_REPORT["daily"], "net_pnl_usdc": -90.0}}))
+    assert report["entry_allowed"] is True
+
+
+def test_huge_integer_blocks_without_crashing(capsys, monkeypatch):
+    raw = json.dumps(envelope(NOW - 1_000)).replace('"equity_usdc": 5000.0', '"equity_usdc": 1' + "0" * 400)
+    monkeypatch.setenv("SCALP_WATCHER_URL", URL)
+    monkeypatch.setenv("SCALP_WATCHER_TOKEN", SECRET)
+    monkeypatch.setattr(monitor.requests, "get", lambda *a, **k: FakeResponse(200, raw=raw))
+    code = monitor.main(["remote-check", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert out["entry_allowed"] is False
