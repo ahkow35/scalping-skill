@@ -1,5 +1,16 @@
 # Changelog — scalp skill
 
+## 2026-09-28 — Railway settings moved to `.railway/railway.ts`
+The repo-root `railway.json` (the watcher's settings) was also applied to the
+new recorder service, so the recorder built the watcher's image and failed
+its health check. Both services' build, start, health-check, restart and
+replica settings now live in one Railway infrastructure-as-code file,
+`.railway/railway.ts`, applied with `railway config apply`; `railway.json`
+and `railway.recorder.json` are removed (Config as Code is deprecated and
+stops working 2026-12-01). Secrets stay in Railway (`preserve()`); the
+watcher's `RECORDER_STATUS_URL` now points at the recorder's private domain
+by reference.
+
 ## 2026-09-28 — flow recorder as a second Railway service, uploading to a Railway Storage Bucket (PR C)
 Added `railway_record.py`, a second always-on Railway service that runs
 `recorder.py`'s existing WebSocket capture loop unchanged — what and how it
