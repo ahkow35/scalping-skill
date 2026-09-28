@@ -256,10 +256,16 @@ class Watcher:
         unreachable poll (`status is None`) — no evidence either way, same
         rule `step()` applies to account problems on a failed report."""
         messages = []
-        healthy = (status is not None
-                   and status.get("connected") is True
-                   and isinstance(status.get("seconds_since_last_message"), (int, float))
-                   and status["seconds_since_last_message"] < RECORDER_SILENT_THRESHOLD_S)
+        if status is None:
+            healthy = False
+        else:
+            connected = status.get("connected") is True
+            msg_seconds = status.get("seconds_since_last_message")
+            has_fresh_msg = (
+                isinstance(msg_seconds, (int, float))
+                and msg_seconds < RECORDER_SILENT_THRESHOLD_S
+            )
+            healthy = connected and has_fresh_msg
         if healthy:
             self.recorder_first_silent_ms = None
             self._clear("RECORDER_SILENT", now_ms, messages)
@@ -275,14 +281,20 @@ class Watcher:
             disabled = status.get("uploads_enabled") is False
             day_stale = status.get("seconds_since_oldest_unconfirmed_day_ended")
             failing_s = status.get("seconds_upload_failing")
-            failing = (
-                disabled
-                or (isinstance(day_stale, (int, float)) and day_stale > RECORDER_UPLOAD_FAILING_THRESHOLD_S)
-                or (isinstance(failing_s, (int, float)) and failing_s > RECORDER_UPLOAD_FAILING_THRESHOLD_S)
+            day_stale_old = (
+                isinstance(day_stale, (int, float))
+                and day_stale > RECORDER_UPLOAD_FAILING_THRESHOLD_S
             )
+            upload_failing = (
+                isinstance(failing_s, (int, float))
+                and failing_s > RECORDER_UPLOAD_FAILING_THRESHOLD_S
+            )
+            failing = disabled or day_stale_old or upload_failing
             if failing:
-                reason = ("recorder uploads disabled — missing S3 bucket configuration" if disabled else
-                           "recorder upload is more than 24h behind")
+                if disabled:
+                    reason = "recorder uploads disabled — missing S3 bucket configuration"
+                else:
+                    reason = "recorder upload is more than 24h behind"
                 self._note("RECORDER_UPLOAD_FAILING", reason, now_ms, messages)
             else:
                 self._clear("RECORDER_UPLOAD_FAILING", now_ms, messages)
@@ -574,9 +586,10 @@ def loop(watcher, *, data_dir, check, send, ping, on_report=None,
         # cadence), and any exception here is swallowed so it can never
         # crash or stall the account loop above. Never touches /report,
         # entry_allowed, or any account-derived problem.
+        poll_interval_ms = recorder_poll_interval_s * 1000
         if recorder_status_url and (
                 last_recorder_poll_ms is None
-                or now_ms - last_recorder_poll_ms >= recorder_poll_interval_s * 1000):
+                or now_ms - last_recorder_poll_ms >= poll_interval_ms):
             last_recorder_poll_ms = now_ms
             try:
                 status = fetch_recorder_status(recorder_status_url)

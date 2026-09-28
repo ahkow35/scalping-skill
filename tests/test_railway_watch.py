@@ -7,7 +7,13 @@ import requests
 
 import railway_watch as rw
 from test_account_observation import WALLET, snapshot, stop
-from test_account_risk import CONFIG, MIDNIGHT, observe, start_day, underwater_long_fills
+from test_account_risk import (
+    CONFIG,
+    MIDNIGHT,
+    observe,
+    start_day,
+    underwater_long_fills,
+)
 
 
 TZ = "Asia/Singapore"
