@@ -809,13 +809,12 @@ def test_loop_recorder_feature_off_when_url_unset_zero_behaviour_change():
     assert fetch_calls == []
 
 
-def _clock_sequence(top_values, calls_per_iter=3):
+def _clock_sequence(top_values, calls_per_iter=4):
     """`loop()` calls `clock()` up to `calls_per_iter` times per iteration
-    (once at the top, captured as `now_ms`, then twice more for the sleep
-    calculation on every non-final pass). Only the top-of-loop value drives
-    the recorder-poll gate and the account check, so this repeats each
-    wanted top value across its iteration's extra calls — those extra calls'
-    values are otherwise unused by these tests."""
+    (once at the top, captured as `now_ms`, once more just before the
+    recorder poll, then twice for the sleep calculation on every non-final
+    pass). This repeats each wanted per-iteration value across all of that
+    iteration's calls."""
     seq = []
     for v in top_values:
         seq.extend([v] * calls_per_iter)
@@ -861,6 +860,38 @@ def test_a_stuck_recorder_poll_reads_as_unreachable_and_alerts():
             recorder_spawn=started.append)  # the poll never finishes
     assert len(started) == 1  # never a second poll while one is in flight
     assert any("PROBLEM:" in m and "recorder" in m for m in sent)
+
+
+def test_loop_ages_recorder_replies_against_the_clock_after_the_account_check():
+    # Codex r3: now_ms is read before the account check, which can take tens
+    # of seconds. A reply 130s old must still be read as unreachable.
+    t = {"now": MIDNIGHT}
+    threads = []
+    seen = []
+
+    class RecordingWatcher(type(make_watcher())):
+        def recorder_step(self, status, now_ms):
+            seen.append(status)
+            return super().recorder_step(status, now_ms)
+
+    watcher = make_watcher()
+    watcher.__class__ = RecordingWatcher
+
+    def slow_check(_dir):
+        if threads:           # 2nd pass: the check is slow, and the reply lands meanwhile
+            t["now"] += 130_000
+            threads[0]()
+        return {"status": "DATA_UNAVAILABLE", "reasons": ["x"]}
+
+    def sleep(_s):
+        t["now"] += 90_000
+
+    rw.loop(watcher, data_dir="unused", check=slow_check, send=lambda m: None,
+            ping=lambda: None, clock=lambda: t["now"], sleep=sleep, iterations=2,
+            recorder_status_url="http://x/status",
+            fetch_recorder_status=lambda url: {"connected": True, "seconds_since_last_message": 1.0},
+            recorder_spawn=threads.append)
+    assert seen == [None]  # the 220s-old healthy reply was never passed on as healthy
 
 
 def test_poller_reads_a_stuck_poll_as_unreachable_once_per_interval():

@@ -652,8 +652,12 @@ def loop(watcher, *, data_dir, check, send, ping, on_report=None,
         # account-derived problem.
         if recorder_poller is not None:
             try:
-                for status in recorder_poller.tick(now_ms):
-                    for message in watcher.recorder_step(status, now_ms):
+                # A fresh clock read: the account check above can take tens
+                # of seconds, and an old now_ms would let a stale reply pass
+                # the poller's age check.
+                recorder_now_ms = clock()
+                for status in recorder_poller.tick(recorder_now_ms):
+                    for message in watcher.recorder_step(status, recorder_now_ms):
                         _safe_send(send, message)
             except Exception:
                 logger.exception("recorder check raised — ignoring this pass")
