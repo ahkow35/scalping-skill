@@ -169,6 +169,19 @@ def _complete_clear(report):
             and 0 <= risk <= remaining)
 
 
+def watcher_report_problem(report, age_s):
+    """Why a watcher report must not be trusted as it stands, or None. The
+    one gate both remote_check (/scalp) and the watcher's Telegram /check
+    apply, so the two can never disagree about whether entry is allowed."""
+    if report.get("entry_allowed") and not _complete_clear(report):
+        return "watcher report was inconsistent (entry allowed outside a complete CLEAR)"
+    if age_s > WATCHER_FRESHNESS_S:
+        return f"watcher report is {age_s:.0f} s old (limit {WATCHER_FRESHNESS_S} s)"
+    if age_s < -WATCHER_FUTURE_SKEW_S:
+        return f"watcher report is {-age_s:.0f} s in the future (limit {WATCHER_FUTURE_SKEW_S} s)"
+    return None
+
+
 def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=None,
                   keychain=None, clock=None,
                   timeout=WATCHER_REQUEST_TIMEOUT_S):
@@ -243,13 +256,10 @@ def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=None,
     if (not isinstance(watcher_report.get("status"), str)
             or not isinstance(watcher_report.get("entry_allowed"), bool)):
         return unavailable("watcher response was malformed")
-    if watcher_report["entry_allowed"] and not _complete_clear(watcher_report):
-        return unavailable("watcher report was inconsistent (entry allowed outside a complete CLEAR)")
     age_s = (clock() - produced_at_ms) / 1000
-    if age_s > WATCHER_FRESHNESS_S:
-        return unavailable(f"watcher report is {age_s:.0f} s old (limit {WATCHER_FRESHNESS_S} s)")
-    if age_s < -WATCHER_FUTURE_SKEW_S:
-        return unavailable(f"watcher report is {-age_s:.0f} s in the future (limit {WATCHER_FUTURE_SKEW_S} s)")
+    problem = watcher_report_problem(watcher_report, age_s)
+    if problem:
+        return unavailable(problem)
     result = dict(watcher_report)
     result["source"] = "railway"
     result["report_age_s"] = age_s

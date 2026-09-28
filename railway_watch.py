@@ -9,7 +9,9 @@ structured fields, and alerts over Telegram when a problem appears, repeats
 that alert every 30 minutes while it lasts, and sends an ALL CLEAR when it
 ends. It also serves the latest report over a small, token-protected HTTP
 endpoint for `/scalp` (a later PR) to read, and pings an optional dead-man
-health check on every loop pass that produced a report.
+health check on every loop pass that produced a report. It also answers a
+`/check` command sent from the configured Telegram chat with that latest
+report, judged by the same entry gate `/scalp` applies to it.
 
 Report classification (`classify`) is the one place this module decides how
 much to trust a report: only a fully evaluated report (the normal
@@ -48,6 +50,13 @@ logger = logging.getLogger("railway_watch")
 
 TELEGRAM_URL = "https://api.telegram.org/bot{token}/sendMessage"
 TELEGRAM_TIMEOUT_S = 5.0
+TELEGRAM_UPDATES_URL = "https://api.telegram.org/bot{token}/getUpdates"
+TELEGRAM_LONG_POLL_S = 25
+# (connect, read): the read allowance covers Telegram holding the long poll.
+TELEGRAM_UPDATES_TIMEOUT = (5.0, TELEGRAM_LONG_POLL_S + 10.0)
+COMMAND_ERROR_BACKOFF_S = 5
+COMMAND_CONFLICT_BACKOFF_S = 60
+TELEGRAM_MAX_TEXT = 4000
 HEALTHCHECK_TIMEOUT_S = 5.0
 NORMAL_INTERVAL_S = 30
 FAST_INTERVAL_S = 15
@@ -522,16 +531,24 @@ class ReportState:
     def __init__(self):
         self._lock = threading.Lock()
         self._body = None
+        self._latest = None
 
     def update(self, produced_at_ms, report):
         body = json.dumps({"produced_at_ms": produced_at_ms, "report": report},
                            allow_nan=False).encode("utf-8")
         with self._lock:
             self._body = body
+            # A private copy of exactly what /report serves, for /check.
+            self._latest = (produced_at_ms, json.loads(body)["report"])
 
     def snapshot(self):
         with self._lock:
             return self._body
+
+    def latest(self):
+        """(produced_at_ms, report) as last served on /report, or None."""
+        with self._lock:
+            return self._latest
 
 
 def make_handler(state, token):
@@ -583,6 +600,151 @@ def make_handler(state, token):
 # ---------------------------------------------------------------------------
 # Config on boot
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Telegram /check — answers only the configured chat, from the latest report
+# the loop produced. Never runs a check of its own and never touches the
+# alert state, so it cannot slow or change the account loop.
+# ---------------------------------------------------------------------------
+
+def _usd(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "unknown"
+    return f"${value:,.2f}"
+
+
+def _signed_usd(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "unknown"
+    return f"{'-' if value < 0 else '+'}${abs(value):,.2f}"
+
+
+def format_check(latest, now_ms, timezone_name=DEFAULT_TIMEZONE):
+    """Plain-text reply to /check. ALLOWED appears only when /scalp's
+    remote_check would also let entry through for this report at this
+    moment: entry_allowed true and account_monitor.watcher_report_problem
+    finding nothing (a complete CLEAR, fresh within its 60 s limit)."""
+    if latest is None:
+        return "No account reading yet — the watcher has just started. Try /check again in a minute."
+    produced_at_ms, report = latest
+    age_s = (now_ms - produced_at_ms) / 1000
+    problem = account_monitor.watcher_report_problem(report, age_s)
+    allowed = report.get("entry_allowed") is True and problem is None
+    when = datetime.fromtimestamp(produced_at_ms / 1000, ZoneInfo(timezone_name)).strftime("%H:%M:%S")
+    lines = [f"ACCOUNT CHECK — reading taken {when} ({max(age_s, 0):.0f} s ago)",
+             "ENTRY: ALLOWED — the account has room; /scalp still runs its own checks" if allowed
+             else f"ENTRY: BLOCKED ({report.get('status') or 'UNKNOWN'})"]
+    if classify(report) == "evaluated":
+        daily = report.get("daily") or {}
+        observation = report.get("observation") or {}
+        lines.append(f"Daily budget left: {_usd(report.get('remaining_daily_budget_usdc'))} of "
+                     f"{_usd(daily.get('limit_usdc'))} (today's P&L {_signed_usd(daily.get('net_pnl_usdc'))})")
+        lines.append(f"Open stop risk: {_usd(report.get('open_trigger_distance_risk_usdc'))}")
+        lines.append(f"Equity: {_usd(observation.get('equity_usdc'))}")
+        for stop in observation.get("stops", []):
+            coverage = "fully covered" if stop.get("fully_covered") else "NOT fully covered"
+            lines.append(f"{stop.get('coin')} {stop.get('side')}: stops {coverage} "
+                         f"({stop.get('covered_size', 0):g}/{stop.get('position_size', 0):g})")
+        lines.extend(oversized_problems(report).values())
+    notes = ([problem] if problem else []) + [r for r in report.get("reasons") or [] if isinstance(r, str)]
+    if notes:
+        lines.append("Notes:")
+        lines.extend(f"- {note}" for note in notes)
+    lines.append("Read-only. ALLOWED means room in the budget, not a trade signal.")
+    text = "\n".join(lines)
+    return text if len(text) <= TELEGRAM_MAX_TEXT else text[:TELEGRAM_MAX_TEXT - 1] + "…"
+
+
+def _is_check_command(text):
+    """'/check' or '/check@SomeBot', any case, optionally followed by words."""
+    if not isinstance(text, str) or not text.strip():
+        return False
+    return text.split()[0].split("@", 1)[0].lower() == "/check"
+
+
+class TelegramCommands:
+    """Long-polls the bot's getUpdates and answers /check from the
+    configured chat only; every other chat and message is ignored. The
+    getUpdates URL carries the bot token, so failures log only the exception
+    class and HTTP status — never the exception text, which names the URL.
+    A /check sent while the watcher was down is dropped at startup rather
+    than answered late with a reading from a later moment."""
+
+    def __init__(self, token, chat_id, answer, *, get=requests.get, send=send_telegram,
+                  sleep=time.sleep):
+        self._token = token
+        self._chat_id = str(chat_id).strip()
+        self._answer = answer
+        self._get = get
+        self._send = send
+        self._sleep = sleep
+        self._offset = None
+        self._backlog_skipped = False
+
+    def _updates(self, params, timeout):
+        response = self._get(TELEGRAM_UPDATES_URL.format(token=self._token), params=params,
+                              timeout=timeout)
+        response.raise_for_status()
+        body = response.json()
+        if not (isinstance(body, dict) and body.get("ok") is True and isinstance(body.get("result"), list)):
+            raise ValueError("malformed getUpdates body")
+        return body["result"]
+
+    def _advance(self, update):
+        update_id = update.get("update_id") if isinstance(update, dict) else None
+        if isinstance(update_id, int) and not isinstance(update_id, bool):
+            self._offset = max(self._offset or 0, update_id + 1)
+
+    def _skip_backlog(self):
+        for update in self._updates({"offset": -1, "timeout": 0}, TELEGRAM_TIMEOUT_S):
+            self._advance(update)
+        self._backlog_skipped = True
+
+    def _handle(self, update):
+        message = update.get("message") if isinstance(update, dict) else None
+        if not isinstance(message, dict):
+            return
+        chat = message.get("chat")
+        if not isinstance(chat, dict) or str(chat.get("id")) != self._chat_id:
+            return
+        if not _is_check_command(message.get("text")):
+            return
+        try:
+            text = self._answer()
+        except Exception as exc:
+            logger.warning("could not build the /check reply: %s", type(exc).__name__)
+            text = "Could not build the /check reply — see the watcher logs."
+        self._send(self._token, self._chat_id, text)
+
+    def poll_once(self):
+        if not self._backlog_skipped:
+            self._skip_backlog()
+        params = {"timeout": TELEGRAM_LONG_POLL_S, "allowed_updates": json.dumps(["message"])}
+        if self._offset is not None:
+            params["offset"] = self._offset
+        for update in self._updates(params, TELEGRAM_UPDATES_TIMEOUT):
+            # Advance first: a message that fails to handle is never re-read.
+            self._advance(update)
+            self._handle(update)
+
+    def step(self):
+        """One poll; any failure is logged without its text and backed off."""
+        try:
+            self.poll_once()
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            logger.warning("telegram command poll failed: %s%s", type(exc).__name__,
+                            f" (HTTP {status})" if status else "")
+            # 409: another getUpdates consumer or a webhook holds the bot.
+            self._sleep(COMMAND_CONFLICT_BACKOFF_S if status == 409 else COMMAND_ERROR_BACKOFF_S)
+
+    def run_forever(self):
+        while True:
+            self.step()
+
+    def start(self):
+        threading.Thread(target=self.run_forever, daemon=True, name="telegram-commands").start()
+
 
 def resolve_data_dir(env=os.environ):
     raw = env.get("DATA_DIR")
@@ -711,6 +873,11 @@ def run():
     thread.start()
     logger.info("report server listening on :%d (token %s)", port,
                 "configured" if report_token else "UNSET — /report will 503")
+
+    if bot_token and chat_id:
+        TelegramCommands(bot_token, chat_id, lambda: format_check(
+            state.latest(), int(time.time() * 1000), timezone_name)).start()
+        logger.info("telegram /check listener started")
 
     watcher = Watcher(timezone=timezone_name)
     try:
