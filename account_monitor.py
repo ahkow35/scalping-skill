@@ -161,7 +161,7 @@ def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=None,
         return report
 
     url = env.get("SCALP_WATCHER_URL") or _local_config(data_dir).get("watcher_url")
-    if not url:
+    if not isinstance(url, str) or not url:
         return unavailable("watcher URL not configured (configure --watcher-url or SCALP_WATCHER_URL)",
                             status="CONFIG_REQUIRED")
     url = url.rstrip("/")
@@ -177,17 +177,21 @@ def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=None,
         return unavailable("watcher refused the token")
     if response.status_code != 200:
         return unavailable(f"watcher returned HTTP {response.status_code}")
+    def reject_constant(value):
+        raise ValueError(f"non-finite JSON value: {value}")
+
     try:
-        payload = response.json()
-    except ValueError:
+        payload = json.loads(response.content, parse_constant=reject_constant)
+    except (ValueError, TypeError):
         return unavailable("watcher response was not valid JSON")
     if not isinstance(payload, dict) or not isinstance(payload.get("report"), dict):
         return unavailable("watcher response was malformed")
     produced_at_ms = payload.get("produced_at_ms")
-    if not isinstance(produced_at_ms, (int, float)):
+    if isinstance(produced_at_ms, bool) or not isinstance(produced_at_ms, (int, float)):
         return unavailable("watcher response missing produced_at_ms")
     watcher_report = payload["report"]
-    if not isinstance(watcher_report.get("status"), str) or "entry_allowed" not in watcher_report:
+    if (not isinstance(watcher_report.get("status"), str)
+            or not isinstance(watcher_report.get("entry_allowed"), bool)):
         return unavailable("watcher response was malformed")
     age_s = (clock() - produced_at_ms) / 1000
     if age_s > WATCHER_FRESHNESS_S:

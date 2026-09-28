@@ -27,10 +27,11 @@ class FakeResponse:
         self._payload = payload
         self._malformed = malformed
 
-    def json(self):
+    @property
+    def content(self):
         if self._malformed:
-            raise ValueError("expecting value: line 1 column 1")
-        return self._payload
+            return b"<html>not json</html>"
+        return json.dumps(self._payload).encode()
 
 
 def envelope(produced_at_ms, report=WATCHER_REPORT):
@@ -452,3 +453,62 @@ def test_cli_remote_check_never_calls_local_check(monkeypatch, capsys):
                                                                      "report_age_s": 1.0})
     code = monitor.main(["remote-check", "--json"])
     assert code == 0
+
+
+# --------------------------------------------------------------------------
+# Garbled answers fail closed (an answer that is not plainly true/false, or a
+# broken timestamp, must never read as permission)
+# --------------------------------------------------------------------------
+
+def _remote(payload, now=NOW):
+    return monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=lambda url, headers=None, timeout=None: FakeResponse(200, payload),
+        keychain=refusing_keychain, clock=clock(now))
+
+
+@pytest.mark.parametrize("entry_allowed", ["no", "yes", 1, 0, None, [], {}])
+def test_non_boolean_entry_allowed_blocks(entry_allowed):
+    report = _remote(envelope(NOW - 1_000, {**WATCHER_REPORT, "entry_allowed": entry_allowed}))
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert report["entry_allowed"] is False
+
+
+@pytest.mark.parametrize("produced_at_ms", [float("nan"), float("inf"), float("-inf"), True, "1700000000000"])
+def test_broken_timestamp_blocks(produced_at_ms):
+    report = _remote(envelope(produced_at_ms))
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert report["entry_allowed"] is False
+
+
+def test_non_finite_number_anywhere_in_report_blocks():
+    report = _remote(envelope(NOW - 1_000, {**WATCHER_REPORT, "equity_usdc": float("nan")}))
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert report["entry_allowed"] is False
+
+
+def test_nan_timestamp_cli_fails_closed_without_traceback(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("SCALP_WATCHER_URL", URL)
+    monkeypatch.setenv("SCALP_WATCHER_TOKEN", SECRET)
+    monkeypatch.setattr(monitor.requests, "get",
+                        lambda url, headers=None, timeout=None: FakeResponse(200, envelope(float("nan"))))
+    code = monitor.main(["--data-dir", str(tmp_path), "remote-check", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert out["entry_allowed"] is False
+
+
+@pytest.mark.parametrize("age_ms,allowed", [(60_000, True), (60_001, False), (-5_000, True), (-5_001, False)])
+def test_freshness_boundaries(age_ms, allowed):
+    report = _remote(envelope(NOW - age_ms))
+    assert report["entry_allowed"] is allowed
+
+
+@pytest.mark.parametrize("watcher_url", [123, ["https://x"], {"u": 1}])
+def test_non_string_config_url_is_config_required(tmp_path, watcher_url):
+    (tmp_path / "config.json").write_text(json.dumps({"watcher_url": watcher_url}))
+    report = monitor.remote_check(tmp_path, env={"SCALP_WATCHER_TOKEN": SECRET},
+                                  get=lambda *a, **k: pytest.fail("must not fetch"),
+                                  keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "CONFIG_REQUIRED"
+    assert report["entry_allowed"] is False

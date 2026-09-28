@@ -17,7 +17,9 @@ to a local check — on a missing URL/token (`CONFIG_REQUIRED`), an
 unreachable/non-200/malformed watcher response, or a report whose
 `produced_at_ms` is more than 60 seconds old or more than 5 seconds in the
 future (`DATA_UNAVAILABLE`, `entry_allowed: false`, no `observation`, a plain
-reason). Exit codes match `check`: 0 eligible, 3 HALT, 2 other blocked/unknown.
+reason). A garbled answer also fails closed: an `entry_allowed` that is not a real
+true/false, a non-finite or non-numeric `produced_at_ms`, any NaN/Infinity in
+the body, or a non-string configured `watcher_url`. Exit codes match `check`: 0 eligible, 3 HALT, 2 other blocked/unknown.
 `SKILL.md`'s account preflight (the Step 2 entry-preflight bullet and the
 `/scalp account check` admin command) now runs `remote-check --json` instead
 of `check --json`; every existing preflight rule is unchanged, and the local
