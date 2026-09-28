@@ -6,6 +6,16 @@ floor is larger than the 5 GB Railway volume. `RECORDER_DISK_FLOOR_GB` now
 sets the floor (default still 10); `.railway/railway.ts` sets it to 2 for the
 recorder service. Warning only — nothing is ever deleted because of it.
 
+## 2026-09-29 — Telegram `/check` on the watcher
+The watcher now answers `/check` from the configured Telegram chat (and no
+other) with its latest account reading: entry allowed or blocked, daily
+budget left, open stop risk, equity, stop coverage and notes. The
+allowed/blocked call goes through `account_monitor.watcher_report_problem`,
+the gate `remote-check` itself now uses (extracted unchanged from
+`remote_check`), so Telegram and `/scalp` give the same answer for the same
+reading. Read-only; no extra account read; commands sent while the watcher
+was down are dropped.
+
 ## 2026-09-28 — Railway settings moved to `.railway/railway.ts`
 The repo-root `railway.json` (the watcher's settings) was also applied to the
 new recorder service, so the recorder built the watcher's image and failed

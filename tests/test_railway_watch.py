@@ -992,3 +992,209 @@ def test_loop_recorder_alerts_flow_through_send():
             sleep=lambda s: None, iterations=6, recorder_status_url="http://x/status",
             fetch_recorder_status=fetch, recorder_spawn=_run_now)
     assert any("PROBLEM:" in m and "recorder" in m for m in sent)
+
+
+# ---------------------------------------------------------------------------
+# Telegram /check — reply text, entry gate parity with /scalp, listener
+# ---------------------------------------------------------------------------
+
+import account_monitor  # noqa: E402
+
+CHAT = "123456789"
+BOT_TOKEN = "BOTSECRET987"
+
+
+def clear_report():
+    report, _ = start_day()
+    return report
+
+
+def latest_at(report, age_s, now_ms=MIDNIGHT + 60_000):
+    return (now_ms - int(age_s * 1000), json.loads(json.dumps(report))), now_ms
+
+
+def test_report_state_latest_is_none_until_the_first_report_then_matches_report_endpoint():
+    state = rw.ReportState()
+    assert state.latest() is None
+    report = clear_report()
+    state.update(MIDNIGHT, report)
+    produced_at_ms, stored = state.latest()
+    assert produced_at_ms == MIDNIGHT
+    assert json.loads(state.snapshot()) == {"produced_at_ms": MIDNIGHT, "report": stored}
+    assert stored is not report  # a private copy, not the loop's live object
+
+
+def test_check_reply_before_any_report():
+    assert "No account reading yet" in rw.format_check(None, MIDNIGHT, TZ)
+
+
+def test_check_allows_a_fresh_complete_clear_and_shows_the_budget():
+    latest, now_ms = latest_at(clear_report(), 10)
+    text = rw.format_check(latest, now_ms, TZ)
+    assert "ENTRY: ALLOWED" in text
+    assert "Daily budget left:" in text and "Open stop risk:" in text and "Equity:" in text
+    assert "not a trade signal" in text
+
+
+def test_check_blocks_a_clear_report_older_than_the_freshness_limit():
+    latest, now_ms = latest_at(clear_report(), account_monitor.WATCHER_FRESHNESS_S + 1)
+    text = rw.format_check(latest, now_ms, TZ)
+    assert "ENTRY: BLOCKED (CLEAR)" in text
+    assert "s old (limit 60 s)" in text
+
+
+def test_check_blocks_a_partial_day_warmup():
+    report, _ = observe(snapshot(now=MIDNIGHT))
+    latest, now_ms = latest_at(report, 5)
+    text = rw.format_check(latest, now_ms, TZ)
+    assert "ENTRY: BLOCKED (WARMUP)" in text
+    assert "baseline began mid-day" in text
+
+
+def test_check_blocks_entry_allowed_outside_a_complete_clear():
+    report = clear_report()
+    report["daily"]["baseline_quality"] = "partial_day"
+    latest, now_ms = latest_at(report, 5)
+    text = rw.format_check(latest, now_ms, TZ)
+    assert "ENTRY: BLOCKED" in text and "inconsistent" in text
+
+
+def test_check_blocks_a_latched_halt():
+    report = clear_report()
+    report.update(status="HALT", entry_allowed=False, daily_breach_latched=True)
+    latest, now_ms = latest_at(report, 5)
+    assert "ENTRY: BLOCKED (HALT)" in rw.format_check(latest, now_ms, TZ)
+
+
+def test_check_tolerates_a_failed_report_without_daily_or_observation():
+    latest, now_ms = latest_at({"status": "DATA_UNAVAILABLE", "reasons": ["unexpected watcher error"]}, 5)
+    text = rw.format_check(latest, now_ms, TZ)
+    assert "ENTRY: BLOCKED (DATA_UNAVAILABLE)" in text and "unexpected watcher error" in text
+    assert "Daily budget left" not in text
+
+
+def test_check_lists_stop_coverage_per_position():
+    report = evaluated(now=MIDNIGHT, size=2, orders=[stop(size=1)])
+    latest, now_ms = latest_at(report, 5)
+    assert "NOT fully covered (1/2)" in rw.format_check(latest, now_ms, TZ)
+
+
+class _Resp:
+    def __init__(self, payload):
+        self.content = json.dumps(payload).encode()
+
+
+@pytest.mark.parametrize("age_s", [0, 30, 59, 61, 600, -4, -6])
+@pytest.mark.parametrize("variant", ["clear", "warmup", "inconsistent", "halt"])
+def test_check_and_scalp_remote_check_agree_on_entry(variant, age_s):
+    report = clear_report()
+    if variant == "warmup":
+        report, _ = observe(snapshot(now=MIDNIGHT))
+    elif variant == "inconsistent":
+        report["daily"]["baseline_quality"] = "partial_day"
+    elif variant == "halt":
+        report.update(status="HALT", entry_allowed=False, daily_breach_latched=True)
+    (produced_at_ms, stored), now_ms = latest_at(report, age_s)
+    remote = account_monitor.remote_check(
+        env={"SCALP_WATCHER_URL": "https://watcher.example", "SCALP_WATCHER_TOKEN": "t0ken-x"},
+        get=lambda *a, **k: type("R", (), {"status_code": 200, "content": json.dumps(
+            {"produced_at_ms": produced_at_ms, "report": stored}).encode()})(),
+        keychain=lambda: None, clock=lambda: now_ms)
+    telegram = "ENTRY: ALLOWED" in rw.format_check((produced_at_ms, stored), now_ms, TZ)
+    assert telegram == remote["entry_allowed"]
+
+
+def test_is_check_command():
+    assert rw._is_check_command("/check")
+    assert rw._is_check_command("/CHECK now")
+    assert rw._is_check_command("/check@my_scalp_bot")
+    assert not rw._is_check_command("check")
+    assert not rw._is_check_command("/checkup")
+    assert not rw._is_check_command("")
+    assert not rw._is_check_command(None)
+
+
+class FakeTelegram:
+    """Scripted getUpdates responses (or exceptions), recording every call."""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def __call__(self, url, params, timeout):
+        self.calls.append((url, dict(params), timeout))
+        item = self.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        response = type("R", (), {})()
+        response.raise_for_status = lambda: None
+        response.json = lambda: {"ok": True, "result": item}
+        return response
+
+
+def msg(update_id, text, chat_id=CHAT):
+    return {"update_id": update_id, "message": {"chat": {"id": int(chat_id)}, "text": text}}
+
+
+def make_commands(get, answer=lambda: "REPLY", clock=None):
+    sent, slept = [], []
+    ticks = iter(range(0, 10_000, 100))
+    commands = rw.TelegramCommands(BOT_TOKEN, CHAT, answer, get=get,
+                                    send=lambda token, chat, text: sent.append((chat, text)),
+                                    sleep=slept.append, clock=clock or (lambda: next(ticks)))
+    return commands, sent, slept
+
+
+def test_listener_answers_a_burst_of_check_once_per_cooldown():
+    times = iter([0, 3, 9.9, 10, 25])
+    get = FakeTelegram([], [msg(i, "/check") for i in range(1, 6)])
+    commands, sent, _ = make_commands(get, clock=lambda: next(times))
+    commands.poll_once()
+    assert len(sent) == 3  # t=0, t=10, t=25; t=3 and t=9.9 fall inside the cooldown
+
+
+def test_listener_skips_the_backlog_then_answers_check_from_the_owner_chat():
+    get = FakeTelegram([msg(40, "/check")], [msg(41, "/check")])
+    commands, sent, _ = make_commands(get)
+    commands.poll_once()
+    assert get.calls[0][1] == {"offset": -1, "timeout": 0}
+    assert get.calls[1][1]["offset"] == 41  # the backlogged /check (40) is never answered
+    assert sent == [(CHAT, "REPLY")]
+
+
+def test_listener_ignores_other_chats_and_other_messages_but_advances_past_them():
+    get = FakeTelegram([], [msg(5, "/check", chat_id="999"), msg(6, "hello"),
+                            {"update_id": 7, "edited_message": {}}], [])
+    commands, sent, _ = make_commands(get)
+    commands.poll_once()
+    commands.poll_once()
+    assert sent == []
+    assert get.calls[2][1]["offset"] == 8
+
+
+def test_listener_replies_with_a_fallback_when_the_answer_raises(caplog):
+    def broken():
+        raise RuntimeError(f"secret {BOT_TOKEN}")
+    get = FakeTelegram([], [msg(1, "/check")])
+    commands, sent, _ = make_commands(get, broken)
+    commands.poll_once()
+    assert sent and "Could not build" in sent[0][1]
+    assert BOT_TOKEN not in caplog.text
+
+
+def test_listener_errors_back_off_and_never_log_the_token(caplog):
+    import logging
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+    conflict = requests.HTTPError(f"409 Client Error: Conflict for url: {url}")
+    conflict.response = type("R", (), {"status_code": 409})()
+    get = FakeTelegram(requests.ConnectionError(f"connection refused to {url}"), conflict,
+                       ValueError("bad"))
+    commands, sent, slept = make_commands(get)
+    with caplog.at_level(logging.WARNING, logger="railway_watch"):
+        commands.step()
+        commands.step()
+        commands.step()
+    assert slept == [rw.COMMAND_ERROR_BACKOFF_S, rw.COMMAND_CONFLICT_BACKOFF_S, rw.COMMAND_ERROR_BACKOFF_S]
+    assert BOT_TOKEN not in caplog.text and "api.telegram.org" not in caplog.text
+    assert "HTTP 409" in caplog.text
+    assert sent == []
