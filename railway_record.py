@@ -185,11 +185,7 @@ class UploadLedger:
 
     def mark_confirmed(self, rel_path, size, now_ms):
         with self._lock:
-            self._entries[rel_path] = {
-                "confirmed": True,
-                "size": size,
-                "confirmed_at_ms": now_ms,
-            }
+            self._entries[rel_path] = {"confirmed": True, "size": size, "confirmed_at_ms": now_ms}
             self._save()
 
     def mark_failed(self, rel_path, now_ms, reason):
@@ -241,25 +237,15 @@ class Uploader:
     matching size counts as confirmed without uploading again; a mismatched
     size is a failure that is never overwritten."""
 
-    def __init__(
-        self,
-        out_dir,
-        bucket,
-        client,
-        *,
-        keep_days=DEFAULT_KEEP_DAYS,
-        retry_s=UPLOAD_RETRY_S,
-        ledger=None,
-        clock=lambda: int(time.time() * 1000),
-    ):
+    def __init__(self, out_dir, bucket, client, *, keep_days=DEFAULT_KEEP_DAYS,
+                retry_s=UPLOAD_RETRY_S, ledger=None, clock=lambda: int(time.time() * 1000)):
         self.out_dir = out_dir
         self.bucket = bucket
         self.client = client
         self.enabled = client is not None and bucket is not None
         self.keep_days = keep_days
         self.retry_s = retry_s
-        ledger_path = os.path.join(out_dir, "upload_ledger.json")
-        self.ledger = ledger or UploadLedger(ledger_path)
+        self.ledger = ledger or UploadLedger(os.path.join(out_dir, "upload_ledger.json"))
         self.clock = clock
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -358,9 +344,7 @@ class Uploader:
                 with self._lock:
                     self._last_success_ms = now
                 return True
-            logger.warning(
-                "recorder upload size mismatch for %s — never overwriting", rel
-            )
+            logger.warning("recorder upload size mismatch for %s — never overwriting", rel)
             self.ledger.mark_failed(rel, now, "size-mismatch")
             return False
 
@@ -376,9 +360,7 @@ class Uploader:
         try:
             confirmed_size = self._head(rel)
         except UploadError as exc:
-            logger.warning(
-                "recorder upload post-PUT HEAD failed for %s: %s", rel, exc.code
-            )
+            logger.warning("recorder upload post-PUT HEAD failed for %s: %s", rel, exc.code)
             self.ledger.mark_failed(rel, now, exc.code)
             return False
 
@@ -408,11 +390,8 @@ class Uploader:
             if age_days > self.keep_days:
                 try:
                     os.remove(path)
-                    logger.info(
-                        "removed confirmed-uploaded %s (%.1fd past keep window)",
-                        rel,
-                        age_days,
-                    )
+                    logger.info("removed confirmed-uploaded local file %s (%.1fd past its day)",
+                                rel, age_days)
                 except OSError:
                     logger.exception("could not remove confirmed local file %s", rel)
 
@@ -432,29 +411,16 @@ class Uploader:
         with self._lock:
             last_success_ms = self._last_success_ms
             failing_since_ms = self._failing_since_ms
-        last_upload_ts = (
-            rec.iso_utc_ms(last_success_ms) if last_success_ms else None
-        )
-        day_stale_s = (
-            round((now_ms - day_end_ms) / 1000, 1)
-            if day_end_ms is not None
-            else None
-        )
-        failing_ts = (
-            rec.iso_utc_ms(failing_since_ms) if failing_since_ms else None
-        )
-        failing_s = (
-            round((now_ms - failing_since_ms) / 1000, 1)
-            if failing_since_ms is not None
-            else None
-        )
         return {
             "uploads_enabled": self.enabled,
-            "last_successful_upload_ts_utc": last_upload_ts,
+            "last_successful_upload_ts_utc": rec.iso_utc_ms(last_success_ms) if last_success_ms else None,
             "oldest_unconfirmed_day": oldest_day,
-            "seconds_since_oldest_unconfirmed_day_ended": day_stale_s,
-            "upload_failing_since_ts_utc": failing_ts,
-            "seconds_upload_failing": failing_s,
+            "seconds_since_oldest_unconfirmed_day_ended": (
+                round((now_ms - day_end_ms) / 1000, 1) if day_end_ms is not None else None),
+            "upload_failing_since_ts_utc": (
+                rec.iso_utc_ms(failing_since_ms) if failing_since_ms else None),
+            "seconds_upload_failing": (
+                round((now_ms - failing_since_ms) / 1000, 1) if failing_since_ms is not None else None),
         }
 
     # -- thread lifecycle -----------------------------------------------
@@ -464,9 +430,7 @@ class Uploader:
             try:
                 self._pass_once()
             except Exception:
-                logger.exception(
-                    "recorder uploader pass raised — retrying next interval"
-                )
+                logger.exception("recorder uploader pass raised — retrying next interval")
             self._stop.wait(self.retry_s)
 
     def start(self):
@@ -501,9 +465,7 @@ class StatusSnapshot:
             return self._status, self._taken_at_ms
 
 
-def build_full_status(
-    snapshot, uploader, *, status_interval_s=STATUS_INTERVAL_S, now_ms=None
-):
+def build_full_status(snapshot, uploader, *, status_interval_s=STATUS_INTERVAL_S, now_ms=None):
     """Merges the recorder's own status (via the on_status hook — never
     fetched by calling FlowRecorder.status() from this thread, which would
     race the recv loop) with the uploader's status. If no snapshot has
@@ -511,11 +473,8 @@ def build_full_status(
     stalled), reads as disconnected/silent rather than reporting nothing."""
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
     rec_status, taken_at_ms = snapshot.snapshot()
-    stale_threshold_ms = status_interval_s * SNAPSHOT_STALE_MULTIPLE * 1000
-    stale = (
-        taken_at_ms is None
-        or now_ms - taken_at_ms > stale_threshold_ms
-    )
+    stale = (taken_at_ms is None
+             or now_ms - taken_at_ms > status_interval_s * SNAPSHOT_STALE_MULTIPLE * 1000)
     if rec_status is None or stale:
         connected = False
         seconds_since_last_message = None
@@ -529,10 +488,7 @@ def build_full_status(
         # The snapshot's own lag_s stops advancing the moment it was taken;
         # add the time since so a wedged-but-not-yet-stale loop still shows
         # growing silence instead of a frozen, falsely-fresh number.
-        total_lag_s = lag_s + snapshot_age_s if lag_s is not None else None
-        seconds_since_last_message = (
-            round(total_lag_s, 1) if total_lag_s is not None else None
-        )
+        seconds_since_last_message = round(lag_s + snapshot_age_s, 1) if lag_s is not None else None
         reconnects = rec_status.get("reconnects_24h")
         total_gap_seconds = rec_status.get("gap_seconds_24h")
         disk_free_gb = rec_status.get("disk_free_gb")
@@ -590,8 +546,7 @@ def make_handler(snapshot, uploader):
                 self._respond(200, b"ok")
                 return
             if self.path == "/status":
-                status_dict = build_full_status(snapshot, uploader)
-                body = json.dumps(status_dict, allow_nan=False).encode("utf-8")
+                body = json.dumps(build_full_status(snapshot, uploader), allow_nan=False).encode("utf-8")
                 self._respond(200, body, content_type="application/json")
                 return
             self._respond(404)
@@ -606,9 +561,8 @@ def parse_env(env=os.environ):
     starting any thread or socket. Never raises: missing S3 config means
     uploads are disabled (`s3_config` is None), not a fatal startup error —
     recording must continue regardless (see Uploader)."""
-    default_coins_str = ",".join(DEFAULT_COINS)
-    coins_str = env.get("RECORDER_COINS", default_coins_str)
-    coins = [c.strip().upper() for c in coins_str.split(",") if c.strip()]
+    coins = [c.strip().upper() for c in env.get("RECORDER_COINS", ",".join(DEFAULT_COINS)).split(",")
+             if c.strip()]
     return {
         "coins": coins,
         "out_dir": env.get("DATA_DIR", "/data"),
@@ -619,17 +573,12 @@ def parse_env(env=os.environ):
 
 
 def run():
-    log_format = "%(asctime)s %(levelname)s %(message)s"
-    logging.basicConfig(level=logging.INFO, format=log_format)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     config = parse_env()
 
     snapshot = StatusSnapshot()
-    fr = rec.FlowRecorder(
-        config["coins"],
-        out_dir=config["out_dir"],
-        status_interval_s=STATUS_INTERVAL_S,
-        on_status=snapshot.update,
-    )
+    fr = rec.FlowRecorder(config["coins"], out_dir=config["out_dir"],
+                          status_interval_s=STATUS_INTERVAL_S, on_status=snapshot.update)
 
     s3_config = config["s3_config"]
     if s3_config is None:
@@ -637,12 +586,10 @@ def run():
         client, bucket = None, None
     else:
         client, bucket = make_real_s3_client(s3_config), s3_config.bucket
-    keep_days = config["keep_days"]
-    uploader = Uploader(config["out_dir"], bucket, client, keep_days=keep_days)
+    uploader = Uploader(config["out_dir"], bucket, client, keep_days=config["keep_days"])
     uploader.start()
 
-    handler = make_handler(snapshot, uploader)
-    server = DualStackHTTPServer(("::", config["port"]), handler)
+    server = DualStackHTTPServer(("::", config["port"]), make_handler(snapshot, uploader))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     logger.info("recorder http server listening on :%d", config["port"])

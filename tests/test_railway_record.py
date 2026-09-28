@@ -59,16 +59,14 @@ def _finished(tmp_path, name, content=b"hello"):
 
 
 def _uploader(tmp_path, client, **kwargs):
-    # far future -> any day is "finished"
-    kwargs.setdefault("clock", lambda: 2_000_000_000_000)
+    kwargs.setdefault("clock", lambda: 2_000_000_000_000)  # far future -> any day is "finished"
     return rr.Uploader(str(tmp_path), BUCKET, client, **kwargs)
 
 
 # ── small pure helpers ───────────────────────────────────────────────────
 
 def test_day_from_finished_path():
-    path = "/data/HYPE_trades_2026-09-01.jsonl.gz"
-    assert rr._day_from_finished_path(path) == "2026-09-01"
+    assert rr._day_from_finished_path("/data/HYPE_trades_2026-09-01.jsonl.gz") == "2026-09-01"
     assert rr._day_from_finished_path("/data/HYPE_trades_2026-09-01.jsonl") is None
     assert rr._day_from_finished_path("/data/status.json") is None
 
@@ -109,10 +107,7 @@ def test_s3_config_from_env_honors_region_and_addressing_style_overrides():
     assert cfg.addressing_style == "path"
 
 
-@pytest.mark.parametrize(
-    "missing",
-    ["S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"],
-)
+@pytest.mark.parametrize("missing", ["S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"])
 def test_s3_config_from_env_missing_any_var_disables_uploads(missing):
     env = {"S3_ENDPOINT": "https://x.example", "S3_BUCKET": BUCKET,
            "S3_ACCESS_KEY_ID": "AKID", "S3_SECRET_ACCESS_KEY": "SECRET"}
@@ -121,13 +116,8 @@ def test_s3_config_from_env_missing_any_var_disables_uploads(missing):
 
 
 def test_s3_config_repr_never_includes_the_secret_or_access_key():
-    env = {
-        "S3_ENDPOINT": "https://x.example",
-        "S3_BUCKET": BUCKET,
-        "S3_ACCESS_KEY_ID": "AKID-VALUE",
-        "S3_SECRET_ACCESS_KEY": "SECRET-VALUE",
-    }
-    cfg = rr.s3_config_from_env(env)
+    cfg = rr.s3_config_from_env({"S3_ENDPOINT": "https://x.example", "S3_BUCKET": BUCKET,
+                                  "S3_ACCESS_KEY_ID": "AKID-VALUE", "S3_SECRET_ACCESS_KEY": "SECRET-VALUE"})
     text = repr(cfg)
     assert "AKID-VALUE" not in text
     assert "SECRET-VALUE" not in text
@@ -279,11 +269,9 @@ def test_deletion_only_after_confirmed_and_past_keep_window(tmp_path):
     clock = {"t": day_end_ms + 1 * 86_400_000}  # 1 day past day-end, keep_days default 3
     up = _uploader(tmp_path, client, clock=lambda: clock["t"], keep_days=3)
     up._pass_once()
-    # confirmed but inside the keep window
-    assert os.path.exists(os.path.join(str(tmp_path), rel))
+    assert os.path.exists(os.path.join(str(tmp_path), rel))  # confirmed but inside the keep window
 
-    # exactly at the boundary — "more than" keep_days, not yet
-    clock["t"] = day_end_ms + 3 * 86_400_000
+    clock["t"] = day_end_ms + 3 * 86_400_000  # exactly at the boundary — "more than" keep_days, not yet
     up._pass_once()
     assert os.path.exists(os.path.join(str(tmp_path), rel))
 
@@ -328,14 +316,10 @@ def test_uploader_restart_with_a_confirming_ledger_never_touches_the_client(tmp_
 
     class AssertNeverCalledClient:
         def head_object(self, **kwargs):
-            raise AssertionError(
-                "should not call the S3 client — ledger already confirmed"
-            )
+            raise AssertionError("should not call the S3 client — ledger already confirmed")
 
         def put_object(self, **kwargs):
-            raise AssertionError(
-                "should not call the S3 client — ledger already confirmed"
-            )
+            raise AssertionError("should not call the S3 client — ledger already confirmed")
 
     second = _uploader(tmp_path, AssertNeverCalledClient())
     second._pass_once()  # no exception — the ledger alone was enough
