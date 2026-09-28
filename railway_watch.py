@@ -281,7 +281,7 @@ class Watcher:
                 or (isinstance(failing_s, (int, float)) and failing_s > RECORDER_UPLOAD_FAILING_THRESHOLD_S)
             )
             if failing:
-                reason = ("recorder uploads disabled — missing S3 bucket configuration" if disabled else
+                reason = ("recorder uploads disabled — missing or invalid S3 bucket configuration" if disabled else
                            "recorder upload is more than 24h behind")
                 self._note("RECORDER_UPLOAD_FAILING", reason, now_ms, messages)
             else:
@@ -403,6 +403,67 @@ class BackgroundPinger:
             finally:
                 self._busy.release()
         threading.Thread(target=work, daemon=True, name="ping").start()
+
+
+def _spawn_daemon(target):
+    threading.Thread(target=target, daemon=True, name="recorder-poll").start()
+
+
+class RecorderPoller:
+    """Polls the recorder's `/status` on a background thread, at most one in
+    flight, so the recorder can never stall the account loop — a per-read
+    timeout alone does not bound a body that trickles in slowly. The loop
+    calls `tick` every pass; it starts a poll when one is due and hands back
+    any finished result. A poll still running after `stuck_after_s` counts
+    as unreachable (None), at most once per interval, until it returns."""
+
+    def __init__(self, url, fetch, *, interval_s, stuck_after_s, spawn=_spawn_daemon):
+        self._url = url
+        self._fetch = fetch
+        self._interval_ms = interval_s * 1000
+        self._stuck_ms = stuck_after_s * 1000
+        self._spawn = spawn
+        self._lock = threading.Lock()
+        self._in_flight_since_ms = None
+        self._last_start_ms = None
+        self._last_stuck_ms = None
+        self._has_result = False
+        self._result = None
+
+    def tick(self, now_ms):
+        """The statuses (zero or one) to feed Watcher.recorder_step now."""
+        with self._lock:
+            start = self._in_flight_since_ms is None and (
+                self._last_start_ms is None or now_ms - self._last_start_ms >= self._interval_ms)
+            if start:
+                self._in_flight_since_ms = self._last_start_ms = now_ms
+        if start:
+            try:
+                self._spawn(self._work)
+            except Exception:
+                logger.exception("could not start the recorder poll")
+                with self._lock:
+                    self._in_flight_since_ms = None
+        with self._lock:
+            if self._has_result:
+                self._has_result = False
+                return [self._result]
+            since = self._in_flight_since_ms
+            if since is not None and now_ms - since >= self._stuck_ms and (
+                    self._last_stuck_ms is None or now_ms - self._last_stuck_ms >= self._interval_ms):
+                self._last_stuck_ms = now_ms
+                return [None]
+        return []
+
+    def _work(self):
+        try:
+            status = self._fetch(self._url)
+        except Exception:
+            logger.exception("recorder status poll raised")
+            status = None
+        with self._lock:
+            self._result, self._has_result = status, True
+            self._in_flight_since_ms = self._last_stuck_ms = None
 
 
 def send_telegram(token, chat_id, text, *, timeout=TELEGRAM_TIMEOUT_S, post=requests.post):
@@ -549,12 +610,15 @@ def configure_from_env(data_dir, env=os.environ):
 def loop(watcher, *, data_dir, check, send, ping, on_report=None,
           clock=lambda: int(time.time() * 1000), sleep=time.sleep, iterations=None,
           recorder_status_url=None, fetch_recorder_status=fetch_recorder_status,
-          recorder_poll_interval_s=RECORDER_POLL_INTERVAL_S):
+          recorder_poll_interval_s=RECORDER_POLL_INTERVAL_S, recorder_spawn=_spawn_daemon):
     now_ms = clock()
     watcher.boot(now_ms)
     _safe_send(send, "watcher started")
     count = 0
-    last_recorder_poll_ms = None
+    recorder_poller = RecorderPoller(
+        recorder_status_url, fetch_recorder_status, interval_s=recorder_poll_interval_s,
+        stuck_after_s=2 * recorder_poll_interval_s, spawn=recorder_spawn,
+    ) if recorder_status_url else None
     while iterations is None or count < iterations:
         now_ms = clock()
         try:
@@ -575,18 +639,15 @@ def loop(watcher, *, data_dir, check, send, ping, on_report=None,
             _safe_send(send, message)
         # Optional recorder check (PR C): unset recorder_status_url means
         # this whole block never runs — zero behaviour change. Polled at
-        # most once a minute (independent of the account check's own 15-30s
-        # cadence), and any exception here is swallowed so it can never
-        # crash or stall the account loop above. Never touches /report,
-        # entry_allowed, or any account-derived problem.
-        if recorder_status_url and (
-                last_recorder_poll_ms is None
-                or now_ms - last_recorder_poll_ms >= recorder_poll_interval_s * 1000):
-            last_recorder_poll_ms = now_ms
+        # most once a minute on a background thread (see RecorderPoller), and
+        # any exception here is swallowed so it can never crash or stall the
+        # account loop above. Never touches /report, entry_allowed, or any
+        # account-derived problem.
+        if recorder_poller is not None:
             try:
-                status = fetch_recorder_status(recorder_status_url)
-                for message in watcher.recorder_step(status, now_ms):
-                    _safe_send(send, message)
+                for status in recorder_poller.tick(now_ms):
+                    for message in watcher.recorder_step(status, now_ms):
+                        _safe_send(send, message)
             except Exception:
                 logger.exception("recorder check raised — ignoring this pass")
         if produced:

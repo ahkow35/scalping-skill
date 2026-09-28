@@ -32,6 +32,7 @@ inside exceptions and the `/status` body — see UploadError/_error_code.
 
 import asyncio
 import glob
+import hashlib
 import json
 import logging
 import os
@@ -62,6 +63,21 @@ SNAPSHOT_STALE_MULTIPLE = 3
 # failure, 403 from a missing ListBucket grant, etc.) is an inconclusive
 # read and must never be treated as license to PUT.
 NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound"}
+
+# User-metadata key carrying the file's SHA-256 (hex), written at PUT and
+# checked on every HEAD — S3 returns user metadata keys lowercased.
+SHA256_META_KEY = "sha256"
+
+
+def _size_and_sha256(path):
+    """(size, hex SHA-256) of the file at `path`, read in chunks."""
+    digest = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return size, digest.hexdigest()
 
 
 # ── S3 config: parsed from env, never raises — missing config just means
@@ -174,20 +190,25 @@ class UploadLedger:
             json.dump(self._entries, f, indent=2)
         os.replace(tmp, self._path)
 
-    def confirmed_size(self, rel_path):
-        """The size the ledger confirmed for `rel_path`, or None if it was
-        never confirmed. Callers must compare this against the file's
+    def confirmed_size(self, rel_path, destination):
+        """The size the ledger confirmed for `rel_path` at `destination`
+        (endpoint|bucket), or None if it was never confirmed there — a
+        confirmation for another bucket must never authorize deleting a
+        local file the current bucket doesn't hold. Callers must compare this against the file's
         CURRENT size — recorder.py can append a second gzip member to an
         already-archived day if the wall clock steps back into it, so a
         stale confirmation must not authorize deleting bytes never
         uploaded."""
         with self._lock:
             entry = self._entries.get(rel_path)
-            return entry.get("size") if entry and entry.get("confirmed") else None
+            if not entry or not entry.get("confirmed") or entry.get("destination") != destination:
+                return None
+            return entry.get("size")
 
-    def mark_confirmed(self, rel_path, size, now_ms):
+    def mark_confirmed(self, rel_path, size, now_ms, destination):
         with self._lock:
-            self._entries[rel_path] = {"confirmed": True, "size": size, "confirmed_at_ms": now_ms}
+            self._entries[rel_path] = {"confirmed": True, "size": size, "confirmed_at_ms": now_ms,
+                                       "destination": destination}
             self._save()
 
     def mark_failed(self, rel_path, now_ms, reason):
@@ -235,14 +256,19 @@ class Uploader:
 
     `client` is None when S3 config is missing — uploads are then disabled
     (see `enabled`), and every pass is a no-op; recording continues either
-    way. HEAD is always checked before any PUT: an existing key with a
-    matching size counts as confirmed without uploading again; a mismatched
-    size is a failure that is never overwritten."""
+    way. HEAD is always checked before any PUT: an existing key counts as
+    confirmed only if its size AND its `sha256` metadata match the local
+    file; anything else is a failure that is never overwritten.
 
-    def __init__(self, out_dir, bucket, client, *, keep_days=DEFAULT_KEEP_DAYS,
+    `destination` (endpoint|bucket) is stored with each ledger confirmation,
+    so moving to a new bucket re-uploads rather than trusting confirmations
+    from the old one. Defaults to the bucket name."""
+
+    def __init__(self, out_dir, bucket, client, *, destination=None, keep_days=DEFAULT_KEEP_DAYS,
                 retry_s=UPLOAD_RETRY_S, ledger=None, clock=lambda: int(time.time() * 1000)):
         self.out_dir = out_dir
         self.bucket = bucket
+        self.destination = destination or bucket
         self.client = client
         self.enabled = client is not None and bucket is not None
         self.keep_days = keep_days
@@ -275,7 +301,7 @@ class Uploader:
         return os.path.relpath(abs_path, self.out_dir)
 
     def _is_confirmed(self, path, rel):
-        confirmed_size = self.ledger.confirmed_size(rel)
+        confirmed_size = self.ledger.confirmed_size(rel, self.destination)
         if confirmed_size is None:
             return False
         try:
@@ -311,10 +337,11 @@ class Uploader:
         self._maybe_prune()
 
     def _head(self, key):
-        """Returns the object's ContentLength, or None if it's absent (a
-        definite not-found HEAD response). Raises UploadError for anything
-        else — an inconclusive read (network failure, 403, ...) must never
-        be treated as "absent" and lead to a PUT that could overwrite."""
+        """Returns the object's (ContentLength, sha256 metadata or None), or
+        None if it's absent (a definite not-found HEAD response). Raises
+        UploadError for anything else — an inconclusive read (network
+        failure, 403, ...) must never be treated as "absent" and lead to a
+        PUT that could overwrite."""
         try:
             resp = self.client.head_object(Bucket=self.bucket, Key=key)
         except Exception as exc:
@@ -322,37 +349,45 @@ class Uploader:
             if code in NOT_FOUND_CODES:
                 return None
             raise UploadError(code) from None
-        return resp.get("ContentLength")
+        return resp.get("ContentLength"), (resp.get("Metadata") or {}).get(SHA256_META_KEY)
+
+    def _confirm(self, rel, size, now):
+        self.ledger.mark_confirmed(rel, size, now, self.destination)
+        with self._lock:
+            self._last_success_ms = now
 
     def _upload_one(self, path, rel):
         now = self.clock()
         try:
-            local_size = os.path.getsize(path)
+            local_size, local_sha = _size_and_sha256(path)
         except OSError:
-            logger.exception("could not stat %s for upload", rel)
-            self.ledger.mark_failed(rel, now, "local-stat-error")
+            logger.exception("could not read %s for upload", rel)
+            self.ledger.mark_failed(rel, now, "local-read-error")
             return False
+        local = (local_size, local_sha)
 
         try:
-            remote_size = self._head(rel)
+            remote = self._head(rel)
         except UploadError as exc:
             logger.warning("recorder upload HEAD failed for %s: %s", rel, exc.code)
             self.ledger.mark_failed(rel, now, exc.code)
             return False
 
-        if remote_size is not None:
-            if remote_size == local_size:
-                self.ledger.mark_confirmed(rel, local_size, now)
-                with self._lock:
-                    self._last_success_ms = now
+        if remote is not None:
+            # Equal size alone is not proof of equal bytes — the sha256
+            # metadata written at PUT time must match too. An object without
+            # it (or with another digest) is never overwritten.
+            if remote == local:
+                self._confirm(rel, local_size, now)
                 return True
-            logger.warning("recorder upload size mismatch for %s — never overwriting", rel)
-            self.ledger.mark_failed(rel, now, "size-mismatch")
+            logger.warning("recorder upload: existing object differs for %s — never overwriting", rel)
+            self.ledger.mark_failed(rel, now, "remote-mismatch")
             return False
 
         try:
             with open(path, "rb") as f:
-                self.client.put_object(Bucket=self.bucket, Key=rel, Body=f)
+                self.client.put_object(Bucket=self.bucket, Key=rel, Body=f,
+                                       Metadata={SHA256_META_KEY: local_sha})
         except Exception as exc:
             code = _error_code(exc)
             logger.warning("recorder upload PUT failed for %s: %s", rel, code)
@@ -360,20 +395,18 @@ class Uploader:
             return False
 
         try:
-            confirmed_size = self._head(rel)
+            remote = self._head(rel)
         except UploadError as exc:
             logger.warning("recorder upload post-PUT HEAD failed for %s: %s", rel, exc.code)
             self.ledger.mark_failed(rel, now, exc.code)
             return False
 
-        if confirmed_size != local_size:
+        if remote != local:
             logger.warning("recorder upload not confirmed for %s after PUT", rel)
-            self.ledger.mark_failed(rel, now, "post-upload-size-mismatch")
+            self.ledger.mark_failed(rel, now, "post-upload-mismatch")
             return False
 
-        self.ledger.mark_confirmed(rel, local_size, now)
-        with self._lock:
-            self._last_success_ms = now
+        self._confirm(rel, local_size, now)
         return True
 
     # -- pruning: delete only confirmed + past the keep window --------------
@@ -558,6 +591,23 @@ def make_handler(snapshot, uploader):
 
 # ── config from env, boot ───────────────────────────────────────────────
 
+def _int_env(env, name, default):
+    """A non-negative int from env, or `default` (with a warning) if it's
+    unset or malformed — a typo in an optional setting must not stop
+    recording."""
+    raw = env.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if value < 0:
+        logger.warning("%s is not a non-negative integer; using %d", name, default)
+        return default
+    return value
+
+
 def parse_env(env=os.environ):
     """Pure parse of the env vars this service reads — unit-testable without
     starting any thread or socket. Never raises: missing S3 config means
@@ -568,10 +618,27 @@ def parse_env(env=os.environ):
     return {
         "coins": coins,
         "out_dir": env.get("DATA_DIR", "/data"),
-        "port": int(env.get("PORT", "8080")),
-        "keep_days": int(env.get("RECORDER_KEEP_DAYS", str(DEFAULT_KEEP_DAYS))),
+        "port": _int_env(env, "PORT", 8080),
+        "keep_days": _int_env(env, "RECORDER_KEEP_DAYS", DEFAULT_KEEP_DAYS),
         "s3_config": s3_config_from_env(env),
     }
+
+
+def build_s3_client(s3_config, make_client=make_real_s3_client):
+    """(client, bucket, destination), or (None, None, None) — uploads
+    disabled, recording continues — when the config is missing or the
+    client can't be built (e.g. a malformed endpoint). Logs only the error
+    class, never its message, which could echo config values."""
+    if s3_config is None:
+        logger.warning("S3 config incomplete; uploads disabled, recording continues")
+        return None, None, None
+    try:
+        client = make_client(s3_config)
+    except Exception as exc:
+        logger.warning("S3 client setup failed (%s); uploads disabled, recording continues",
+                       type(exc).__name__)
+        return None, None, None
+    return client, s3_config.bucket, f"{s3_config.endpoint}|{s3_config.bucket}"
 
 
 def run():
@@ -582,13 +649,9 @@ def run():
     fr = rec.FlowRecorder(config["coins"], out_dir=config["out_dir"],
                           status_interval_s=STATUS_INTERVAL_S, on_status=snapshot.update)
 
-    s3_config = config["s3_config"]
-    if s3_config is None:
-        logger.warning("S3 config incomplete; uploads disabled, recording continues")
-        client, bucket = None, None
-    else:
-        client, bucket = make_real_s3_client(s3_config), s3_config.bucket
-    uploader = Uploader(config["out_dir"], bucket, client, keep_days=config["keep_days"])
+    client, bucket, destination = build_s3_client(config["s3_config"])
+    uploader = Uploader(config["out_dir"], bucket, client, destination=destination,
+                        keep_days=config["keep_days"])
     uploader.start()
 
     server = DualStackHTTPServer(("::", config["port"]), make_handler(snapshot, uploader))

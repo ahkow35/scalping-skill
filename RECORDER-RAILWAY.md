@@ -87,12 +87,24 @@ variable does not itself trigger a redeploy).
 - Runs `recorder.py`'s existing capture loop unchanged — what and how it
   records is untouched by this PR.
 - A background thread uploads each finished (already gzip-rotated) day file
-  to `S3_BUCKET`, using HEAD-before-PUT semantics: an object already present
-  with the same byte size counts as confirmed without re-uploading; a
-  different size is treated as a failure and **never overwritten**; an
-  absent object is PUT, then confirmed with a follow-up HEAD matching its
-  size. Any failure retries every 10 minutes — recording itself is never
-  slowed or stopped by a network or bucket problem.
+  to `S3_BUCKET`, using HEAD-before-PUT semantics. Each PUT carries the
+  file's SHA-256 as object metadata (`sha256`); an object counts as
+  confirmed only when a HEAD shows both the local byte size and that
+  digest. An object already present with the same size and digest is
+  confirmed without re-uploading; anything else already at that key
+  (different size, different digest, or no digest) is a failure and is
+  **never overwritten**. Any failure retries every 10 minutes — recording
+  itself is never slowed or stopped by a network or bucket problem. If the
+  S3 settings are present but the client can't be built (e.g. a malformed
+  endpoint), uploads are disabled and recording carries on, the same as
+  missing settings.
+- The upload ledger records which endpoint and bucket each confirmation
+  was for. Pointing the service at a new bucket re-uploads everything still
+  on disk rather than trusting — and deleting on the strength of — the old
+  bucket's confirmations.
+- Keep `numReplicas` at 1 (as `railway.recorder.json` sets it). The
+  HEAD-then-PUT check assumes one uploader; the `/data` volume also makes
+  Railway stop the old container before starting a new one on redeploy.
 - Deletes a local `.gz` only once its upload is confirmed **and** its UTC
   day is more than `RECORDER_KEEP_DAYS` days past its end. A local file that
   fails to upload is never deleted, however old.

@@ -1,4 +1,5 @@
 import datetime as dt
+import hashlib
 import json
 import os
 import time
@@ -31,6 +32,7 @@ class FakeS3Client:
 
     def __init__(self):
         self.objects = {}       # key -> bytes
+        self.metadata = {}      # key -> user metadata dict (as S3 returns it)
         self.fail_head_for = {}  # key -> exception to raise once
         self.fail_put_for = {}   # key -> exception to raise once
         self.head_calls = []
@@ -42,15 +44,21 @@ class FakeS3Client:
             raise self.fail_head_for.pop(Key)
         if Key not in self.objects:
             raise FakeClientError("404", "Not Found")
-        return {"ContentLength": len(self.objects[Key])}
+        return {"ContentLength": len(self.objects[Key]), "Metadata": dict(self.metadata.get(Key, {}))}
 
-    def put_object(self, Bucket, Key, Body):
+    def put_object(self, Bucket, Key, Body, Metadata=None):
         self.put_calls.append(Key)
         if Key in self.fail_put_for:
             raise self.fail_put_for.pop(Key)
         data = Body.read() if hasattr(Body, "read") else Body
         self.objects[Key] = data
+        self.metadata[Key] = dict(Metadata or {})
         return {}
+
+    def put_as_uploaded(self, key, content):
+        """An object as a previous run of this uploader would have left it."""
+        self.objects[key] = content
+        self.metadata[key] = {"sha256": hashlib.sha256(content).hexdigest()}
 
 
 def _finished(tmp_path, name, content=b"hello"):
@@ -138,7 +146,7 @@ def test_upload_confirmed_by_head_after_put(tmp_path):
     _finished(tmp_path, rel, b"abcdef")
     up = _uploader(tmp_path, client)
     up._pass_once()
-    assert up.ledger.confirmed_size(rel) == 6
+    assert up.ledger.confirmed_size(rel, up.destination) == 6
     assert client.put_calls == [rel]
     assert client.head_calls == [rel, rel]  # pre-PUT HEAD (absent) then post-PUT HEAD (confirm)
 
@@ -147,12 +155,58 @@ def test_existing_key_with_matching_size_confirmed_without_put(tmp_path):
     client = FakeS3Client()
     rel = "HYPE_trades_2026-09-01.jsonl.gz"
     content = b"abcdef"
-    client.objects[rel] = content  # already present remotely, byte-identical
+    client.put_as_uploaded(rel, content)  # already present remotely, byte-identical
     _finished(tmp_path, rel, content)
     up = _uploader(tmp_path, client)
     up._pass_once()
-    assert up.ledger.confirmed_size(rel) == len(content)
+    assert up.ledger.confirmed_size(rel, up.destination) == len(content)
     assert client.put_calls == []  # never uploaded again
+
+
+def test_same_size_but_different_bytes_is_a_failure_never_overwritten(tmp_path):
+    # Codex r1: equal size is not proof of equal bytes. The sha256 metadata
+    # written at PUT time must match too.
+    client = FakeS3Client()
+    rel = "HYPE_trades_2026-09-01.jsonl.gz"
+    client.put_as_uploaded(rel, b"zzzzzz")
+    path = _finished(tmp_path, rel, b"abcdef")  # same length, different bytes
+    up = _uploader(tmp_path, client)
+    assert up._upload_one(path, rel) is False
+    assert up.ledger.confirmed_size(rel, up.destination) is None
+    assert client.objects[rel] == b"zzzzzz"
+    assert client.put_calls == []
+
+
+def test_existing_object_without_sha_metadata_is_never_trusted_or_overwritten(tmp_path):
+    client = FakeS3Client()
+    rel = "HYPE_trades_2026-09-01.jsonl.gz"
+    client.objects[rel] = b"abcdef"  # right bytes, but no digest to prove it
+    path = _finished(tmp_path, rel, b"abcdef")
+    up = _uploader(tmp_path, client)
+    assert up._upload_one(path, rel) is False
+    assert client.put_calls == []
+    assert up.ledger.confirmed_size(rel, up.destination) is None
+
+
+def test_put_is_confirmed_only_when_head_returns_the_digest(tmp_path):
+    class DropsMetadataClient(FakeS3Client):
+        def put_object(self, Bucket, Key, Body, Metadata=None):
+            return super().put_object(Bucket=Bucket, Key=Key, Body=Body, Metadata=None)
+
+    client = DropsMetadataClient()
+    rel = "HYPE_trades_2026-09-01.jsonl.gz"
+    path = _finished(tmp_path, rel, b"abcdef")
+    up = _uploader(tmp_path, client)
+    assert up._upload_one(path, rel) is False
+    assert up.ledger.confirmed_size(rel, up.destination) is None
+
+
+def test_put_sends_the_files_sha256_as_metadata(tmp_path):
+    client = FakeS3Client()
+    rel = "HYPE_trades_2026-09-01.jsonl.gz"
+    path = _finished(tmp_path, rel, b"abcdef")
+    _uploader(tmp_path, client)._upload_one(path, rel)
+    assert client.metadata[rel] == {"sha256": hashlib.sha256(b"abcdef").hexdigest()}
 
 
 def test_mismatched_size_is_a_failure_never_overwritten(tmp_path):
@@ -165,7 +219,7 @@ def test_mismatched_size_is_a_failure_never_overwritten(tmp_path):
     up = _uploader(tmp_path, client)
     ok = up._upload_one(path, rel)
     assert ok is False
-    assert up.ledger.confirmed_size(rel) is None
+    assert up.ledger.confirmed_size(rel, up.destination) is None
     assert client.objects[rel] == remote_content   # never overwritten remotely
     assert client.put_calls == []                  # PUT never attempted
     assert os.path.exists(path)                     # never deleted locally
@@ -182,7 +236,7 @@ def test_inconclusive_head_error_never_leads_to_a_put(tmp_path):
     ok = up._upload_one(str(tmp_path / rel), rel)
     assert ok is False
     assert client.put_calls == []
-    assert up.ledger.confirmed_size(rel) is None
+    assert up.ledger.confirmed_size(rel, up.destination) is None
 
 
 def test_retry_after_failure_succeeds_once_the_network_recovers(tmp_path):
@@ -193,10 +247,10 @@ def test_retry_after_failure_succeeds_once_the_network_recovers(tmp_path):
     _finished(tmp_path, rel, content)
     up = _uploader(tmp_path, client)
     up._pass_once()
-    assert up.ledger.confirmed_size(rel) is None
+    assert up.ledger.confirmed_size(rel, up.destination) is None
 
     up._pass_once()  # the one-shot fail_head_for entry was consumed; this pass succeeds
-    assert up.ledger.confirmed_size(rel) == len(content)
+    assert up.ledger.confirmed_size(rel, up.destination) == len(content)
 
 
 def test_never_uploads_the_current_days_plain_file(tmp_path):
@@ -233,7 +287,7 @@ def test_confirmed_ledger_entry_invalidated_when_local_file_grows(tmp_path):
     path = _finished(tmp_path, rel, b"abc")
     up = _uploader(tmp_path, client)
     up._pass_once()
-    assert up.ledger.confirmed_size(rel) == 3
+    assert up.ledger.confirmed_size(rel, up.destination) == 3
     original_remote = client.objects[rel]
 
     with open(path, "ab") as f:
@@ -241,7 +295,7 @@ def test_confirmed_ledger_entry_invalidated_when_local_file_grows(tmp_path):
     assert up._is_confirmed(path, rel) is False
 
     up._pass_once()
-    assert up.ledger.confirmed_size(rel) is None
+    assert up.ledger.confirmed_size(rel, up.destination) is None
     assert client.objects[rel] == original_remote
     assert os.path.exists(path)
 
@@ -254,7 +308,7 @@ def test_disabled_uploader_never_calls_the_client_and_recording_continues(tmp_pa
     up = rr.Uploader(str(tmp_path), None, None, clock=lambda: 2_000_000_000_000)
     assert up.enabled is False
     up._pass_once()  # must not raise despite client=None
-    assert up.ledger.confirmed_size(rel) is None
+    assert up.ledger.confirmed_size(rel, up.destination) is None
     st = up.status()
     assert st["uploads_enabled"] is False
 
@@ -300,9 +354,30 @@ def test_never_deletes_an_unconfirmed_file_however_old(tmp_path):
 def test_ledger_survives_restart(tmp_path):
     path = str(tmp_path / "upload_ledger.json")
     ledger = rr.UploadLedger(path)
-    ledger.mark_confirmed("f.jsonl.gz", 123, 1000)
+    ledger.mark_confirmed("f.jsonl.gz", 123, 1000, "https://s3.example|b")
     ledger_reloaded = rr.UploadLedger(path)
-    assert ledger_reloaded.confirmed_size("f.jsonl.gz") == 123
+    assert ledger_reloaded.confirmed_size("f.jsonl.gz", "https://s3.example|b") == 123
+
+
+def test_ledger_confirmation_does_not_carry_over_to_a_new_bucket(tmp_path):
+    # Codex r1: moving to a new bucket must re-upload, never trust (and
+    # prune on the strength of) a confirmation from the old destination.
+    rel = "HYPE_trades_2026-09-01.jsonl.gz"
+    content = b"abc"
+    _finished(tmp_path, rel, content)
+    inside_keep_window = rr._utc_day_end_ms("2026-09-01") + 3_600_000  # so nothing is pruned
+    old = _uploader(tmp_path, FakeS3Client(), destination="https://s3.example|old",
+                    clock=lambda: inside_keep_window)
+    old._pass_once()
+    assert old.ledger.confirmed_size(rel, old.destination) == len(content)
+
+    new_client = FakeS3Client()
+    new = _uploader(tmp_path, new_client, destination="https://s3.example|new",
+                    clock=lambda: inside_keep_window)
+    assert new._is_confirmed(str(tmp_path / rel), rel) is False
+    new._pass_once()
+    assert new_client.put_calls == [rel]
+    assert new.ledger.confirmed_size(rel, new.destination) == len(content)
 
 
 def test_uploader_restart_with_a_confirming_ledger_never_touches_the_client(tmp_path):
@@ -312,7 +387,7 @@ def test_uploader_restart_with_a_confirming_ledger_never_touches_the_client(tmp_
 
     first = _uploader(tmp_path, FakeS3Client())
     first._pass_once()
-    assert first.ledger.confirmed_size(rel) == len(content)
+    assert first.ledger.confirmed_size(rel, first.destination) == len(content)
 
     class AssertNeverCalledClient:
         def head_object(self, **kwargs):
@@ -531,6 +606,38 @@ def test_parse_env_honors_overrides():
     assert cfg["port"] == 9090
     assert cfg["keep_days"] == 7
     assert cfg["s3_config"].bucket == BUCKET
+
+
+def test_parse_env_malformed_ints_fall_back_to_defaults():
+    cfg = rr.parse_env({"PORT": "80a", "RECORDER_KEEP_DAYS": "-2"})
+    assert cfg["port"] == 8080
+    assert cfg["keep_days"] == 3
+
+
+# ── client setup failure disables uploads, never stops recording ────────
+
+def _s3_config():
+    return rr.s3_config_from_env({"S3_ENDPOINT": "https://x.example", "S3_BUCKET": BUCKET,
+                                  "S3_ACCESS_KEY_ID": "AKID", "S3_SECRET_ACCESS_KEY": "SECRET"})
+
+
+def test_build_s3_client_missing_config_disables_uploads():
+    assert rr.build_s3_client(None) == (None, None, None)
+
+
+def test_build_s3_client_setup_error_disables_uploads_without_leaking(caplog):
+    # Codex r1: a malformed endpoint used to raise out of run() and stop
+    # recording too. Now it only disables uploads, and logs the class only.
+    def boom(_config):
+        raise ValueError("Invalid endpoint: SECRET-looking detail")
+    assert rr.build_s3_client(_s3_config(), make_client=boom) == (None, None, None)
+    assert "ValueError" in caplog.text
+    assert "SECRET" not in caplog.text
+
+
+def test_build_s3_client_binds_destination_to_endpoint_and_bucket():
+    client, bucket, destination = rr.build_s3_client(_s3_config(), make_client=lambda c: "client")
+    assert (client, bucket, destination) == ("client", BUCKET, f"https://x.example|{BUCKET}")
 
 
 # ── secrets never leak, across HEAD/PUT failures including exceptions ────

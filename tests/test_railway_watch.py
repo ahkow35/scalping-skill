@@ -1,6 +1,7 @@
 from datetime import datetime
 import io
 import json
+import threading
 
 import pytest
 import requests
@@ -804,7 +805,7 @@ def test_loop_recorder_feature_off_when_url_unset_zero_behaviour_change():
     rw.loop(make_watcher(), data_dir="unused", check=lambda _dir: next(reports),
             send=lambda m: None, ping=lambda: None, clock=lambda: next(clocks),
             sleep=lambda s: None, iterations=2, recorder_status_url=None,
-            fetch_recorder_status=fetch)
+            fetch_recorder_status=fetch, recorder_spawn=_run_now)
     assert fetch_calls == []
 
 
@@ -821,6 +822,60 @@ def _clock_sequence(top_values, calls_per_iter=3):
     return iter(seq)
 
 
+def _run_now(target):
+    """Synchronous stand-in for the poller's background thread."""
+    target()
+
+
+def test_loop_is_not_stalled_by_a_hung_recorder_poll():
+    # Codex r1: a trickling /status body defeats the per-read timeout. The
+    # poll runs on its own thread, so the account loop keeps going.
+    release = threading.Event()
+    reports = iter([{"status": "DATA_UNAVAILABLE", "reasons": ["x"]}] * 3)
+    clocks = _clock_sequence([MIDNIGHT + i * 60_000 for i in range(3)])
+    pings = []
+
+    def hanging_fetch(url):
+        release.wait(5)
+        return None
+
+    try:
+        rw.loop(make_watcher(), data_dir="unused", check=lambda _dir: next(reports),
+                send=lambda m: None, ping=lambda: pings.append(1), clock=lambda: next(clocks),
+                sleep=lambda s: None, iterations=3, recorder_status_url="http://x/status",
+                fetch_recorder_status=hanging_fetch)
+        assert len(pings) == 3  # every account pass finished while the poll hung
+    finally:
+        release.set()
+
+
+def test_a_stuck_recorder_poll_reads_as_unreachable_and_alerts():
+    started = []
+    reports = iter([{"status": "DATA_UNAVAILABLE", "reasons": ["x"]}] * 10)
+    clocks = _clock_sequence([MIDNIGHT + i * 60_000 for i in range(10)])
+    sent = []
+    rw.loop(make_watcher(), data_dir="unused", check=lambda _dir: next(reports),
+            send=sent.append, ping=lambda: None, clock=lambda: next(clocks),
+            sleep=lambda s: None, iterations=10, recorder_status_url="http://x/status",
+            fetch_recorder_status=lambda url: {"connected": True},
+            recorder_spawn=started.append)  # the poll never finishes
+    assert len(started) == 1  # never a second poll while one is in flight
+    assert any("PROBLEM:" in m and "recorder" in m for m in sent)
+
+
+def test_poller_hands_back_a_late_result_once():
+    threads = []
+    poller = rw.RecorderPoller("http://x/status", lambda url: {"connected": True},
+                               interval_s=60, stuck_after_s=120, spawn=threads.append)
+    assert poller.tick(0) == []
+    assert poller.tick(119_000) == []
+    assert poller.tick(120_000) == [None]      # stuck -> unreachable
+    assert poller.tick(150_000) == []          # at most once per interval
+    threads[0]()                               # the hung poll finally returns
+    assert poller.tick(160_000) == [{"connected": True}]
+    assert poller.tick(170_000) == []
+
+
 def test_loop_polls_recorder_at_most_once_a_minute():
     reports = iter([{"status": "DATA_UNAVAILABLE", "reasons": ["x"]}] * 4)
     # Four iterations 15s apart (60s total) — the account loop's own cadence
@@ -835,7 +890,7 @@ def test_loop_polls_recorder_at_most_once_a_minute():
     rw.loop(make_watcher(), data_dir="unused", check=lambda _dir: next(reports),
             send=lambda m: None, ping=lambda: None, clock=lambda: next(clocks),
             sleep=lambda s: None, iterations=4, recorder_status_url="http://x/status",
-            fetch_recorder_status=fetch)
+            fetch_recorder_status=fetch, recorder_spawn=_run_now)
     assert fetch_calls == ["http://x/status"]  # only the first of the four passes polled
 
 
@@ -852,7 +907,7 @@ def test_loop_polls_recorder_again_once_the_interval_elapses():
     rw.loop(make_watcher(), data_dir="unused", check=lambda _dir: next(reports),
             send=lambda m: None, ping=lambda: None, clock=lambda: next(clocks),
             sleep=lambda s: None, iterations=5, recorder_status_url="http://x/status",
-            fetch_recorder_status=fetch)
+            fetch_recorder_status=fetch, recorder_spawn=_run_now)
     assert len(fetch_calls) == 2
 
 
@@ -867,7 +922,7 @@ def test_loop_recorder_check_exception_does_not_affect_account_checks():
     rw.loop(make_watcher(), data_dir="unused", check=lambda _dir: next(reports),
             send=lambda m: None, ping=lambda: account_pings.append(1),
             clock=lambda: next(clocks), sleep=lambda s: None, iterations=2,
-            recorder_status_url="http://x/status", fetch_recorder_status=raising_fetch)
+            recorder_status_url="http://x/status", fetch_recorder_status=raising_fetch, recorder_spawn=_run_now)
     assert len(account_pings) == 2  # both passes completed despite the recorder check raising
 
 
@@ -882,5 +937,5 @@ def test_loop_recorder_alerts_flow_through_send():
     rw.loop(make_watcher(), data_dir="unused", check=lambda _dir: next(reports),
             send=sent.append, ping=lambda: None, clock=lambda: next(clocks),
             sleep=lambda s: None, iterations=6, recorder_status_url="http://x/status",
-            fetch_recorder_status=fetch)
+            fetch_recorder_status=fetch, recorder_spawn=_run_now)
     assert any("PROBLEM:" in m and "recorder" in m for m in sent)

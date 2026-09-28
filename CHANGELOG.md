@@ -7,12 +7,14 @@ records is untouched — for coins from `RECORDER_COINS` (default `HYPE`),
 writing to `DATA_DIR` (default `/data`). A background thread uploads each
 finished (already gzip-rotated) UTC-day file to a private Railway Storage
 Bucket over its S3-compatible API (`boto3`), using HEAD-before-PUT
-semantics: an object already present with a matching byte size counts as
-confirmed without a second upload; a mismatched size is a failure and is
-**never overwritten**; an absent object is PUT, then confirmed with a
-follow-up HEAD matching its size. A small JSON ledger under `DATA_DIR`
-(atomic writes) tracks confirmed uploads so a restart never re-uploads or
-loses track of what's already confirmed. Failed uploads retry every 10
+semantics. Each PUT carries the file's SHA-256 as object metadata, and an
+object counts as confirmed only when a HEAD shows both the local size and
+that digest; an existing object that differs (or has no digest) is a
+failure and is **never overwritten**. A small JSON ledger under `DATA_DIR`
+(atomic writes) tracks confirmed uploads, bound to the endpoint and bucket,
+so a restart never re-uploads and a bucket change never trusts the old
+bucket's confirmations. An S3 client that can't be built disables uploads
+without stopping recording, like missing config. Failed uploads retry every 10
 minutes and a network or bucket problem never stops or slows recording. A
 local `.gz` is deleted only once its upload is confirmed **and** its UTC day
 is more than `RECORDER_KEEP_DAYS` (default 3) days past its end — an
@@ -38,8 +40,9 @@ Railway private networking is IPv6).
 
 `railway_watch.py` gained an optional recorder health check, entirely off
 by default (`RECORDER_STATUS_URL` unset = zero behaviour change). When set,
-it polls the recorder's `/status` at most once a minute (independent of the
-account check's own 15–30s cadence) and raises two more alerts through the
+it polls the recorder's `/status` at most once a minute on a background
+thread, at most one poll in flight (a poll hung for over 2 minutes reads as
+unreachable), independent of the account check's own 15–30s cadence and raises two more alerts through the
 same Telegram channel and appear/30-minute-repeat/all-clear machinery as the
 account problems, but as a fully separate `RECORDER_*` problem group that
 never touches `/report`, `entry_allowed`, or any account-derived alert, and

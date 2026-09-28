@@ -64,10 +64,10 @@ Environment variables it reads on boot (names only — values are Railway servic
 
 ### Recorder alerts (optional, `RECORDER_STATUS_URL`)
 
-When `RECORDER_STATUS_URL` is set, the watcher additionally polls it (at most once a minute, independent of the account check's own cadence) and raises two more alerts through the same Telegram channel and appear/30-minute-repeat/all-clear rules as the account problems above — but as a fully separate group that never affects `/report`, `entry_allowed`, or any account-derived alert, and a fetch exception here can never crash or stall the account loop:
+When `RECORDER_STATUS_URL` is set, the watcher additionally polls it (at most once a minute, on a background thread with at most one poll in flight — a poll hung for over 2 minutes counts as unreachable — independent of the account check's own cadence) and raises two more alerts through the same Telegram channel and appear/30-minute-repeat/all-clear rules as the account problems above — but as a fully separate group that never affects `/report`, `entry_allowed`, or any account-derived alert, and a fetch exception here can never crash or stall the account loop:
 
 - `RECORDER_SILENT` — the recorder's `/status` was unreachable, or reported not connected, or no message for 5 minutes, sustained for 5 minutes. Clears only when a poll comes back healthy.
-- `RECORDER_UPLOAD_FAILING` — uploads disabled by missing S3 bucket configuration, or a finished day's file is still unconfirmed uploaded to the Railway Storage Bucket more than 24 hours after that UTC day ended, or uploads have been failing for over 24 hours. Clears when caught up.
+- `RECORDER_UPLOAD_FAILING` — uploads disabled by missing or invalid S3 bucket configuration, or a finished day's file is still unconfirmed uploaded to the Railway Storage Bucket more than 24 hours after that UTC day ended, or uploads have been failing for over 24 hours. Clears when caught up.
 
 **Merging to `main` redeploys the watcher** once Railway follows the main branch — a normal `git push` to a feature branch does not. **Never merge or deploy within 10 minutes of midnight Singapore time**: a restart across the boundary leaves the watcher's own day baseline partial for that day. `/report` is token-protected (`hmac.compare_digest` against `REPORT_TOKEN`, sent as `Authorization: Bearer <token>`); it is on Railway's public domain, so treat the token like any other credential.
 
