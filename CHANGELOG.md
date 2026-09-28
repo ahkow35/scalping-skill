@@ -20,8 +20,9 @@ future (`DATA_UNAVAILABLE`, `entry_allowed: false`, no `observation`, a plain
 reason). A garbled answer also fails closed: an `entry_allowed` that is not a real
 true/false, a non-finite or non-numeric `produced_at_ms`, any NaN/Infinity in
 the body (including overflow such as `1e400`), a non-string configured
-`watcher_url`, a response containing the token, or `entry_allowed: true`
-outside a complete `CLEAR` report. The env URL is https-validated too, before
+`watcher_url`, a response containing the token (raw or JSON-escaped), or
+`entry_allowed: true` outside a complete `CLEAR` report (every invariant
+`account_risk.evaluate` guarantees when it grants entry). The env URL is https-validated too, before
 the token is sent, and redirects are not followed. Exit codes match `check`: 0 eligible, 3 HALT, 2 other blocked/unknown.
 `SKILL.md`'s account preflight (the Step 2 entry-preflight bullet and the
 `/scalp account check` admin command) now runs `remote-check --json` instead

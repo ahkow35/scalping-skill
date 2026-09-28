@@ -18,18 +18,24 @@ SECRET = "watcher-secret-token-xyz"
 WATCHER_REPORT = {"status": "CLEAR", "entry_allowed": True, "read_only": True,
                    "orders_changed": False, "daily_breach_latched": False,
                    "reasons": [], "checked_at_ms": NOW - 5_000,
-                   "daily": {"pnl_usdc": 0.0}, "observation": {"equity_usdc": 5000.0, "unrealized_pnl_usdc": 0.0}}
+                   "open_trigger_distance_risk_usdc": 20.0, "remaining_daily_budget_usdc": 150.0,
+                   "daily": {"net_pnl_usdc": 0.0, "limit_usdc": 150.0, "baseline_quality": "near_reset_observation",
+                             "baseline_at_ms": NOW - 3_600_000, "net_cash_flow_usdc": 0.0},
+                   "observation": {"equity_usdc": 5000.0, "unrealized_pnl_usdc": 0.0}}
 WATCHER_HALT = {**WATCHER_REPORT, "status": "HALT", "entry_allowed": False}
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, malformed=False):
+    def __init__(self, status_code=200, payload=None, malformed=False, raw=None):
         self.status_code = status_code
         self._payload = payload
         self._malformed = malformed
+        self._raw = raw
 
     @property
     def content(self):
+        if self._raw is not None:
+            return self._raw.encode()
         if self._malformed:
             return b"<html>not json</html>"
         return json.dumps(self._payload).encode()
@@ -571,15 +577,59 @@ def test_response_echoing_the_token_blocks_and_never_prints_it(capsys):
 
 
 def test_overflowing_number_blocks():
-    body = FakeResponse(200, None)
     raw = json.dumps(envelope(NOW - 1_000)).replace('"equity_usdc": 5000.0', '"equity_usdc": 1e400')
     assert "1e400" in raw
-    type(body).content = property(lambda self: raw.encode())
-    try:
-        report = monitor.remote_check(
-            env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
-            get=lambda *a, **k: body, keychain=refusing_keychain, clock=clock())
-    finally:
-        del type(body).content
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=lambda *a, **k: FakeResponse(200, raw=raw), keychain=refusing_keychain, clock=clock())
     assert report["status"] == "DATA_UNAVAILABLE"
     assert report["entry_allowed"] is False
+
+
+# --------------------------------------------------------------------------
+# Cross-review round 2 (Codex): permission needs the full CLEAR invariants;
+# an escaped token echo is caught after decoding
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("override", [
+    {"daily": {}, "observation": {}},
+    {"observation": {}},
+    {"observation": {"equity_usdc": 0.0}},
+    {"daily": {**WATCHER_REPORT["daily"], "baseline_quality": "partial_day"}},
+    {"daily": {**WATCHER_REPORT["daily"], "net_pnl_usdc": -150.0}},
+    {"daily": {**WATCHER_REPORT["daily"], "limit_usdc": None}},
+    {"open_trigger_distance_risk_usdc": None},
+    {"remaining_daily_budget_usdc": None},
+    {"open_trigger_distance_risk_usdc": 200.0},
+    {"open_trigger_distance_risk_usdc": -1.0},
+    {"remaining_daily_budget_usdc": True},
+])
+def test_permission_needs_every_clear_invariant(override):
+    report = _remote(envelope(NOW - 1_000, {**WATCHER_REPORT, **override}))
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert report["entry_allowed"] is False
+
+
+def test_complete_clear_fixture_is_permitted():
+    report = _remote(envelope(NOW - 1_000))
+    assert report["entry_allowed"] is True
+
+
+@pytest.mark.parametrize("where", ["reason", "key"])
+def test_escaped_token_echo_blocks_and_never_prints(where, capsys, monkeypatch):
+    escaped = "".join(f"\\u{ord(c):04x}" for c in SECRET)
+    base = json.dumps(envelope(NOW - 1_000))
+    if where == "reason":
+        raw = base.replace('"reasons": []', '"reasons": ["' + escaped + '"]')
+    else:
+        raw = base.replace('"reasons": []', '"reasons": [], "' + escaped + '": 1')
+    assert SECRET not in raw
+    body = FakeResponse(200, raw=raw)
+    monkeypatch.setenv("SCALP_WATCHER_URL", URL)
+    monkeypatch.setenv("SCALP_WATCHER_TOKEN", SECRET)
+    monkeypatch.setattr(monitor.requests, "get", lambda *a, **k: body)
+    code = monitor.main(["remote-check", "--json"])
+    out = capsys.readouterr()
+    assert code == 2
+    assert json.loads(out.out)["entry_allowed"] is False
+    assert SECRET not in out.out + out.err

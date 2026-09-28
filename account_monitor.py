@@ -136,6 +136,31 @@ def _local_config(data_dir):
     return config if isinstance(config, dict) else {}
 
 
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _complete_clear(report):
+    """True only for a report carrying every invariant account_risk.evaluate
+    guarantees when it grants entry: CLEAR, not latched, a full-day baseline,
+    positive equity, P&L inside the limit, and known open risk that fits the
+    remaining budget. Anything less must not read as permission."""
+    daily = report.get("daily")
+    observation = report.get("observation")
+    if not (isinstance(daily, dict) and isinstance(observation, dict)):
+        return False
+    risk = report.get("open_trigger_distance_risk_usdc")
+    remaining = report.get("remaining_daily_budget_usdc")
+    net_pnl, limit = daily.get("net_pnl_usdc"), daily.get("limit_usdc")
+    equity = observation.get("equity_usdc")
+    return (report.get("status") == "CLEAR"
+            and report.get("daily_breach_latched") is False
+            and daily.get("baseline_quality") not in (None, "partial_day")
+            and all(_number(v) for v in (risk, remaining, net_pnl, limit, equity))
+            and equity > 0 and limit > 0 and net_pnl > -limit
+            and 0 <= risk <= remaining)
+
+
 def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=None,
                   keychain=None, clock=None,
                   timeout=WATCHER_REQUEST_TIMEOUT_S):
@@ -198,6 +223,9 @@ def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=None,
         payload = json.loads(response.content, parse_constant=reject_constant, parse_float=finite_float)
     except (ValueError, TypeError):
         return unavailable("watcher response was not valid JSON")
+    # Decoded text too: a \uXXXX-escaped echo is absent from the raw bytes.
+    if token in json.dumps(payload, ensure_ascii=False):
+        return unavailable("watcher response contained the token")
     if not isinstance(payload, dict) or not isinstance(payload.get("report"), dict):
         return unavailable("watcher response was malformed")
     produced_at_ms = payload.get("produced_at_ms")
@@ -207,12 +235,7 @@ def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=None,
     if (not isinstance(watcher_report.get("status"), str)
             or not isinstance(watcher_report.get("entry_allowed"), bool)):
         return unavailable("watcher response was malformed")
-    # Permission only in the exact shape account_risk.evaluate produces for it.
-    if watcher_report["entry_allowed"] and not (
-            watcher_report["status"] == "CLEAR"
-            and watcher_report.get("daily_breach_latched") is False
-            and isinstance(watcher_report.get("daily"), dict)
-            and isinstance(watcher_report.get("observation"), dict)):
+    if watcher_report["entry_allowed"] and not _complete_clear(watcher_report):
         return unavailable("watcher report was inconsistent (entry allowed outside a complete CLEAR)")
     age_s = (clock() - produced_at_ms) / 1000
     if age_s > WATCHER_FRESHNESS_S:
