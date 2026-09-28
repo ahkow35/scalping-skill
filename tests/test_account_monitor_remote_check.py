@@ -17,7 +17,8 @@ SECRET = "watcher-secret-token-xyz"
 
 WATCHER_REPORT = {"status": "CLEAR", "entry_allowed": True, "read_only": True,
                    "orders_changed": False, "daily_breach_latched": False,
-                   "reasons": [], "checked_at_ms": NOW - 5_000}
+                   "reasons": [], "checked_at_ms": NOW - 5_000,
+                   "daily": {"pnl_usdc": 0.0}, "observation": {"equity_usdc": 5000.0, "unrealized_pnl_usdc": 0.0}}
 WATCHER_HALT = {**WATCHER_REPORT, "status": "HALT", "entry_allowed": False}
 
 
@@ -59,7 +60,7 @@ def refusing_keychain():
 # --------------------------------------------------------------------------
 
 def test_fresh_report_passes_through_entry_allowed_as_watcher_said():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         assert url == URL + "/report"
         assert headers["Authorization"] == f"Bearer {SECRET}"
         assert timeout == monitor.WATCHER_REQUEST_TIMEOUT_S
@@ -74,7 +75,7 @@ def test_fresh_report_passes_through_entry_allowed_as_watcher_said():
 
 
 def test_watcher_halt_passes_through_as_blocked():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         return FakeResponse(200, envelope(NOW - 1_000, WATCHER_HALT))
     report = monitor.remote_check(
         env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
@@ -88,7 +89,7 @@ def test_watcher_halt_passes_through_as_blocked():
 # --------------------------------------------------------------------------
 
 def test_stale_report_blocks():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         return FakeResponse(200, envelope(NOW - 75_000))
     report = monitor.remote_check(
         env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
@@ -101,7 +102,7 @@ def test_stale_report_blocks():
 
 
 def test_future_dated_report_blocks():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         return FakeResponse(200, envelope(NOW + 10_000))
     report = monitor.remote_check(
         env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
@@ -112,7 +113,7 @@ def test_future_dated_report_blocks():
 
 
 def test_report_within_freshness_window_is_not_blocked():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         return FakeResponse(200, envelope(NOW - 59_000))
     report = monitor.remote_check(
         env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
@@ -126,7 +127,7 @@ def test_report_within_freshness_window_is_not_blocked():
 # --------------------------------------------------------------------------
 
 def test_401_gives_refused_token_reason():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         return FakeResponse(401)
     report = monitor.remote_check(
         env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
@@ -137,7 +138,7 @@ def test_401_gives_refused_token_reason():
 
 
 def test_503_gives_unavailable():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         return FakeResponse(503)
     report = monitor.remote_check(
         env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
@@ -148,7 +149,7 @@ def test_503_gives_unavailable():
 
 
 def test_connection_error_gives_unreachable():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         raise requests.exceptions.ConnectionError("refused")
     report = monitor.remote_check(
         env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
@@ -159,7 +160,7 @@ def test_connection_error_gives_unreachable():
 
 
 def test_timeout_also_gives_unreachable():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         raise requests.exceptions.Timeout("timed out")
     report = monitor.remote_check(
         env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
@@ -169,7 +170,7 @@ def test_timeout_also_gives_unreachable():
 
 
 def test_malformed_json_gives_unavailable():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         return FakeResponse(200, malformed=True)
     report = monitor.remote_check(
         env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
@@ -179,7 +180,7 @@ def test_malformed_json_gives_unavailable():
 
 
 def test_missing_produced_at_ms_gives_unavailable():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         return FakeResponse(200, {"report": WATCHER_REPORT})
     report = monitor.remote_check(
         env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
@@ -189,7 +190,7 @@ def test_missing_produced_at_ms_gives_unavailable():
 
 
 def test_missing_report_field_gives_unavailable():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         return FakeResponse(200, {"produced_at_ms": NOW})
     report = monitor.remote_check(
         env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
@@ -221,7 +222,7 @@ def test_missing_token_env_unset_keychain_fails_gives_config_required(tmp_path):
 
 
 def test_keychain_supplies_token_when_env_unset():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         assert headers["Authorization"] == f"Bearer {SECRET}"
         return FakeResponse(200, envelope(NOW - 1_000))
     report = monitor.remote_check(
@@ -237,7 +238,7 @@ def test_env_url_overrides_config(tmp_path):
     monitor.atomic_json(tmp_path / "config.json", {"wallet": WALLET, "daily_loss_usdc": 100,
                                                      "watcher_url": "https://config-url.example.com"})
     seen = {}
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         seen["url"] = url
         return FakeResponse(200, envelope(NOW - 1_000))
     monitor.remote_check(tmp_path, env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
@@ -249,7 +250,7 @@ def test_config_url_used_when_env_unset(tmp_path):
     monitor.atomic_json(tmp_path / "config.json", {"wallet": WALLET, "daily_loss_usdc": 100,
                                                      "watcher_url": URL})
     seen = {}
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         seen["url"] = url
         return FakeResponse(200, envelope(NOW - 1_000))
     report = monitor.remote_check(tmp_path, env={"SCALP_WATCHER_TOKEN": SECRET},
@@ -271,7 +272,7 @@ def test_old_config_without_watcher_url_keeps_working(tmp_path):
 
 def test_corrupt_local_config_does_not_block_env_supplied_url(tmp_path):
     (tmp_path / "config.json").write_text("not json")
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         return FakeResponse(200, envelope(NOW - 1_000))
     report = monitor.remote_check(tmp_path, env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
                                    get=get, keychain=refusing_keychain, clock=clock())
@@ -283,12 +284,12 @@ def test_corrupt_local_config_does_not_block_env_supplied_url(tmp_path):
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("get,keychain_fn", [
-    (lambda url, headers=None, timeout=None: FakeResponse(200, envelope(NOW - 1_000)), None),
-    (lambda url, headers=None, timeout=None: FakeResponse(401), None),
-    (lambda url, headers=None, timeout=None: FakeResponse(503), None),
-    (lambda url, headers=None, timeout=None: (_ for _ in ()).throw(requests.exceptions.ConnectionError("x")), None),
-    (lambda url, headers=None, timeout=None: FakeResponse(200, malformed=True), None),
-    (lambda url, headers=None, timeout=None: FakeResponse(200, envelope(NOW - 999_000)), None),
+    (lambda url, headers=None, timeout=None, allow_redirects=None: FakeResponse(200, envelope(NOW - 1_000)), None),
+    (lambda url, headers=None, timeout=None, allow_redirects=None: FakeResponse(401), None),
+    (lambda url, headers=None, timeout=None, allow_redirects=None: FakeResponse(503), None),
+    (lambda url, headers=None, timeout=None, allow_redirects=None: (_ for _ in ()).throw(requests.exceptions.ConnectionError("x")), None),
+    (lambda url, headers=None, timeout=None, allow_redirects=None: FakeResponse(200, malformed=True), None),
+    (lambda url, headers=None, timeout=None, allow_redirects=None: FakeResponse(200, envelope(NOW - 999_000)), None),
 ])
 def test_token_never_appears_in_output(get, keychain_fn):
     report = monitor.remote_check(
@@ -300,7 +301,7 @@ def test_token_never_appears_in_output(get, keychain_fn):
 
 
 def test_token_never_appears_when_sourced_from_keychain():
-    def get(url, headers=None, timeout=None):
+    def get(url, headers=None, timeout=None, allow_redirects=None):
         return FakeResponse(200, envelope(NOW - 1_000))
     report = monitor.remote_check(env={"SCALP_WATCHER_URL": URL}, get=get,
                                    keychain=fixed_token(), clock=clock())
@@ -463,7 +464,7 @@ def test_cli_remote_check_never_calls_local_check(monkeypatch, capsys):
 def _remote(payload, now=NOW):
     return monitor.remote_check(
         env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
-        get=lambda url, headers=None, timeout=None: FakeResponse(200, payload),
+        get=lambda url, headers=None, timeout=None, allow_redirects=None: FakeResponse(200, payload),
         keychain=refusing_keychain, clock=clock(now))
 
 
@@ -491,7 +492,7 @@ def test_nan_timestamp_cli_fails_closed_without_traceback(monkeypatch, capsys, t
     monkeypatch.setenv("SCALP_WATCHER_URL", URL)
     monkeypatch.setenv("SCALP_WATCHER_TOKEN", SECRET)
     monkeypatch.setattr(monitor.requests, "get",
-                        lambda url, headers=None, timeout=None: FakeResponse(200, envelope(float("nan"))))
+                        lambda url, headers=None, timeout=None, allow_redirects=None: FakeResponse(200, envelope(float("nan"))))
     code = monitor.main(["--data-dir", str(tmp_path), "remote-check", "--json"])
     out = json.loads(capsys.readouterr().out)
     assert code == 2
@@ -511,4 +512,74 @@ def test_non_string_config_url_is_config_required(tmp_path, watcher_url):
                                   get=lambda *a, **k: pytest.fail("must not fetch"),
                                   keychain=refusing_keychain, clock=clock())
     assert report["status"] == "CONFIG_REQUIRED"
+    assert report["entry_allowed"] is False
+
+
+# --------------------------------------------------------------------------
+# Cross-review round 1 (Codex): permission shape, transport, token echo, overflow
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("override", [
+    {"status": "HALT"},
+    {"status": "SOMETHING_NEW"},
+    {"daily_breach_latched": True},
+    {"daily_breach_latched": None},
+    {"daily": None},
+    {"observation": None},
+])
+def test_permission_outside_a_complete_clear_blocks(override):
+    report = _remote(envelope(NOW - 1_000, {**WATCHER_REPORT, **override}))
+    assert report["status"] == "DATA_UNAVAILABLE"
+    assert report["entry_allowed"] is False
+
+
+def test_blocked_report_passes_through_without_full_shape():
+    report = _remote(envelope(NOW - 1_000, {"status": "WARMUP", "entry_allowed": False, "reasons": []}))
+    assert report["status"] == "WARMUP"
+    assert report["entry_allowed"] is False
+
+
+@pytest.mark.parametrize("url", ["http://scalping-skill-production.up.railway.app", "ftp://x", "not a url"])
+def test_non_https_env_url_never_sends_the_token(url):
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": url, "SCALP_WATCHER_TOKEN": SECRET},
+        get=lambda *a, **k: pytest.fail("token must not be sent"),
+        keychain=refusing_keychain, clock=clock())
+    assert report["status"] == "CONFIG_REQUIRED"
+    assert report["entry_allowed"] is False
+
+
+def test_redirects_are_not_followed():
+    seen = {}
+
+    def get(url, headers=None, timeout=None, allow_redirects=None):
+        seen["allow_redirects"] = allow_redirects
+        return FakeResponse(302, None)
+    report = monitor.remote_check(
+        env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+        get=get, keychain=refusing_keychain, clock=clock())
+    assert seen["allow_redirects"] is False
+    assert report["entry_allowed"] is False
+
+
+def test_response_echoing_the_token_blocks_and_never_prints_it(capsys):
+    echoed = {**WATCHER_REPORT, "reasons": [f"Authorization: Bearer {SECRET}"]}
+    report = _remote(envelope(NOW - 1_000, echoed))
+    assert report["entry_allowed"] is False
+    assert SECRET not in json.dumps(report)
+    assert SECRET not in monitor.render(report)
+
+
+def test_overflowing_number_blocks():
+    body = FakeResponse(200, None)
+    raw = json.dumps(envelope(NOW - 1_000)).replace('"equity_usdc": 5000.0', '"equity_usdc": 1e400')
+    assert "1e400" in raw
+    type(body).content = property(lambda self: raw.encode())
+    try:
+        report = monitor.remote_check(
+            env={"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET},
+            get=lambda *a, **k: body, keychain=refusing_keychain, clock=clock())
+    finally:
+        del type(body).content
+    assert report["status"] == "DATA_UNAVAILABLE"
     assert report["entry_allowed"] is False

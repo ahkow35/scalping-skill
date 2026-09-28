@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import fcntl
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -164,24 +165,37 @@ def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=None,
     if not isinstance(url, str) or not url:
         return unavailable("watcher URL not configured (configure --watcher-url or SCALP_WATCHER_URL)",
                             status="CONFIG_REQUIRED")
-    url = url.rstrip("/")
+    try:
+        url = validate_watcher_url(url)
+    except AccountDataError:
+        return unavailable("watcher URL must be an https:// URL", status="CONFIG_REQUIRED")
     token = env.get("SCALP_WATCHER_TOKEN") or keychain()
     if not token:
         return unavailable("watcher token not configured (SCALP_WATCHER_TOKEN or Keychain)",
                             status="CONFIG_REQUIRED")
     try:
-        response = get(url + "/report", headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
+        response = get(url + "/report", headers={"Authorization": f"Bearer {token}"},
+                       timeout=timeout, allow_redirects=False)
     except requests.RequestException:
         return unavailable("watcher unreachable")
     if response.status_code == 401:
         return unavailable("watcher refused the token")
     if response.status_code != 200:
         return unavailable(f"watcher returned HTTP {response.status_code}")
+
     def reject_constant(value):
         raise ValueError(f"non-finite JSON value: {value}")
 
+    def finite_float(text):
+        value = float(text)
+        if not math.isfinite(value):  # 1e400 overflows to inf without parse_constant
+            raise ValueError(f"non-finite JSON number: {text}")
+        return value
+
     try:
-        payload = json.loads(response.content, parse_constant=reject_constant)
+        if token.encode() in response.content:
+            return unavailable("watcher response contained the token")
+        payload = json.loads(response.content, parse_constant=reject_constant, parse_float=finite_float)
     except (ValueError, TypeError):
         return unavailable("watcher response was not valid JSON")
     if not isinstance(payload, dict) or not isinstance(payload.get("report"), dict):
@@ -193,6 +207,13 @@ def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=None,
     if (not isinstance(watcher_report.get("status"), str)
             or not isinstance(watcher_report.get("entry_allowed"), bool)):
         return unavailable("watcher response was malformed")
+    # Permission only in the exact shape account_risk.evaluate produces for it.
+    if watcher_report["entry_allowed"] and not (
+            watcher_report["status"] == "CLEAR"
+            and watcher_report.get("daily_breach_latched") is False
+            and isinstance(watcher_report.get("daily"), dict)
+            and isinstance(watcher_report.get("observation"), dict)):
+        return unavailable("watcher report was inconsistent (entry allowed outside a complete CLEAR)")
     age_s = (clock() - produced_at_ms) / 1000
     if age_s > WATCHER_FRESHNESS_S:
         return unavailable(f"watcher report is {age_s:.0f} s old (limit {WATCHER_FRESHNESS_S} s)")

@@ -75,7 +75,9 @@ account_monitor.py check` still works and remains available to run by hand.
 It resolves the watcher URL from `SCALP_WATCHER_URL` if set (env wins), else
 the local config's optional `watcher_url` field (`configure --watcher-url
 YOUR_HTTPS_URL`, validated as an https URL; a config saved before this field
-existed keeps working — it just has no watcher URL to read). The token comes
+existed keeps working — it just has no watcher URL to read). Either source
+must be an https URL, or the token is never sent (`CONFIG_REQUIRED`);
+redirects are not followed. The token comes
 from `SCALP_WATCHER_TOKEN` if set, else the macOS Keychain (`security
 find-generic-password -s scalp-watcher-report-token -w`). Neither the token
 nor the Authorization header is ever printed, logged, or included in any
@@ -86,7 +88,11 @@ token, an unreachable or non-200 watcher, a malformed body, or a report whose
 `produced_at_ms` is more than **60 seconds** old or more than 5 seconds in
 the future all produce `status: DATA_UNAVAILABLE` (or `CONFIG_REQUIRED` for a
 missing URL/token), `entry_allowed: false`, and no `observation` — a plain
-reason names why (e.g. a 401 reads "watcher refused the token"). Exit codes
+reason names why (e.g. a 401 reads "watcher refused the token"). A garbled
+answer blocks too: `entry_allowed` that is not a real true/false, a broken
+`produced_at_ms`, any NaN, Infinity or overflowing number, a response that
+contains the token, or permission outside a complete `CLEAR` report (status
+`CLEAR`, `daily_breach_latched` false, `daily` and `observation` present). Exit codes
 match `check`: 0 eligible, 3 HALT, 2 other blocked/unknown.
 
 Once this is live and trusted, the Mac's `scripts/midnight_watch.sh` /
