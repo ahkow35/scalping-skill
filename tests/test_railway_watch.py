@@ -574,6 +574,21 @@ def test_alive_summary_fires_once_at_nine_local_and_not_on_deploy_day():
     assert w.alive_summary(report, nine_sgt + 30_000) == []                   # once a day
 
 
+def test_alive_summary_counts_recorder_problems_apart_from_account_problems():
+    nine_sgt = int(datetime.fromisoformat("2026-09-08T09:00:00+08:00").timestamp() * 1000)
+    w = make_watcher()
+    w.boot(nine_sgt - 86_400_000 + 3_600_000)
+    w.active = {"RECORDER_SILENT": {}, "RECORDER_UPLOAD_FAILING": {}}
+    report = {"status": "CLEAR", "observation": {"equity_usdc": 5145.07}}
+    assert w.alive_summary(report, nine_sgt) == [
+        "watcher alive — status CLEAR | equity 5,145.07 USDC | 2 recorder problem(s) active"]
+    w.active["HALT"] = {}
+    w.last_alive_date = None
+    assert w.alive_summary(report, nine_sgt + 86_400_000) == [
+        "watcher alive — status CLEAR | equity 5,145.07 USDC"
+        " | 1 account problem(s) active | 2 recorder problem(s) active"]
+
+
 # ---------------------------------------------------------------------------
 # Cross-review round 1: no all-clear without evidence
 # ---------------------------------------------------------------------------

@@ -163,7 +163,9 @@ class UploadLedger:
             try:
                 with open(self._path) as f:
                     self._entries = json.load(f)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                # Safe to start empty: HEAD-before-PUT re-confirms uploaded files.
+                logger.warning("upload ledger unreadable (%s); starting empty", type(exc).__name__)
                 self._entries = {}
 
     def _save(self):

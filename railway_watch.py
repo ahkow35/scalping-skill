@@ -301,8 +301,13 @@ class Watcher:
         parts = [f"watcher alive — status {report.get('status', 'UNKNOWN')}"]
         if equity is not None:
             parts.append(f"equity {equity:,.2f} USDC")
-        if self.active:
-            parts.append(f"{len(self.active)} problem(s) active")
+        # Recorder problems are counted apart so they never read as account problems.
+        recorder = sum(1 for pid in self.active if pid.startswith("RECORDER_"))
+        account = len(self.active) - recorder
+        if account:
+            parts.append(f"{account} account problem(s) active")
+        if recorder:
+            parts.append(f"{recorder} recorder problem(s) active")
         return [" | ".join(parts)]
 
     def in_midnight_window(self, now_ms):

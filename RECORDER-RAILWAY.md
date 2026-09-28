@@ -43,6 +43,11 @@ time:
 - `S3_ACCESS_KEY_ID` — the bucket's access key id.
 - `S3_SECRET_ACCESS_KEY` — the bucket's secret access key.
 
+If every upload fails at the existence check with `AccessDenied` / 403, the
+bucket credentials cannot read object metadata; the recorder treats that as
+inconclusive and never uploads blind, so check the bucket's credentials
+first.
+
 If uploads later fail: the first thing to check is a signing/addressing
 error, fixed by setting `S3_ADDRESSING_STYLE=path` (default is `virtual`;
 some older Railway buckets need path-style addressing). The service already
@@ -120,7 +125,7 @@ aws s3 --endpoint-url "$S3_ENDPOINT" cp "s3://$S3_BUCKET/HYPE_trades_2026-09-01.
 vars need to hold the bucket's access key id and secret access key from
 step 1 — never paste them into chat.)
 
-## Costs (measured July sample)
+## Costs (measured in the 2026-09-27 recorder acceptance run)
 
 About 13 KB/minute compressed for HYPE alone — roughly 20 MB/day, 0.6
 GB/month.
