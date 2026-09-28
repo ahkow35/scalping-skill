@@ -22,10 +22,14 @@ each exposed as a Railway variable on the bucket service.
 
 ### 2. Create the recorder service
 
-- **New service → same GitHub repo** (this one).
-- Settings → set the **custom config path** to `railway.recorder.json` (this
-  points it at `Dockerfile.recorder` instead of the watcher's `Dockerfile`).
+- **New service → same GitHub repo** (this one), named `recorder`.
 - Settings → Volumes → attach a volume at `/data`.
+- Build, start, health-check and replica settings for both
+  services live in `.railway/railway.ts` (Railway infrastructure-as-code).
+  Preview with `railway config plan`, apply with `railway config apply`.
+  Do not add a `railway.json` to this repo: Railway applies a repo-root one
+  to every service built from the repo, which once made the recorder build
+  the watcher's image.
 - This service needs **no public Railway domain** — the watcher reaches it
   over Railway's private network (`<service>.railway.internal`), which
   exists automatically without exposing a public URL.
@@ -102,7 +106,7 @@ variable does not itself trigger a redeploy).
   was for. Pointing the service at a new bucket re-uploads everything still
   on disk rather than trusting — and deleting on the strength of — the old
   bucket's confirmations.
-- Keep `numReplicas` at 1 (as `railway.recorder.json` sets it). The
+- Keep the recorder at 1 replica (as `.railway/railway.ts` sets it). The
   HEAD-then-PUT check assumes one uploader; the `/data` volume also makes
   Railway stop the old container before starting a new one on redeploy.
 - Deletes a local `.gz` only once its upload is confirmed **and** its UTC
