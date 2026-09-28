@@ -1,0 +1,20 @@
+# Railway service for the flow recorder (recorder.py + railway_record.py).
+# Read-only toward the exchange — this only subscribes to public market data
+# over a WebSocket; it never places, cancels or closes an order. See
+# RECORDER-RAILWAY.md.
+
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir websockets boto3
+
+# Only the files the recorder service actually imports — not the rest of the
+# research repo (the watcher, backtests, card scans, etc. are out of scope
+# for this service).
+COPY recorder.py railway_record.py ./
+
+CMD ["python3", "railway_record.py"]

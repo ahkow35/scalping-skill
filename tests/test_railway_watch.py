@@ -3,6 +3,7 @@ import io
 import json
 
 import pytest
+import requests
 
 import railway_watch as rw
 from test_account_observation import WALLET, snapshot, stop
@@ -604,3 +605,267 @@ def test_unsupported_read_does_not_announce_monitor_recovery():
     recovered, _ = start_day()
     messages = w.step(recovered, MIDNIGHT + 7 * 60_000)
     assert any(m.startswith("ALL CLEAR") and "not produced a reading" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# Recorder check (PR C): optional, driven by RECORDER_STATUS_URL — a
+# separate problem group (RECORDER_*) that never touches account problems,
+# /report or entry_allowed.
+# ---------------------------------------------------------------------------
+
+def _recorder_status(**overrides):
+    base = {"connected": True, "seconds_since_last_message": 1.0, "uploads_enabled": True,
+            "seconds_since_oldest_unconfirmed_day_ended": None, "seconds_upload_failing": None}
+    base.update(overrides)
+    return base
+
+
+def test_recorder_step_healthy_status_raises_nothing():
+    w = make_watcher()
+    messages = w.recorder_step(_recorder_status(), MIDNIGHT)
+    assert messages == []
+    assert w.active == {}
+
+
+def test_recorder_silent_appears_only_after_5_minutes_sustained_then_clears():
+    w = make_watcher()
+    unreachable = w.recorder_step(None, MIDNIGHT)
+    assert unreachable == []  # first bad poll: not yet sustained 5 minutes
+    assert "RECORDER_SILENT" not in w.active
+
+    too_soon = w.recorder_step(None, MIDNIGHT + 4 * 60_000)
+    assert too_soon == []
+    assert "RECORDER_SILENT" not in w.active
+
+    appear = w.recorder_step(None, MIDNIGHT + 5 * 60_000)
+    assert any("PROBLEM:" in m and "recorder" in m for m in appear)
+    assert "RECORDER_SILENT" in w.active
+
+    cleared = w.recorder_step(_recorder_status(), MIDNIGHT + 6 * 60_000)
+    assert any("ALL CLEAR" in m for m in cleared)
+    assert "RECORDER_SILENT" not in w.active
+
+
+def test_recorder_silent_repeats_every_30_minutes_while_it_lasts():
+    w = make_watcher()
+    for m in range(6):
+        w.recorder_step(None, MIDNIGHT + m * 60_000)  # appears at +5 min
+    assert "RECORDER_SILENT" in w.active
+
+    quiet = w.recorder_step(None, MIDNIGHT + 34 * 60_000)  # 29 min after the appear alert
+    assert quiet == []
+
+    repeat = w.recorder_step(None, MIDNIGHT + 35 * 60_000)  # 30 min after the appear alert
+    assert any(m.startswith("PROBLEM (ongoing)") and "recorder" in m for m in repeat)
+    assert "RECORDER_SILENT" in w.active
+
+
+def test_recorder_silent_from_not_connected_or_stale_message_not_just_unreachable():
+    w = make_watcher()
+    w.recorder_step(_recorder_status(connected=False), MIDNIGHT)
+    w.recorder_step(_recorder_status(connected=False), MIDNIGHT + 5 * 60_000)
+    assert "RECORDER_SILENT" in w.active  # reachable and "connected: false" still counts as silent
+
+    w2 = make_watcher()
+    w2.recorder_step(_recorder_status(seconds_since_last_message=301), MIDNIGHT)
+    w2.recorder_step(_recorder_status(seconds_since_last_message=301), MIDNIGHT + 5 * 60_000)
+    assert "RECORDER_SILENT" in w2.active  # connected, but no message in over 5 minutes
+
+
+def test_recorder_silent_timer_resets_on_a_healthy_poll_in_between():
+    w = make_watcher()
+    w.recorder_step(None, MIDNIGHT)
+    w.recorder_step(_recorder_status(), MIDNIGHT + 2 * 60_000)  # healthy poll resets the timer
+    w.recorder_step(None, MIDNIGHT + 3 * 60_000)
+    messages = w.recorder_step(None, MIDNIGHT + 7 * 60_000)  # only 4 min since the reset
+    assert "RECORDER_SILENT" not in w.active
+    assert not any("RECORDER" in m or "recorder" in m for m in messages)
+
+
+def test_recorder_upload_failing_appears_past_24h_and_clears_when_caught_up():
+    w = make_watcher()
+    appear = w.recorder_step(_recorder_status(seconds_upload_failing=24 * 3600 + 1), MIDNIGHT)
+    assert any("PROBLEM" in m and "upload" in m for m in appear)
+    assert "RECORDER_UPLOAD_FAILING" in w.active
+
+    cleared = w.recorder_step(_recorder_status(), MIDNIGHT + 2000)
+    assert any("ALL CLEAR" in m for m in cleared)
+    assert "RECORDER_UPLOAD_FAILING" not in w.active
+
+
+def test_recorder_upload_failing_from_stale_unconfirmed_day_not_just_failing_since():
+    w = make_watcher()
+    status = _recorder_status(seconds_since_oldest_unconfirmed_day_ended=24 * 3600 + 50)
+    messages = w.recorder_step(status, MIDNIGHT)
+    assert any("PROBLEM" in m and "upload" in m for m in messages)
+    assert "RECORDER_UPLOAD_FAILING" in w.active
+
+
+def test_recorder_upload_failing_appears_immediately_when_uploads_disabled():
+    # Missing S3 config is a definite, immediate condition — like
+    # CONFIG_UNSUPPORTED for account problems — not something that needs a
+    # 24h sustain window.
+    w = make_watcher()
+    messages = w.recorder_step(_recorder_status(uploads_enabled=False), MIDNIGHT)
+    assert any("PROBLEM" in m and "disabled" in m for m in messages)
+    assert "RECORDER_UPLOAD_FAILING" in w.active
+
+    cleared = w.recorder_step(_recorder_status(uploads_enabled=True), MIDNIGHT + 1000)
+    assert any("ALL CLEAR" in m for m in cleared)
+    assert "RECORDER_UPLOAD_FAILING" not in w.active
+
+
+def test_recorder_upload_failing_untouched_on_an_unreachable_poll():
+    w = make_watcher()
+    w.recorder_step(_recorder_status(seconds_upload_failing=24 * 3600 + 1), MIDNIGHT)
+    assert "RECORDER_UPLOAD_FAILING" in w.active
+    # An unreachable poll has no evidence either way — must not clear it.
+    w.recorder_step(None, MIDNIGHT + 1000)
+    assert "RECORDER_UPLOAD_FAILING" in w.active
+
+
+def test_recorder_problems_never_touch_account_problems():
+    w = make_watcher()
+    _, state = observe(snapshot(now=MIDNIGHT - 20_000))
+    unprotected, _ = observe(snapshot(now=MIDNIGHT, size=10), state)
+    w.step(unprotected, MIDNIGHT)
+    assert "STOP:HYPE" in w.active
+
+    w.recorder_step(None, MIDNIGHT)
+    w.recorder_step(None, MIDNIGHT + 5 * 60_000)
+    assert "RECORDER_SILENT" in w.active
+    assert "STOP:HYPE" in w.active  # untouched by the recorder check
+
+    w.recorder_step(_recorder_status(), MIDNIGHT + 6 * 60_000)
+    assert "RECORDER_SILENT" not in w.active
+    assert "STOP:HYPE" in w.active  # still untouched
+
+
+def test_fetch_recorder_status_returns_none_on_any_failure():
+    def timeout_get(url, timeout=None):
+        raise requests.exceptions.Timeout("slow")
+    assert rw.fetch_recorder_status("http://x/status", get=timeout_get) is None
+
+    def bad_status_get(url, timeout=None):
+        class R:
+            status_code = 500
+            def raise_for_status(self):
+                raise requests.exceptions.HTTPError("500")
+        return R()
+    assert rw.fetch_recorder_status("http://x/status", get=bad_status_get) is None
+
+    def non_dict_get(url, timeout=None):
+        class R:
+            status_code = 200
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return [1, 2, 3]
+        return R()
+    assert rw.fetch_recorder_status("http://x/status", get=non_dict_get) is None
+
+
+def test_fetch_recorder_status_returns_the_parsed_body_on_success():
+    def get(url, timeout=None):
+        class R:
+            status_code = 200
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return {"connected": True}
+        return R()
+    assert rw.fetch_recorder_status("http://x/status", get=get) == {"connected": True}
+
+
+def test_loop_recorder_feature_off_when_url_unset_zero_behaviour_change():
+    reports = iter([{"status": "DATA_UNAVAILABLE", "reasons": ["x"]}] * 2)
+    clocks = iter([MIDNIGHT + i * 30_000 for i in range(10)])
+    fetch_calls = []
+
+    def fetch(url):
+        fetch_calls.append(url)
+        return None
+
+    rw.loop(make_watcher(), data_dir="unused", check=lambda _dir: next(reports),
+            send=lambda m: None, ping=lambda: None, clock=lambda: next(clocks),
+            sleep=lambda s: None, iterations=2, recorder_status_url=None,
+            fetch_recorder_status=fetch)
+    assert fetch_calls == []
+
+
+def _clock_sequence(top_values, calls_per_iter=3):
+    """`loop()` calls `clock()` up to `calls_per_iter` times per iteration
+    (once at the top, captured as `now_ms`, then twice more for the sleep
+    calculation on every non-final pass). Only the top-of-loop value drives
+    the recorder-poll gate and the account check, so this repeats each
+    wanted top value across its iteration's extra calls — those extra calls'
+    values are otherwise unused by these tests."""
+    seq = []
+    for v in top_values:
+        seq.extend([v] * calls_per_iter)
+    return iter(seq)
+
+
+def test_loop_polls_recorder_at_most_once_a_minute():
+    reports = iter([{"status": "DATA_UNAVAILABLE", "reasons": ["x"]}] * 4)
+    # Four iterations 15s apart (60s total) — the account loop's own cadence
+    # is faster than the recorder poll interval, so only the first pass polls.
+    clocks = _clock_sequence([MIDNIGHT + i * 15_000 for i in range(4)])
+    fetch_calls = []
+
+    def fetch(url):
+        fetch_calls.append(url)
+        return {"connected": True, "seconds_since_last_message": 1.0}
+
+    rw.loop(make_watcher(), data_dir="unused", check=lambda _dir: next(reports),
+            send=lambda m: None, ping=lambda: None, clock=lambda: next(clocks),
+            sleep=lambda s: None, iterations=4, recorder_status_url="http://x/status",
+            fetch_recorder_status=fetch)
+    assert fetch_calls == ["http://x/status"]  # only the first of the four passes polled
+
+
+def test_loop_polls_recorder_again_once_the_interval_elapses():
+    reports = iter([{"status": "DATA_UNAVAILABLE", "reasons": ["x"]}] * 5)
+    # Five iterations 20s apart: the 4th pass (60s after the 1st) polls again.
+    clocks = _clock_sequence([MIDNIGHT + i * 20_000 for i in range(5)])
+    fetch_calls = []
+
+    def fetch(url):
+        fetch_calls.append(url)
+        return {"connected": True, "seconds_since_last_message": 1.0}
+
+    rw.loop(make_watcher(), data_dir="unused", check=lambda _dir: next(reports),
+            send=lambda m: None, ping=lambda: None, clock=lambda: next(clocks),
+            sleep=lambda s: None, iterations=5, recorder_status_url="http://x/status",
+            fetch_recorder_status=fetch)
+    assert len(fetch_calls) == 2
+
+
+def test_loop_recorder_check_exception_does_not_affect_account_checks():
+    reports = iter([{"status": "DATA_UNAVAILABLE", "reasons": ["x"]}] * 2)
+    clocks = iter([MIDNIGHT + i * 30_000 for i in range(10)])
+    account_pings = []
+
+    def raising_fetch(url):
+        raise RuntimeError("boom")
+
+    rw.loop(make_watcher(), data_dir="unused", check=lambda _dir: next(reports),
+            send=lambda m: None, ping=lambda: account_pings.append(1),
+            clock=lambda: next(clocks), sleep=lambda s: None, iterations=2,
+            recorder_status_url="http://x/status", fetch_recorder_status=raising_fetch)
+    assert len(account_pings) == 2  # both passes completed despite the recorder check raising
+
+
+def test_loop_recorder_alerts_flow_through_send():
+    reports = iter([{"status": "DATA_UNAVAILABLE", "reasons": ["x"]}] * 6)
+    clocks = _clock_sequence([MIDNIGHT + i * 60_000 for i in range(6)])
+    sent = []
+
+    def fetch(url):
+        return None  # unreachable every poll
+
+    rw.loop(make_watcher(), data_dir="unused", check=lambda _dir: next(reports),
+            send=sent.append, ping=lambda: None, clock=lambda: next(clocks),
+            sleep=lambda s: None, iterations=6, recorder_status_url="http://x/status",
+            fetch_recorder_status=fetch)
+    assert any("PROBLEM:" in m and "recorder" in m for m in sent)

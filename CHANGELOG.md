@@ -1,5 +1,114 @@
 # Changelog — scalp skill
 
+## 2026-09-28 — flow recorder as a second Railway service, uploading to a Railway Storage Bucket (PR C)
+Added `railway_record.py`, a second always-on Railway service that runs
+`recorder.py`'s existing WebSocket capture loop unchanged — what and how it
+records is untouched — for coins from `RECORDER_COINS` (default `HYPE`),
+writing to `DATA_DIR` (default `/data`). A background thread uploads each
+finished (already gzip-rotated) UTC-day file to a private Railway Storage
+Bucket over its S3-compatible API (`boto3`), using HEAD-before-PUT
+semantics: an object already present with a matching byte size counts as
+confirmed without a second upload; a mismatched size is a failure and is
+**never overwritten**; an absent object is PUT, then confirmed with a
+follow-up HEAD matching its size. A small JSON ledger under `DATA_DIR`
+(atomic writes) tracks confirmed uploads so a restart never re-uploads or
+loses track of what's already confirmed. Failed uploads retry every 10
+minutes and a network or bucket problem never stops or slows recording. A
+local `.gz` is deleted only once its upload is confirmed **and** its UTC day
+is more than `RECORDER_KEEP_DAYS` (default 3) days past its end — an
+unconfirmed file is never deleted, however old. Missing any of the five
+`S3_*` env vars (`S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`,
+`S3_SECRET_ACCESS_KEY`, plus optional `S3_REGION`/`S3_ADDRESSING_STYLE`)
+disables uploads — a clear `/status` field, not a fatal startup error;
+recording continues regardless. The S3 secret key and access key id are
+never printed or logged, including inside exceptions: only the error
+code/class is logged, never a raw exception message (which botocore can
+populate with request details). `recorder.py` gained one small,
+behaviour-preserving hook (`FlowRecorder(..., on_status=callback)`, fired
+from the existing status loop) so the service's HTTP thread reads a
+snapshot instead of racing the recorder's own asyncio recv loop by calling
+`status()` concurrently from another thread. The service serves
+`GET /health` (200, process-alive only — never tied to exchange
+connectivity, so an ordinary exchange outage can't make Railway's
+healthcheck restart it and manufacture a recording gap) and `GET /status`
+(JSON: connected, seconds since last message, reconnects, total gap
+seconds, upload enabled/last-success/oldest-unconfirmed-day/failing-since,
+disk free — never a secret) on `PORT`, bound to `::` (dual-stack, since
+Railway private networking is IPv6).
+
+`railway_watch.py` gained an optional recorder health check, entirely off
+by default (`RECORDER_STATUS_URL` unset = zero behaviour change). When set,
+it polls the recorder's `/status` at most once a minute (independent of the
+account check's own 15–30s cadence) and raises two more alerts through the
+same Telegram channel and appear/30-minute-repeat/all-clear machinery as the
+account problems, but as a fully separate `RECORDER_*` problem group that
+never touches `/report`, `entry_allowed`, or any account-derived alert, and
+whose own exceptions can never crash or stall the account loop:
+`RECORDER_SILENT` (status unreachable, not connected, or no message for 5
+minutes, sustained 5 minutes) and `RECORDER_UPLOAD_FAILING` (uploads
+disabled by missing S3 configuration, a finished day unconfirmed more than
+24h after its day ended, or uploads failing for 24h).
+
+Added `Dockerfile.recorder` (installs `websockets` + `boto3`, only this
+service's two files) and `railway.recorder.json` (custom Railway config
+path pointing at it). The existing `Dockerfile`/`railway.json` (the
+watcher's) are unchanged — the watcher doesn't need `boto3` and imports
+nothing new. Added `RECORDER-RAILWAY.md` (owner setup: create the Storage
+Bucket, create the recorder service with the custom config path, attach a
+volume, wire the five `S3_*` variables as references to the bucket's own
+variables, point the watcher's `RECORDER_STATUS_URL` at it, and how to
+list/download the tape later with the `aws` CLI against the bucket's
+endpoint). `ACCOUNT-MONITOR.md` documents `RECORDER_STATUS_URL` and the two
+new alerts.
+
+Tests (`tests/test_railway_record.py`, `tests/test_railway_watch.py`
+additions; no network, no real bucket — a fake S3 client and injectable
+clocks throughout): upload confirmed by HEAD after PUT; an existing key with
+a matching size confirms without a PUT; a mismatched size fails and is
+never overwritten; an inconclusive HEAD error (not a definite not-found)
+never leads to a PUT; retry succeeds once the fake client recovers; missing
+S3 config disables uploads without stopping recording; never uploads the
+current day's plain file or its own day's `.gz` defensively; a ledger entry
+is invalidated (and re-uploads) if the local file grows past its confirmed
+size (the wall-clock-stepped-back gzip-append case `recorder.py`
+documents); deletion only after confirmed and past the keep window
+(including the exact boundary — not yet at exactly `keep_days`, deleted
+just past it); an unconfirmed file is never deleted however old; the ledger
+survives a restart without any client call once already confirmed;
+`/status`'s `oldest_unconfirmed_day` and `seconds_upload_failing` track
+correctly across a failing-then-recovering pass; `/health` and `/status`
+over the real stdlib handler (via the existing `FakeConnection` no-socket-
+bind pattern); `/health` stays 200 even while disconnected; secrets never
+appear in logs, the ledger file, or `/status`, including when the fake
+client's exception messages themselves embed the fake secret (an
+adversarial test of `_error_code`, which extracts only the botocore error
+code, never the exception's message). Watcher: the recorder check is a
+no-op with zero fetch calls when `RECORDER_STATUS_URL` is unset;
+`RECORDER_SILENT` appears only after 5 minutes sustained and clears on a
+healthy poll; silent from `connected: false` or a stale
+`seconds_since_last_message`, not just unreachable; the silent timer resets
+on an intervening healthy poll; `RECORDER_UPLOAD_FAILING` appears
+immediately when uploads are disabled (no 24h wait, like
+`CONFIG_UNSUPPORTED` for account problems) and also from a stale
+unconfirmed day or a long failing streak, clearing when caught up, and left
+untouched (not cleared) on an unreachable poll; recorder problems never
+read or clear account-derived problems (`STOP:`/etc.) and vice versa; the
+poll is gated to at most once a minute across faster account-loop
+iterations and polls again once the interval elapses; a recorder-check
+exception never affects the account loop's own checks/pings.
+
+Verified end-to-end (beyond the unit tests) by starting the real
+`DualStackHTTPServer` on a real socket with a real background `Uploader`
+thread and a fake S3 client, then issuing real HTTP `GET` requests: `/health`
+→ `200 ok`; `/status` → the finished test file shows as uploaded and
+confirmed (`oldest_unconfirmed_day: null`, `uploads_enabled: true`) after
+the uploader's background pass; an unknown path → `404`.
+
+Scope: `account_risk.py`, `account_monitor.py`, the `/scalp` entry
+preflight, and what/how the recorder itself records are all unchanged;
+read-only toward the exchange (the recorder only subscribes to public
+market data); no order placement.
+
 ## 2026-09-28 — account preflight reads the Railway watcher (PR B)
 Added `account_monitor.py remote-check [--json]`, a read-only subcommand that
 reads the always-on Railway watcher's `GET /report` (PR A) instead of taking
