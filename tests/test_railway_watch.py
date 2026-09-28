@@ -1136,12 +1136,21 @@ def msg(update_id, text, chat_id=CHAT):
     return {"update_id": update_id, "message": {"chat": {"id": int(chat_id)}, "text": text}}
 
 
-def make_commands(get, answer=lambda: "REPLY"):
+def make_commands(get, answer=lambda: "REPLY", clock=None):
     sent, slept = [], []
+    ticks = iter(range(0, 10_000, 100))
     commands = rw.TelegramCommands(BOT_TOKEN, CHAT, answer, get=get,
                                     send=lambda token, chat, text: sent.append((chat, text)),
-                                    sleep=slept.append)
+                                    sleep=slept.append, clock=clock or (lambda: next(ticks)))
     return commands, sent, slept
+
+
+def test_listener_answers_a_burst_of_check_once_per_cooldown():
+    times = iter([0, 3, 9.9, 10, 25])
+    get = FakeTelegram([], [msg(i, "/check") for i in range(1, 6)])
+    commands, sent, _ = make_commands(get, clock=lambda: next(times))
+    commands.poll_once()
+    assert len(sent) == 3  # t=0, t=10, t=25; t=3 and t=9.9 fall inside the cooldown
 
 
 def test_listener_skips_the_backlog_then_answers_check_from_the_owner_chat():

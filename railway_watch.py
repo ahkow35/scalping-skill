@@ -56,6 +56,9 @@ TELEGRAM_LONG_POLL_S = 25
 TELEGRAM_UPDATES_TIMEOUT = (5.0, TELEGRAM_LONG_POLL_S + 10.0)
 COMMAND_ERROR_BACKOFF_S = 5
 COMMAND_CONFLICT_BACKOFF_S = 60
+# /check replies share the bot and chat with alerts; Telegram rate-limits a
+# chat, so a burst of /check must never push an alert into a 429 retry.
+CHECK_MIN_INTERVAL_S = 10
 TELEGRAM_MAX_TEXT = 4000
 HEALTHCHECK_TIMEOUT_S = 5.0
 NORMAL_INTERVAL_S = 30
@@ -668,10 +671,12 @@ class TelegramCommands:
     getUpdates URL carries the bot token, so failures log only the exception
     class and HTTP status — never the exception text, which names the URL.
     A /check sent while the watcher was down is dropped at startup rather
-    than answered late with a reading from a later moment."""
+    than answered late with a reading from a later moment. At most one reply
+    per CHECK_MIN_INTERVAL_S; extra /check messages inside that window are
+    dropped so they cannot crowd out alerts on the same chat."""
 
     def __init__(self, token, chat_id, answer, *, get=requests.get, send=send_telegram,
-                  sleep=time.sleep):
+                  sleep=time.sleep, clock=time.monotonic):
         self._token = token
         self._chat_id = str(chat_id).strip()
         self._answer = answer
@@ -680,6 +685,8 @@ class TelegramCommands:
         self._sleep = sleep
         self._offset = None
         self._backlog_skipped = False
+        self._clock = clock
+        self._last_reply_s = None
 
     def _updates(self, params, timeout):
         response = self._get(TELEGRAM_UPDATES_URL.format(token=self._token), params=params,
@@ -709,6 +716,11 @@ class TelegramCommands:
             return
         if not _is_check_command(message.get("text")):
             return
+        now_s = self._clock()
+        if self._last_reply_s is not None and now_s - self._last_reply_s < CHECK_MIN_INTERVAL_S:
+            logger.info("/check ignored: within %d s of the last reply", CHECK_MIN_INTERVAL_S)
+            return
+        self._last_reply_s = now_s
         try:
             text = self._answer()
         except Exception as exc:
