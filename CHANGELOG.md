@@ -1,5 +1,11 @@
 # Changelog — scalp skill
 
+## 2026-09-29 — recorder disk-space warning floor is configurable
+The recorder warned "disk low" every 30 seconds because its fixed 10 GB
+floor is larger than the 5 GB Railway volume. `RECORDER_DISK_FLOOR_GB` now
+sets the floor (default still 10); `.railway/railway.ts` sets it to 2 for the
+recorder service. Warning only — nothing is ever deleted because of it.
+
 ## 2026-09-28 — Railway settings moved to `.railway/railway.ts`
 The repo-root `railway.json` (the watcher's settings) was also applied to the
 new recorder service, so the recorder built the watcher's image and failed

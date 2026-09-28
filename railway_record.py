@@ -25,6 +25,10 @@ CLI usage: `python3 railway_record.py`. Environment variables read on boot:
   Railway buckets may need `path`.
 - `RECORDER_KEEP_DAYS` — days past a confirmed-uploaded day's end before its
   local `.gz` is deleted (default 3).
+- `RECORDER_DISK_FLOOR_GB` — warn (never delete) when free space under
+  `DATA_DIR` drops below this many GB (default recorder.py's 10; set it
+  below the attached volume's size, or the warning repeats every status
+  interval).
 
 Never prints or logs the S3 secret access key or access key id, including
 inside exceptions and the `/status` body — see UploadError/_error_code.
@@ -620,6 +624,7 @@ def parse_env(env=os.environ):
         "out_dir": env.get("DATA_DIR", "/data"),
         "port": _int_env(env, "PORT", 8080),
         "keep_days": _int_env(env, "RECORDER_KEEP_DAYS", DEFAULT_KEEP_DAYS),
+        "disk_floor_gb": _int_env(env, "RECORDER_DISK_FLOOR_GB", rec.DISK_FLOOR_GB),
         "s3_config": s3_config_from_env(env),
     }
 
@@ -647,7 +652,8 @@ def run():
 
     snapshot = StatusSnapshot()
     fr = rec.FlowRecorder(config["coins"], out_dir=config["out_dir"],
-                          status_interval_s=STATUS_INTERVAL_S, on_status=snapshot.update)
+                          status_interval_s=STATUS_INTERVAL_S, on_status=snapshot.update,
+                          disk_floor_gb=config["disk_floor_gb"])
 
     client, bucket, destination = build_s3_client(config["s3_config"])
     uploader = Uploader(config["out_dir"], bucket, client, destination=destination,
