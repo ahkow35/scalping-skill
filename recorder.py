@@ -351,13 +351,22 @@ class FlowRecorder:
     records and the status line. `clock` is injectable for tests."""
 
     def __init__(self, coins, out_dir=DEFAULT_OUT_DIR, status_interval_s=300,
-                clock=now_ms, watchdog_s=WATCHDOG_S, disk_floor_gb=DISK_FLOOR_GB):
+                clock=now_ms, watchdog_s=WATCHDOG_S, disk_floor_gb=DISK_FLOOR_GB,
+                on_status=None):
         self.coins = list(coins)
         self.out_dir = out_dir
         self.status_interval_s = status_interval_s
         self.clock = clock
         self.watchdog_s = watchdog_s
         self.disk_floor_gb = disk_floor_gb
+        # Optional callback, fired with each status dict right after it's
+        # written to status.json (see _status_loop). A behaviour-preserving
+        # hook only — recording itself is unaffected whether or not this is
+        # set. Exists so a host process (railway_record.py) can read a fresh
+        # snapshot off the loop thread instead of calling status() itself
+        # from another thread, which would race _prune_old_events mutating
+        # _reconnect_ts/_gap_events concurrently with the recv loop.
+        self.on_status = on_status
         self.files = FlowFileSet(out_dir)
         self._seen_tids = {c: set() for c in self.coins}
         # Per-coin UTC day the dedupe set above was last cleared for — cleared
@@ -625,7 +634,14 @@ class FlowRecorder:
 
     async def _status_loop(self):
         while True:
-            write_status(self.out_dir, self.status())
+            st = self.status()
+            write_status(self.out_dir, st)
+            if self.on_status is not None:
+                try:
+                    self.on_status(st)
+                except Exception:
+                    print(f"{iso_utc_ms(self.clock())} recorder: on_status callback "
+                          "raised — ignoring", file=sys.stderr)
             await asyncio.sleep(self.status_interval_s)
 
 

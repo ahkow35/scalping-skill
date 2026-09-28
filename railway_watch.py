@@ -58,6 +58,13 @@ OUTBOX_RETRY_S = 60
 OUTBOX_MAX_PENDING = 200
 DEFAULT_TIMEZONE = "Asia/Singapore"
 
+# Optional recorder check (PR C) — unset RECORDER_STATUS_URL means this
+# feature is off with zero behaviour change; see run() and loop().
+RECORDER_STATUS_TIMEOUT_S = 5.0
+RECORDER_POLL_INTERVAL_S = 60
+RECORDER_SILENT_THRESHOLD_S = 5 * 60
+RECORDER_UPLOAD_FAILING_THRESHOLD_S = 24 * 3600
+
 
 # ---------------------------------------------------------------------------
 # Report classification and problem derivation — structured fields only,
@@ -141,6 +148,7 @@ class Watcher:
         self.seen_underwater = set()
         self.first_failure_ms = None
         self.last_alive_date = None
+        self.recorder_first_silent_ms = None  # PR C: recorder-silent sustain timer
 
     def boot(self, now_ms):
         """Call once at startup. Marks today as already summarized so a
@@ -224,6 +232,63 @@ class Watcher:
 
         return messages
 
+    def recorder_step(self, status, now_ms):
+        """Feed one poll of the recorder's `/status` (PR C), or None if it
+        was unreachable/unparseable. Two problem ids, through the same
+        appear/30-min-repeat/all-clear machinery as account problems
+        (`_note`/`_clear`) and the same Outbox — but a fully separate group
+        (`RECORDER_*` ids) that never reads or touches account-derived
+        problems, `/report`, or entry_allowed. A recorder-check exception is
+        caught by the caller (`loop`), never here.
+
+        RECORDER_SILENT: the status endpoint was unreachable, or reported
+        not connected, or no message for 5 minutes — sustained for 5 minutes
+        before alerting, so one bad poll doesn't flap. Clears only when a
+        poll comes back healthy (reachable, connected, recent message).
+
+        RECORDER_UPLOAD_FAILING: uploads disabled by missing S3
+        configuration (an immediate, definite condition — like
+        CONFIG_UNSUPPORTED above, not something that needs sustaining), or a
+        finished day still unconfirmed more than 24h after that UTC day
+        ended, or uploads failing for over 24h — the latter two computed
+        server-side by the recorder itself (see railway_record.py's
+        /status) so no date math happens here. Left exactly as it was on an
+        unreachable poll (`status is None`) — no evidence either way, same
+        rule `step()` applies to account problems on a failed report."""
+        messages = []
+        healthy = (status is not None
+                   and status.get("connected") is True
+                   and isinstance(status.get("seconds_since_last_message"), (int, float))
+                   and status["seconds_since_last_message"] < RECORDER_SILENT_THRESHOLD_S)
+        if healthy:
+            self.recorder_first_silent_ms = None
+            self._clear("RECORDER_SILENT", now_ms, messages)
+        else:
+            if self.recorder_first_silent_ms is None:
+                self.recorder_first_silent_ms = now_ms
+            if now_ms - self.recorder_first_silent_ms >= RECORDER_SILENT_THRESHOLD_S * 1000:
+                self._note("RECORDER_SILENT",
+                           "recorder status is unreachable, disconnected, or silent for over 5 minutes",
+                           now_ms, messages)
+
+        if status is not None:
+            disabled = status.get("uploads_enabled") is False
+            day_stale = status.get("seconds_since_oldest_unconfirmed_day_ended")
+            failing_s = status.get("seconds_upload_failing")
+            failing = (
+                disabled
+                or (isinstance(day_stale, (int, float)) and day_stale > RECORDER_UPLOAD_FAILING_THRESHOLD_S)
+                or (isinstance(failing_s, (int, float)) and failing_s > RECORDER_UPLOAD_FAILING_THRESHOLD_S)
+            )
+            if failing:
+                reason = ("recorder uploads disabled — missing or invalid S3 bucket configuration" if disabled else
+                           "recorder upload is more than 24h behind")
+                self._note("RECORDER_UPLOAD_FAILING", reason, now_ms, messages)
+            else:
+                self._clear("RECORDER_UPLOAD_FAILING", now_ms, messages)
+
+        return messages
+
     def alive_summary(self, report, now_ms):
         """A short daily summary at the configured local time, once a day."""
         local = self._local(now_ms)
@@ -236,8 +301,13 @@ class Watcher:
         parts = [f"watcher alive — status {report.get('status', 'UNKNOWN')}"]
         if equity is not None:
             parts.append(f"equity {equity:,.2f} USDC")
-        if self.active:
-            parts.append(f"{len(self.active)} problem(s) active")
+        # Recorder problems are counted apart so they never read as account problems.
+        recorder = sum(1 for pid in self.active if pid.startswith("RECORDER_"))
+        account = len(self.active) - recorder
+        if account:
+            parts.append(f"{account} account problem(s) active")
+        if recorder:
+            parts.append(f"{recorder} recorder problem(s) active")
         return [" | ".join(parts)]
 
     def in_midnight_window(self, now_ms):
@@ -335,6 +405,74 @@ class BackgroundPinger:
         threading.Thread(target=work, daemon=True, name="ping").start()
 
 
+def _spawn_daemon(target):
+    threading.Thread(target=target, daemon=True, name="recorder-poll").start()
+
+
+class RecorderPoller:
+    """Polls the recorder's `/status` on a background thread, at most one in
+    flight, so the recorder can never stall the account loop — a per-read
+    timeout alone does not bound a body that trickles in slowly. The loop
+    calls `tick` every pass; it starts a poll when one is due and hands back
+    any finished result. A poll still running after `stuck_after_s` counts
+    as unreachable (None), at most once per interval, until it returns — and
+    its answer, when it finally lands, is read as unreachable too: a reply
+    that took that long describes a moment long gone and must never clear
+    an alert raised in the meantime."""
+
+    def __init__(self, url, fetch, *, interval_s, stuck_after_s, spawn=_spawn_daemon):
+        self._url = url
+        self._fetch = fetch
+        self._interval_ms = interval_s * 1000
+        self._stuck_ms = stuck_after_s * 1000
+        self._spawn = spawn
+        self._lock = threading.Lock()
+        self._in_flight_since_ms = None
+        self._last_start_ms = None
+        self._last_stuck_ms = None
+        self._has_result = False
+        self._result = None
+        self._result_started_ms = None
+
+    def tick(self, now_ms):
+        """The statuses (zero or one) to feed Watcher.recorder_step now."""
+        with self._lock:
+            start = self._in_flight_since_ms is None and (
+                self._last_start_ms is None or now_ms - self._last_start_ms >= self._interval_ms)
+            if start:
+                self._in_flight_since_ms = self._last_start_ms = now_ms
+        if start:
+            try:
+                self._spawn(self._work)
+            except Exception:
+                logger.exception("could not start the recorder poll")
+                with self._lock:
+                    self._in_flight_since_ms = None
+        with self._lock:
+            if self._has_result:
+                self._has_result = False
+                if now_ms - self._result_started_ms >= self._stuck_ms:
+                    return [None]
+                return [self._result]
+            since = self._in_flight_since_ms
+            if since is not None and now_ms - since >= self._stuck_ms and (
+                    self._last_stuck_ms is None or now_ms - self._last_stuck_ms >= self._interval_ms):
+                self._last_stuck_ms = now_ms
+                return [None]
+        return []
+
+    def _work(self):
+        try:
+            status = self._fetch(self._url)
+        except Exception:
+            logger.exception("recorder status poll raised")
+            status = None
+        with self._lock:
+            self._result, self._has_result = status, True
+            self._result_started_ms = self._in_flight_since_ms
+            self._in_flight_since_ms = self._last_stuck_ms = None
+
+
 def send_telegram(token, chat_id, text, *, timeout=TELEGRAM_TIMEOUT_S, post=requests.post):
     try:
         response = post(TELEGRAM_URL.format(token=token), json={"chat_id": chat_id, "text": text},
@@ -355,6 +493,21 @@ def ping_healthcheck(url, *, timeout=HEALTHCHECK_TIMEOUT_S, get=requests.get):
         get(url, timeout=timeout)
     except requests.RequestException as exc:
         logger.warning("healthcheck ping failed: %s", type(exc).__name__)
+
+
+def fetch_recorder_status(url, *, timeout=RECORDER_STATUS_TIMEOUT_S, get=requests.get):
+    """GET the recorder's `/status` (PR C). Returns the parsed JSON dict, or
+    None on any failure (timeout, connection error, non-200, non-JSON body,
+    or a body that isn't a dict) — Watcher.recorder_step treats None the
+    same as "unreachable". The short timeout is what keeps this from ever
+    slowing the account loop."""
+    try:
+        response = get(url, timeout=timeout)
+        response.raise_for_status()
+        body = response.json()
+    except (requests.RequestException, ValueError):
+        return None
+    return body if isinstance(body, dict) else None
 
 
 # ---------------------------------------------------------------------------
@@ -462,11 +615,17 @@ def configure_from_env(data_dir, env=os.environ):
 # ---------------------------------------------------------------------------
 
 def loop(watcher, *, data_dir, check, send, ping, on_report=None,
-          clock=lambda: int(time.time() * 1000), sleep=time.sleep, iterations=None):
+          clock=lambda: int(time.time() * 1000), sleep=time.sleep, iterations=None,
+          recorder_status_url=None, fetch_recorder_status=fetch_recorder_status,
+          recorder_poll_interval_s=RECORDER_POLL_INTERVAL_S, recorder_spawn=_spawn_daemon):
     now_ms = clock()
     watcher.boot(now_ms)
     _safe_send(send, "watcher started")
     count = 0
+    recorder_poller = RecorderPoller(
+        recorder_status_url, fetch_recorder_status, interval_s=recorder_poll_interval_s,
+        stuck_after_s=2 * recorder_poll_interval_s, spawn=recorder_spawn,
+    ) if recorder_status_url else None
     while iterations is None or count < iterations:
         now_ms = clock()
         try:
@@ -485,6 +644,23 @@ def loop(watcher, *, data_dir, check, send, ping, on_report=None,
             _safe_send(send, message)
         for message in watcher.alive_summary(report, now_ms):
             _safe_send(send, message)
+        # Optional recorder check (PR C): unset recorder_status_url means
+        # this whole block never runs — zero behaviour change. Polled at
+        # most once a minute on a background thread (see RecorderPoller), and
+        # any exception here is swallowed so it can never crash or stall the
+        # account loop above. Never touches /report, entry_allowed, or any
+        # account-derived problem.
+        if recorder_poller is not None:
+            try:
+                # A fresh clock read: the account check above can take tens
+                # of seconds, and an old now_ms would let a stale reply pass
+                # the poller's age check.
+                recorder_now_ms = clock()
+                for status in recorder_poller.tick(recorder_now_ms):
+                    for message in watcher.recorder_step(status, recorder_now_ms):
+                        _safe_send(send, message)
+            except Exception:
+                logger.exception("recorder check raised — ignoring this pass")
         if produced:
             try:
                 ping()
@@ -516,6 +692,9 @@ def run():
     healthcheck_url = os.environ.get("HEALTHCHECK_PING_URL")
     report_token = os.environ.get("REPORT_TOKEN")
     port = int(os.environ.get("PORT", "8080"))
+    # PR C, optional: e.g. http://<recorder-service>.railway.internal:8080/status.
+    # Unset (the default) means the recorder check never runs — see loop().
+    recorder_status_url = os.environ.get("RECORDER_STATUS_URL")
 
     def deliver(text):
         if bot_token and chat_id:
@@ -537,7 +716,7 @@ def run():
     try:
         loop(watcher, data_dir=data_dir, check=account_monitor.check, send=outbox.put,
              ping=BackgroundPinger(lambda: ping_healthcheck(healthcheck_url)),
-             on_report=state.update)
+             on_report=state.update, recorder_status_url=recorder_status_url)
     finally:
         server.shutdown()
 
