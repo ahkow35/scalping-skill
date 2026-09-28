@@ -66,6 +66,7 @@ Also set, optionally:
 - `RECORDER_COINS` — comma-separated, default `HYPE`.
 - `RECORDER_KEEP_DAYS` — default `3`.
 - `DATA_DIR` — default `/data` (matches the attached volume).
+- `RECORDER_DISK_FLOOR_GB` — free-space warning floor, default `10`; `.railway/railway.ts` sets `2` to suit the 5 GB volume. Below it the recorder logs a warning and reports `disk_low` in `/status`; it never deletes anything because of it.
 
 **Missing any one of the five required `S3_*` variables does not stop the
 service from starting or recording** — uploads are simply disabled, visible

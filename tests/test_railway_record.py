@@ -597,7 +597,7 @@ def test_parse_env_defaults():
 
 def test_parse_env_honors_overrides():
     env = {"RECORDER_COINS": "hype, btc", "DATA_DIR": "/mnt/vol", "PORT": "9090",
-           "RECORDER_KEEP_DAYS": "7",
+           "RECORDER_KEEP_DAYS": "7", "RECORDER_DISK_FLOOR_GB": "2",
            "S3_ENDPOINT": "https://x", "S3_BUCKET": BUCKET,
            "S3_ACCESS_KEY_ID": "AKID", "S3_SECRET_ACCESS_KEY": "SECRET"}
     cfg = rr.parse_env(env)
@@ -605,13 +605,15 @@ def test_parse_env_honors_overrides():
     assert cfg["out_dir"] == "/mnt/vol"
     assert cfg["port"] == 9090
     assert cfg["keep_days"] == 7
+    assert cfg["disk_floor_gb"] == 2
     assert cfg["s3_config"].bucket == BUCKET
 
 
 def test_parse_env_malformed_ints_fall_back_to_defaults():
-    cfg = rr.parse_env({"PORT": "80a", "RECORDER_KEEP_DAYS": "-2"})
+    cfg = rr.parse_env({"PORT": "80a", "RECORDER_KEEP_DAYS": "-2", "RECORDER_DISK_FLOOR_GB": "2GB"})
     assert cfg["port"] == 8080
     assert cfg["keep_days"] == 3
+    assert cfg["disk_floor_gb"] == rr.rec.DISK_FLOOR_GB
 
 
 # ── client setup failure disables uploads, never stops recording ────────
