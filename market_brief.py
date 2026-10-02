@@ -168,8 +168,8 @@ def book_depth(book, band=0.01, mid=None):
     if mid is None:
         mid = (best_bid + best_ask) / 2
     low, high = mid * (1 - band), mid * (1 + band)
-    bid_usd = sum(float(l["px"]) * float(l["sz"]) for l in bids if float(l["px"]) >= low)
-    ask_usd = sum(float(l["px"]) * float(l["sz"]) for l in asks if float(l["px"]) <= high)
+    bid_usd = sum(float(lvl["px"]) * float(lvl["sz"]) for lvl in bids if float(lvl["px"]) >= low)
+    ask_usd = sum(float(lvl["px"]) * float(lvl["sz"]) for lvl in asks if float(lvl["px"]) <= high)
     truncated = float(bids[-1]["px"]) >= low or float(asks[-1]["px"]) <= high
     return {"depth_usd": bid_usd + ask_usd, "spread_bp": (best_ask - best_bid) / mid * 1e4,
             "mid": mid, "truncated": truncated}

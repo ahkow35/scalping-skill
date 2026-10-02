@@ -255,7 +255,7 @@ def test_oi_warming_up_then_change(tmp_path):
 
 
 def test_oi_history_survives_restart_and_prunes(tmp_path):
-    h = history(tmp_path, [(NOW - 30 * 3600_000, {"BTC": 1.0}), (NOW, {"BTC": 2.0})])
+    history(tmp_path, [(NOW - 30 * 3600_000, {"BTC": 1.0}), (NOW, {"BTC": 2.0})])
     again = mb.OiHistory(tmp_path / "oi.json")
     assert again.change_pct("BTC", NOW, 3600) is None
     assert len(again._samples["BTC"]) == 1  # the 30h-old sample was pruned
@@ -374,7 +374,10 @@ def test_alert_repeat_limit_is_4_hours(tmp_path):
     hot = alert_data(funding=0.0001)
     sched, sent, clock, _ = make_scheduler(tmp_path, NOW - 3600_000 * 2, data=hot)
     sched.tick()
-    alerts = lambda: [m for m in sent if m.startswith("LIQUIDITY ALERT")]
+
+    def alerts():
+        return [m for m in sent if m.startswith("LIQUIDITY ALERT")]
+
     assert len(alerts()) == 1
     clock.ms += 3 * 3600_000 + 60_000
     sched.tick()
