@@ -1,8 +1,11 @@
 """Always-on Railway watcher for the read-only Hyperliquid account monitor.
 
-This process never places, cancels or closes an order, and adds no exchange
-read beyond account_monitor.py's own existing calls (READ_TYPES in
-account_api.py is unchanged). It calls `account_monitor.check()` directly in
+This process never places, cancels or closes an order. Account reads are only
+account_monitor.py's own existing calls (READ_TYPES in account_api.py is
+unchanged). The market briefing (market_brief.py, its own daemon thread) adds
+PUBLIC market reads only — Hyperliquid `metaAndAssetCtxs` and `l2Book`, plus
+free keyless web sources — and never reads the account or touches an order.
+It calls `account_monitor.check()` directly in
 a loop — never the `watch` subcommand, and never anything that parses printed
 text — derives the set of currently active problems from the check report's
 structured fields, and alerts over Telegram when a problem appears, repeats
@@ -11,7 +14,8 @@ ends. It also serves the latest report over a small, token-protected HTTP
 endpoint for `/scalp` (a later PR) to read, and pings an optional dead-man
 health check on every loop pass that produced a report. It also answers a
 `/check` command sent from the configured Telegram chat with that latest
-report, judged by the same entry gate `/scalp` applies to it.
+report, judged by the same entry gate `/scalp` applies to it, and a
+`/liquidity` command with the latest market-liquidity briefing.
 
 Report classification (`classify`) is the one place this module decides how
 much to trust a report: only a fully evaluated report (the normal
@@ -43,6 +47,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 import account_monitor
+import market_brief
 from account_observation import underwater_add_reason
 
 
@@ -658,28 +663,36 @@ def format_check(latest, now_ms, timezone_name=DEFAULT_TIMEZONE):
     return text if len(text) <= TELEGRAM_MAX_TEXT else text[:TELEGRAM_MAX_TEXT - 1] + "…"
 
 
+def _command_name(text):
+    """The lowercase command in '/check', '/check@SomeBot' or '/liquidity now'."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    return text.split()[0].split("@", 1)[0].lower()
+
+
 def _is_check_command(text):
     """'/check' or '/check@SomeBot', any case, optionally followed by words."""
-    if not isinstance(text, str) or not text.strip():
-        return False
-    return text.split()[0].split("@", 1)[0].lower() == "/check"
+    return _command_name(text) == "/check"
 
 
 class TelegramCommands:
-    """Long-polls the bot's getUpdates and answers /check from the
+    """Long-polls the bot's getUpdates and answers /check (and /liquidity,
+    when a liquidity_answer is given) from the
     configured chat only; every other chat and message is ignored. The
     getUpdates URL carries the bot token, so failures log only the exception
     class and HTTP status — never the exception text, which names the URL.
     A /check sent while the watcher was down is dropped at startup rather
     than answered late with a reading from a later moment. At most one reply
-    per CHECK_MIN_INTERVAL_S; extra /check messages inside that window are
+    per CHECK_MIN_INTERVAL_S across both commands; extra messages inside that window are
     dropped so they cannot crowd out alerts on the same chat."""
 
-    def __init__(self, token, chat_id, answer, *, get=requests.get, send=send_telegram,
-                  sleep=time.sleep, clock=time.monotonic):
+    def __init__(self, token, chat_id, answer, *, liquidity_answer=None, get=requests.get,
+                  send=send_telegram, sleep=time.sleep, clock=time.monotonic):
         self._token = token
         self._chat_id = str(chat_id).strip()
-        self._answer = answer
+        self._answers = {"/check": answer}
+        if liquidity_answer is not None:
+            self._answers["/liquidity"] = liquidity_answer
         self._get = get
         self._send = send
         self._sleep = sleep
@@ -714,18 +727,20 @@ class TelegramCommands:
         chat = message.get("chat")
         if not isinstance(chat, dict) or str(chat.get("id")) != self._chat_id:
             return
-        if not _is_check_command(message.get("text")):
+        command = _command_name(message.get("text"))
+        answer = self._answers.get(command)
+        if answer is None:
             return
         now_s = self._clock()
         if self._last_reply_s is not None and now_s - self._last_reply_s < CHECK_MIN_INTERVAL_S:
-            logger.info("/check ignored: within %d s of the last reply", CHECK_MIN_INTERVAL_S)
+            logger.info("%s ignored: within %d s of the last reply", command, CHECK_MIN_INTERVAL_S)
             return
         self._last_reply_s = now_s
         try:
-            text = self._answer()
+            text = answer()
         except Exception as exc:
-            logger.warning("could not build the /check reply: %s", type(exc).__name__)
-            text = "Could not build the /check reply — see the watcher logs."
+            logger.warning("could not build the %s reply: %s", command, type(exc).__name__)
+            text = f"Could not build the {command} reply — see the watcher logs."
         self._send(self._token, self._chat_id, text)
 
     def poll_once(self):
@@ -886,10 +901,25 @@ def run():
     logger.info("report server listening on :%d (token %s)", port,
                 "configured" if report_token else "UNSET — /report will 503")
 
+    # Market briefing: its own daemon thread, so a slow or failing data
+    # source can never delay the account loop. BRIEF_ENABLED=false turns it off.
+    scheduler = None
+    try:
+        brief_config = market_brief.BriefConfig.from_env()
+        if brief_config.enabled:
+            scheduler = market_brief.BriefScheduler(brief_config, data_dir, outbox.put)
+            scheduler.start()
+            logger.info("market briefing started: %s SGT, coins %s",
+                        ",".join(brief_config.times), ",".join(brief_config.coins))
+    except Exception:
+        logger.exception("market briefing could not start — account watcher continues without it")
+        scheduler = None
+
     if bot_token and chat_id:
         TelegramCommands(bot_token, chat_id, lambda: format_check(
-            state.latest(), int(time.time() * 1000), timezone_name)).start()
-        logger.info("telegram /check listener started")
+            state.latest(), int(time.time() * 1000), timezone_name),
+            liquidity_answer=scheduler.liquidity_reply if scheduler else None).start()
+        logger.info("telegram /check%s listener started", " and /liquidity" if scheduler else "")
 
     watcher = Watcher(timezone=timezone_name)
     try:

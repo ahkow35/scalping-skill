@@ -20,6 +20,6 @@ RUN pip install --no-cache-dir requests
 # Only the files the watcher actually imports — not the rest of the
 # research repo (recorder, backtests, card scans, etc. are out of scope
 # for this service).
-COPY account_api.py account_observation.py account_risk.py account_monitor.py railway_watch.py ./
+COPY account_api.py account_observation.py account_risk.py account_monitor.py market_brief.py railway_watch.py ./
 
 CMD ["python3", "railway_watch.py"]

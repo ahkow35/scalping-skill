@@ -1,5 +1,21 @@
 # Changelog — scalp skill
 
+## 2026-10-03 — liquidity briefing on the Railway watcher
+New `market_brief.py`, run by `railway_watch.py` on its own thread. It sends a
+market-liquidity briefing to the Telegram chat at 08:00 and 20:30 Singapore
+time, sends a one-off alert when funding is extreme (hourly, at or beyond
++-0.005%), open interest drops 5% or more within an hour (BTC, ETH, HYPE), or a
+high-impact USD event is within 60 minutes (each at most once per 4 hours),
+and answers `/liquidity` from the configured chat. `/check` is unchanged.
+Free sources only (Hyperliquid public market reads, DefiLlama, FRED, Yahoo,
+SoSoValue, ForexFactory); a failed source shows as "Unavailable: <source>"
+and never stops the rest. Read-only: no order, no account read, and
+`railway_watch.py`'s docstring now says the briefing adds public market reads.
+Optional env vars: `BRIEF_ENABLED` (set false to turn it off), `BRIEF_TIMES`,
+`BRIEF_COINS`, `BRIEF_FUNDING_ALERT_PCT`, `BRIEF_OI_DROP_PCT`,
+`BRIEF_EVENT_MINUTES`. Conditions, not signals. Plan:
+`PLAN-liquidity-briefing-2026-10-03.md`.
+
 ## 2026-09-29 — recorder disk-space warning floor is configurable
 The recorder warned "disk low" every 30 seconds because its fixed 10 GB
 floor is larger than the 5 GB Railway volume. `RECORDER_DISK_FLOOR_GB` now

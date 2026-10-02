@@ -37,7 +37,7 @@ export default defineRailway(() => {
     replicas: { "asia-southeast1-eqsg3a": 1 },
     volumeMounts: { "/data": watcherVolume },
     env: {
-      DATA_DIR: preserve(), HEALTHCHECK_PING_URL: preserve(), MONITOR_DAILY_LOSS_USDC: preserve(), MONITOR_MAX_POSITION_NOTIONAL_USDC: preserve(), MONITOR_TIMEZONE: preserve(), MONITOR_WALLET: preserve(), REPORT_TOKEN: preserve(), TELEGRAM_BOT_TOKEN: preserve(), TELEGRAM_CHAT_ID: preserve(),
+      BRIEF_COINS: preserve(), BRIEF_ENABLED: preserve(), BRIEF_EVENT_MINUTES: preserve(), BRIEF_FUNDING_ALERT_PCT: preserve(), BRIEF_OI_DROP_PCT: preserve(), BRIEF_TIMES: preserve(), DATA_DIR: preserve(), HEALTHCHECK_PING_URL: preserve(), MONITOR_DAILY_LOSS_USDC: preserve(), MONITOR_MAX_POSITION_NOTIONAL_USDC: preserve(), MONITOR_TIMEZONE: preserve(), MONITOR_WALLET: preserve(), REPORT_TOKEN: preserve(), TELEGRAM_BOT_TOKEN: preserve(), TELEGRAM_CHAT_ID: preserve(),
       RECORDER_STATUS_URL: "http://${{recorder.RAILWAY_PRIVATE_DOMAIN}}:8080/status",
     },
   });
