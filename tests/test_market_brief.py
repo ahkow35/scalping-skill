@@ -273,7 +273,7 @@ def test_a_hung_source_is_not_called_again_and_threads_stay_bounded():
             llama_calls.append(1)
             release.wait(10)
         return fake_get(url, **kwargs)
-    pool = mb.SourcePool(workers=4, name="test-hung-pool")
+    pool = mb.SourcePool(name="test-hung-pool")
     try:
         for _ in range(3):
             data = mb.collect(mb.BriefConfig(coins=["BTC"]), get=hung_get, post=fake_post,
@@ -281,9 +281,23 @@ def test_a_hung_source_is_not_called_again_and_threads_stay_bounded():
             assert "Stablecoins (DefiLlama)" in data["unavailable"]
             assert data["results"]["Hyperliquid markets"] is not None
         assert llama_calls == [1]  # still running from the first collection: not called again
-        assert len([t for t in _t.enumerate() if t.name.startswith("test-hung-pool")]) <= 4
+        pool_threads = [t for t in _t.enumerate() if t.name.startswith("test-hung-pool")]
+        assert [t.name for t in pool_threads] == ["test-hung-pool:Stablecoins (DefiLlama)"]
+        assert all(t.daemon for t in pool_threads)  # a stuck call never blocks process exit
     finally:
         release.set()
+
+
+def test_a_failed_thread_start_fails_that_call_only(monkeypatch):
+    pool = mb.SourcePool(name="test-start-fail")
+    real_start = mb.threading.Thread.start
+    monkeypatch.setattr(mb.threading.Thread, "start",
+                        lambda self: (_ for _ in ()).throw(RuntimeError("can't start new thread")))
+    future = pool.submit("X", lambda: 1)
+    with pytest.raises(RuntimeError):
+        future.result(timeout=1)
+    monkeypatch.setattr(mb.threading.Thread, "start", real_start)
+    assert pool.submit("X", lambda: 2).result(timeout=1) == 2  # the source is not locked out
 
 
 def test_oi_gap_does_not_stretch_the_last_hour(tmp_path):

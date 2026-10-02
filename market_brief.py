@@ -21,7 +21,7 @@ import logging
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -59,7 +59,6 @@ LATE_LIMIT_S = 30 * 60                  # beyond this, the slot is skipped
 TICK_INTERVAL_S = 30
 CACHE_MAX_AGE_S = 5 * 60
 COLLECT_DEADLINE_S = 20                 # whole-collection cap; a slower source is "Unavailable"
-SOURCE_WORKERS = 16                     # fixed worker cap shared by every collection
 LIQUIDITY_PENDING_TEXT = "Building a fresh liquidity briefing — it will follow in a moment."
 
 STATE_FILE = "market_brief_state.json"
@@ -284,15 +283,16 @@ def fetch_events(get=requests.get):
 # ---------------------------------------------------------------------------
 
 class SourcePool:
-    """One fixed set of worker threads shared by every collection, plus the
-    call still running for each source. A source whose previous call has not
-    finished is not called again — it is reported unavailable — so a server
-    that trickles bytes past the per-read HTTP timeout ties up at most one
-    worker for that source, and the thread count can never grow past
-    SOURCE_WORKERS however many collections time out."""
+    """Runs each source call on its own daemon thread, with at most one call
+    running per source. A source whose previous call has not finished is not
+    called again — it is reported unavailable — so a server that trickles
+    bytes past the per-read HTTP timeout holds one thread for that source
+    only: the thread count never exceeds the number of sources, one hung
+    source cannot take a slot another source needs, and a stuck call never
+    blocks the process from exiting (and Railway from restarting it)."""
 
-    def __init__(self, workers=SOURCE_WORKERS, name="brief-source"):
-        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix=name)
+    def __init__(self, name="brief-source"):
+        self._name = name
         self._running = {}  # source name -> Future of its last call
         self._lock = threading.Lock()
 
@@ -302,8 +302,20 @@ class SourcePool:
             previous = self._running.get(name)
             if previous is not None and not previous.done():
                 return None
-            future = self._running[name] = self._executor.submit(fn)
-            return future
+            future = self._running[name] = Future()
+
+        def run():
+            future.set_running_or_notify_cancel()
+            try:
+                future.set_result(fn())
+            except BaseException as exc:
+                future.set_exception(exc)
+        try:
+            threading.Thread(target=run, daemon=True, name=f"{self._name}:{name}").start()
+        except Exception as exc:  # e.g. thread exhaustion: fail this call, not the source forever
+            future.set_running_or_notify_cancel()
+            future.set_exception(exc)
+        return future
 
 
 _SOURCES = SourcePool()
