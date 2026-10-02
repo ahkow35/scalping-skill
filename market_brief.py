@@ -59,6 +59,7 @@ LATE_LIMIT_S = 30 * 60                  # beyond this, the slot is skipped
 TICK_INTERVAL_S = 30
 CACHE_MAX_AGE_S = 5 * 60
 COLLECT_DEADLINE_S = 20                 # whole-collection cap; a slower source is "Unavailable"
+SOURCE_WORKERS = 16                     # fixed worker cap shared by every collection
 LIQUIDITY_PENDING_TEXT = "Building a fresh liquidity briefing — it will follow in a moment."
 
 STATE_FILE = "market_brief_state.json"
@@ -282,9 +283,38 @@ def fetch_events(get=requests.get):
 # Collect — run every source independently
 # ---------------------------------------------------------------------------
 
-def collect(config, *, get=requests.get, post=requests.post, deadline_s=COLLECT_DEADLINE_S):
+class SourcePool:
+    """One fixed set of worker threads shared by every collection, plus the
+    call still running for each source. A source whose previous call has not
+    finished is not called again — it is reported unavailable — so a server
+    that trickles bytes past the per-read HTTP timeout ties up at most one
+    worker for that source, and the thread count can never grow past
+    SOURCE_WORKERS however many collections time out."""
+
+    def __init__(self, workers=SOURCE_WORKERS, name="brief-source"):
+        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix=name)
+        self._running = {}  # source name -> Future of its last call
+        self._lock = threading.Lock()
+
+    def submit(self, name, fn):
+        """The source's Future, or None while its previous call still runs."""
+        with self._lock:
+            previous = self._running.get(name)
+            if previous is not None and not previous.done():
+                return None
+            future = self._running[name] = self._executor.submit(fn)
+            return future
+
+
+_SOURCES = SourcePool()
+
+
+def collect(config, *, get=requests.get, post=requests.post, deadline_s=COLLECT_DEADLINE_S,
+            pool=None):
     """Fetch every source in parallel. Returns a dict of results; a source
-    that raised is None and its name is listed in data["unavailable"]."""
+    that raised, ran past the deadline or is still running from an earlier
+    call is None and its name is listed in data["unavailable"]."""
+    pool = pool or _SOURCES
     jobs = {
         "Hyperliquid markets": lambda: fetch_hl_markets(config.coins, post),
         "Stablecoins (DefiLlama)": lambda: fetch_stablecoins(get),
@@ -298,21 +328,17 @@ def collect(config, *, get=requests.get, post=requests.post, deadline_s=COLLECT_
     for coin in config.coins:
         jobs[f"Hyperliquid depth {coin}"] = (lambda c=coin: fetch_hl_depth(c, post))
     results, unavailable = {}, []
-    # Not a `with` block: its exit would wait for every thread, and a server
-    # trickling bytes can outlast the per-read HTTP timeout indefinitely.
-    pool = ThreadPoolExecutor(max_workers=8)
-    try:
-        futures = {name: pool.submit(fn) for name, fn in jobs.items()}
-        deadline = time.monotonic() + deadline_s
-        for name, future in futures.items():
-            try:
-                results[name] = future.result(timeout=max(0.0, deadline - time.monotonic()))
-            except Exception as exc:
-                logger.warning("source unavailable: %s (%s)", name, type(exc).__name__)
-                results[name] = None
-                unavailable.append(name)
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+    futures = {name: pool.submit(name, fn) for name, fn in jobs.items()}
+    deadline = time.monotonic() + deadline_s
+    for name, future in futures.items():
+        try:
+            if future is None:
+                raise TimeoutError("previous call still running")
+            results[name] = future.result(timeout=max(0.0, deadline - time.monotonic()))
+        except Exception as exc:
+            logger.warning("source unavailable: %s (%s)", name, type(exc).__name__)
+            results[name] = None
+            unavailable.append(name)
     return {"results": results, "unavailable": unavailable}
 
 
@@ -584,7 +610,12 @@ class BriefScheduler:
             start = not self._building
             self._building = True
         if start:
-            self._spawn(self._build_and_send)
+            try:
+                self._spawn(self._build_and_send)
+            except Exception:
+                with self._building_lock:
+                    self._building = False
+                raise
         return LIQUIDITY_PENDING_TEXT
 
     def _build_and_send(self):

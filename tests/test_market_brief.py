@@ -263,6 +263,29 @@ def test_oi_history_survives_restart_and_prunes(tmp_path):
     assert len(again._samples["BTC"]) == 1  # the 30h-old sample was pruned
 
 
+def test_a_hung_source_is_not_called_again_and_threads_stay_bounded():
+    import threading as _t
+    release = _t.Event()
+    llama_calls = []
+
+    def hung_get(url, **kwargs):
+        if "llama" in url:
+            llama_calls.append(1)
+            release.wait(10)
+        return fake_get(url, **kwargs)
+    pool = mb.SourcePool(workers=4, name="test-hung-pool")
+    try:
+        for _ in range(3):
+            data = mb.collect(mb.BriefConfig(coins=["BTC"]), get=hung_get, post=fake_post,
+                              deadline_s=0.3, pool=pool)
+            assert "Stablecoins (DefiLlama)" in data["unavailable"]
+            assert data["results"]["Hyperliquid markets"] is not None
+        assert llama_calls == [1]  # still running from the first collection: not called again
+        assert len([t for t in _t.enumerate() if t.name.startswith("test-hung-pool")]) <= 4
+    finally:
+        release.set()
+
+
 def test_oi_gap_does_not_stretch_the_last_hour(tmp_path):
     h = history(tmp_path, [(NOW - 4 * 3600_000, {"BTC": 100.0}), (NOW, {"BTC": 90.0})])
     assert h.change_pct("BTC", NOW, 3600) is None  # the only baseline is 4 hours old
@@ -452,6 +475,24 @@ def test_liquidity_build_failure_is_reported_and_releases_the_build(tmp_path):
     assert sent == ["Could not build the liquidity briefing — see the watcher logs."] * 2
 
 
+def test_a_failed_thread_start_does_not_latch_the_build(tmp_path):
+    attempts = []
+
+    def spawn(fn):
+        attempts.append(fn)
+        if len(attempts) == 1:
+            raise RuntimeError("can't start new thread")
+        fn()
+    sent = []
+    sched = mb.BriefScheduler(mb.BriefConfig(coins=["BTC"]), tmp_path, sent.append,
+                              fetch=lambda cfg: alert_data(), clock=Clock(NOW),
+                              sleep=lambda s: None, spawn=spawn)
+    with pytest.raises(RuntimeError):
+        sched.liquidity_reply()  # TelegramCommands turns this into a "could not build" reply
+    sched.liquidity_reply()
+    assert len(attempts) == 2 and len(briefs(sent)) == 1
+
+
 def test_liquidity_requests_do_not_mute_alerts(tmp_path):
     hot = alert_data(funding=0.0001)
     sched, sent, clock, _ = make_scheduler(tmp_path, NOW - 3600_000 * 2, data=hot)
@@ -478,7 +519,8 @@ def test_collect_deadline_marks_a_hung_source_unavailable():
             release.wait(5)
         return fake_get(url, **kwargs)
     started = time.monotonic()
-    data = mb.collect(mb.BriefConfig(coins=["BTC"]), get=slow_get, post=fake_post, deadline_s=0.5)
+    data = mb.collect(mb.BriefConfig(coins=["BTC"]), get=slow_get, post=fake_post, deadline_s=0.5,
+                      pool=mb.SourcePool())
     release.set()
     assert time.monotonic() - started < 3
     assert "Stablecoins (DefiLlama)" in data["unavailable"]

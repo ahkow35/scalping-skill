@@ -20,7 +20,9 @@ from the full-precision book. `/liquidity` never blocks `/check` (a fresh
 briefing is built on its own thread), fresh `/liquidity` data also runs the
 alerts, all sources share a 20-second cap, the 1-hour OI change ignores a
 baseline from before a sampling gap, and every slot over 30 minutes late is
-skipped (cross-review fixes). Conditions, not signals. Plan:
+skipped. Sources share one fixed pool of 16 threads and a source still
+running from an earlier call is not called again (cross-review fixes,
+rounds 1-2). Conditions, not signals. Plan:
 `PLAN-liquidity-briefing-2026-10-03.md`.
 
 ## 2026-09-29 — recorder disk-space warning floor is configurable
