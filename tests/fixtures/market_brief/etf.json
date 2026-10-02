@@ -1,0 +1,64 @@
+{
+ "code": 0,
+ "msg": null,
+ "traceId": null,
+ "data": [
+  {
+   "date": "2026-10-01",
+   "totalNetInflow": 102670557.075,
+   "totalValueTraded": 1970672970,
+   "totalNetAssets": 109337825263.06184,
+   "cumNetInflow": 57597970872.918
+  },
+  {
+   "date": "2026-09-30",
+   "totalNetInflow": -148687762.20000002,
+   "totalValueTraded": 2359178178.5,
+   "totalNetAssets": 107981652503.0564,
+   "cumNetInflow": 57495300315.842995
+  },
+  {
+   "date": "2026-09-29",
+   "totalNetInflow": 66194702.4,
+   "totalValueTraded": 1598218153.2,
+   "totalNetAssets": 107961129364.433,
+   "cumNetInflow": 57643988078.043
+  },
+  {
+   "date": "2026-09-28",
+   "totalNetInflow": 31070566.45000001,
+   "totalValueTraded": 2046912080.6,
+   "totalNetAssets": 107816350545.39796,
+   "cumNetInflow": 57577793375.643
+  },
+  {
+   "date": "2026-09-25",
+   "totalNetInflow": 134465169.155,
+   "totalValueTraded": 2258218295.9,
+   "totalNetAssets": 108422523880.82455,
+   "cumNetInflow": 57546722809.193
+  },
+  {
+   "date": "2026-09-24",
+   "totalNetInflow": 190646110.255,
+   "totalValueTraded": 2266336139.4,
+   "totalNetAssets": 108915022342.80003,
+   "cumNetInflow": 57412257640.037994
+  },
+  {
+   "date": "2026-09-23",
+   "totalNetInflow": 346977216.16999996,
+   "totalValueTraded": 3058052640.8,
+   "totalNetAssets": 108663294328.42632,
+   "cumNetInflow": 57221611529.783
+  },
+  {
+   "date": "2026-09-22",
+   "totalNetInflow": 714748985.505,
+   "totalValueTraded": 2822847326.6,
+   "totalNetAssets": 110839570707.00192,
+   "cumNetInflow": 56874634313.613
+  }
+ ],
+ "tid": ""
+}

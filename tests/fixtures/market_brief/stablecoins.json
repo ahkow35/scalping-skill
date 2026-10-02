@@ -1,0 +1,30 @@
+{
+ "peggedAssets": [
+  {
+   "name": "Tether",
+   "symbol": "USDT",
+   "circulating": {
+    "peggedUSD": 183743409500.28595
+   },
+   "circulatingPrevDay": {
+    "peggedUSD": 183808368443.05707
+   },
+   "circulatingPrevWeek": {
+    "peggedUSD": 183716716061.87643
+   }
+  },
+  {
+   "name": "USD Coin",
+   "symbol": "USDC",
+   "circulating": {
+    "peggedUSD": 74140791080.4518
+   },
+   "circulatingPrevDay": {
+    "peggedUSD": 74133607091.23405
+   },
+   "circulatingPrevWeek": {
+    "peggedUSD": 76436728300.73679
+   }
+  }
+ ]
+}

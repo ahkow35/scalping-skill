@@ -1198,3 +1198,53 @@ def test_listener_errors_back_off_and_never_log_the_token(caplog):
     assert BOT_TOKEN not in caplog.text and "api.telegram.org" not in caplog.text
     assert "HTTP 409" in caplog.text
     assert sent == []
+
+
+def make_liquidity_commands(get, clock=None):
+    sent = []
+    ticks = iter(range(0, 10_000, 100))
+    commands = rw.TelegramCommands(BOT_TOKEN, CHAT, lambda: "CHECK REPLY", liquidity_answer=lambda: "LIQ REPLY",
+                                    get=get, send=lambda token, chat, text: sent.append((chat, text)),
+                                    sleep=lambda s: None, clock=clock or (lambda: next(ticks)))
+    return commands, sent
+
+
+def test_liquidity_is_answered_for_the_configured_chat_and_check_is_unchanged():
+    get = FakeTelegram([], [msg(1, "/liquidity"), msg(2, "/check"), msg(3, "/Liquidity@my_bot now")])
+    commands, sent = make_liquidity_commands(get)
+    commands.poll_once()
+    assert sent == [(CHAT, "LIQ REPLY"), (CHAT, "CHECK REPLY"), (CHAT, "LIQ REPLY")]
+
+
+def test_liquidity_from_another_chat_is_ignored():
+    get = FakeTelegram([], [msg(1, "/liquidity", chat_id="999")])
+    commands, sent = make_liquidity_commands(get)
+    commands.poll_once()
+    assert sent == []
+
+
+def test_liquidity_is_ignored_when_the_briefing_is_off():
+    get = FakeTelegram([], [msg(1, "/liquidity")])
+    commands, sent, _ = make_commands(get)
+    commands.poll_once()
+    assert sent == []
+
+
+def test_liquidity_shares_the_reply_rate_limit_with_check():
+    times = iter([0, 3, 12])
+    get = FakeTelegram([], [msg(1, "/check"), msg(2, "/liquidity"), msg(3, "/liquidity")])
+    commands, sent = make_liquidity_commands(get, clock=lambda: next(times))
+    commands.poll_once()
+    assert sent == [(CHAT, "CHECK REPLY"), (CHAT, "LIQ REPLY")]  # t=3 falls inside the window
+
+
+def test_liquidity_failure_replies_with_a_fallback():
+    def broken():
+        raise RuntimeError("boom")
+    sent = []
+    commands = rw.TelegramCommands(BOT_TOKEN, CHAT, lambda: "x", liquidity_answer=broken,
+                                    get=FakeTelegram([], [msg(1, "/liquidity")]),
+                                    send=lambda t, c, text: sent.append(text), sleep=lambda s: None,
+                                    clock=lambda: 0)
+    commands.poll_once()
+    assert sent == ["Could not build the /liquidity reply — see the watcher logs."]

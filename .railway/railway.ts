@@ -39,6 +39,10 @@ export default defineRailway(() => {
     env: {
       DATA_DIR: preserve(), HEALTHCHECK_PING_URL: preserve(), MONITOR_DAILY_LOSS_USDC: preserve(), MONITOR_MAX_POSITION_NOTIONAL_USDC: preserve(), MONITOR_TIMEZONE: preserve(), MONITOR_WALLET: preserve(), REPORT_TOKEN: preserve(), TELEGRAM_BOT_TOKEN: preserve(), TELEGRAM_CHAT_ID: preserve(),
       RECORDER_STATUS_URL: "http://${{recorder.RAILWAY_PRIVATE_DOMAIN}}:8080/status",
+      // Liquidity briefing (market_brief.py): plain defaults, not preserve() —
+      // none of these exist on Railway yet. Same values as the code defaults.
+      BRIEF_ENABLED: "true", BRIEF_TIMES: "08:00,20:30", BRIEF_COINS: "BTC,ETH,HYPE",
+      BRIEF_FUNDING_ALERT_PCT: "0.005", BRIEF_OI_DROP_PCT: "5", BRIEF_EVENT_MINUTES: "60",
     },
   });
 
