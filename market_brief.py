@@ -58,6 +58,8 @@ LATE_GRACE_S = 2 * 60                   # beyond this after the slot, the messag
 LATE_LIMIT_S = 30 * 60                  # beyond this, the slot is skipped
 TICK_INTERVAL_S = 30
 CACHE_MAX_AGE_S = 5 * 60
+COLLECT_DEADLINE_S = 20                 # whole-collection cap; a slower source is "Unavailable"
+LIQUIDITY_PENDING_TEXT = "Building a fresh liquidity briefing — it will follow in a moment."
 
 STATE_FILE = "market_brief_state.json"
 OI_FILE = "market_brief_oi.json"
@@ -280,7 +282,7 @@ def fetch_events(get=requests.get):
 # Collect — run every source independently
 # ---------------------------------------------------------------------------
 
-def collect(config, *, get=requests.get, post=requests.post):
+def collect(config, *, get=requests.get, post=requests.post, deadline_s=COLLECT_DEADLINE_S):
     """Fetch every source in parallel. Returns a dict of results; a source
     that raised is None and its name is listed in data["unavailable"]."""
     jobs = {
@@ -296,15 +298,21 @@ def collect(config, *, get=requests.get, post=requests.post):
     for coin in config.coins:
         jobs[f"Hyperliquid depth {coin}"] = (lambda c=coin: fetch_hl_depth(c, post))
     results, unavailable = {}, []
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    # Not a `with` block: its exit would wait for every thread, and a server
+    # trickling bytes can outlast the per-read HTTP timeout indefinitely.
+    pool = ThreadPoolExecutor(max_workers=8)
+    try:
         futures = {name: pool.submit(fn) for name, fn in jobs.items()}
+        deadline = time.monotonic() + deadline_s
         for name, future in futures.items():
             try:
-                results[name] = future.result()
+                results[name] = future.result(timeout=max(0.0, deadline - time.monotonic()))
             except Exception as exc:
                 logger.warning("source unavailable: %s (%s)", name, type(exc).__name__)
                 results[name] = None
                 unavailable.append(name)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     return {"results": results, "unavailable": unavailable}
 
 
@@ -327,8 +335,9 @@ def _read_json(path, default):
 
 class OiHistory:
     """Open-interest samples per coin, kept 25 hours in a small JSON file so
-    they survive restarts. A change needs a sample at least `window` old;
-    until then it is None ("warming up")."""
+    they survive restarts. A change needs a sample about `window` old (no more
+    than one sampling interval beyond it); until then it is None ("warming
+    up")."""
 
     def __init__(self, path):
         self._path = Path(path)
@@ -344,8 +353,11 @@ class OiHistory:
         _write_json(self._path, self._samples)
 
     def change_pct(self, coin, now_ms, window_s):
+        # The baseline must sit near the window's start: a sample from before
+        # a gap in sampling (e.g. a restart) would stretch "the last hour".
         limit = now_ms - (window_s - OI_TOLERANCE_S) * 1000
-        older = [s for s in self._samples.get(coin, []) if s[0] <= limit]
+        oldest = now_ms - (window_s + SAMPLE_INTERVAL_S + OI_TOLERANCE_S) * 1000
+        older = [s for s in self._samples.get(coin, []) if oldest <= s[0] <= limit]
         current = [s for s in self._samples.get(coin, []) if s[0] <= now_ms]
         if not older or not current or older[-1][1] <= 0:
             return None
@@ -482,7 +494,7 @@ class BriefScheduler:
     30 minutes is sent marked "(late)"; after that it is skipped."""
 
     def __init__(self, config, data_dir, send, *, fetch=collect,
-                 clock=lambda: int(time.time() * 1000), sleep=time.sleep):
+                 clock=lambda: int(time.time() * 1000), sleep=time.sleep, spawn=None):
         self._config = config
         self._send = send
         self._fetch = fetch
@@ -498,6 +510,10 @@ class BriefScheduler:
         self._last_sample_ms = None
         self._cache = None  # (built_ms, text)
         self._lock = threading.Lock()
+        self._spawn = spawn or (lambda fn: threading.Thread(target=fn, daemon=True,
+                                                             name="liquidity-reply").start())
+        self._building = False
+        self._building_lock = threading.Lock()
 
     def _save(self):
         _write_json(self._state_path, self._state)
@@ -525,7 +541,7 @@ class BriefScheduler:
         now_ms = self._clock() if now_ms is None else now_ms
         with self._lock:
             due = self._due_slot(now_ms)
-            if due and due[2] > LATE_LIMIT_S:
+            while due and due[2] > LATE_LIMIT_S:
                 logger.info("briefing slot %s skipped: %d min late", due[0], due[2] // 60)
                 self._state["slots"][due[0]] = due[1]
                 self._save()
@@ -556,15 +572,39 @@ class BriefScheduler:
             alerts[key] = now_ms
 
     def liquidity_reply(self, now_ms=None):
-        """Text for /liquidity: a briefing at most 5 minutes old, else a fresh one."""
+        """Text for /liquidity. Never blocks the Telegram command listener (it
+        also answers /check): returns a briefing at most 5 minutes old, else
+        an acknowledgement while a fresh briefing is built on its own thread
+        and sent through `send`. At most one build runs at a time."""
         now_ms = self._clock() if now_ms is None else now_ms
-        with self._lock:
-            if self._cache and 0 <= now_ms - self._cache[0] <= CACHE_MAX_AGE_S * 1000:
-                return self._cache[1]
-            data = self._gather(now_ms)
-            text = format_brief(data, self._config, self._history, now_ms)
-            self._cache = (now_ms, text)
-            return text
+        cached = self._cache
+        if cached and 0 <= now_ms - cached[0] <= CACHE_MAX_AGE_S * 1000:
+            return cached[1]
+        with self._building_lock:
+            start = not self._building
+            self._building = True
+        if start:
+            self._spawn(self._build_and_send)
+        return LIQUIDITY_PENDING_TEXT
+
+    def _build_and_send(self):
+        try:
+            with self._lock:
+                now_ms = self._clock()
+                data = self._gather(now_ms)
+                text = format_brief(data, self._config, self._history, now_ms)
+                self._cache = (now_ms, text)
+                # _gather reset the sampling timer, so tick() will not look at
+                # this data: run the alerts here or /liquidity would mute them.
+                self._send_alerts(data, now_ms)
+                self._save()
+            self._send(text)
+        except Exception:
+            logger.exception("/liquidity build failed")
+            self._send("Could not build the liquidity briefing — see the watcher logs.")
+        finally:
+            with self._building_lock:
+                self._building = False
 
     def run_forever(self):
         while True:

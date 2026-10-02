@@ -16,7 +16,11 @@ Optional env vars: `BRIEF_ENABLED` (set false to turn it off), `BRIEF_TIMES`,
 `BRIEF_EVENT_MINUTES`, set to the same defaults as plain values in
 `.railway/railway.ts`. Order-book depth within 1% comes from the finest
 aggregated `l2Book` (`nSigFigs` 4, 3, 2) that reaches the band; the spread
-from the full-precision book. Conditions, not signals. Plan:
+from the full-precision book. `/liquidity` never blocks `/check` (a fresh
+briefing is built on its own thread), fresh `/liquidity` data also runs the
+alerts, all sources share a 20-second cap, the 1-hour OI change ignores a
+baseline from before a sampling gap, and every slot over 30 minutes late is
+skipped (cross-review fixes). Conditions, not signals. Plan:
 `PLAN-liquidity-briefing-2026-10-03.md`.
 
 ## 2026-09-29 — recorder disk-space warning floor is configurable

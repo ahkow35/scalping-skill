@@ -3,6 +3,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import time
+
 import pytest
 
 import market_brief as mb
@@ -261,6 +263,11 @@ def test_oi_history_survives_restart_and_prunes(tmp_path):
     assert len(again._samples["BTC"]) == 1  # the 30h-old sample was pruned
 
 
+def test_oi_gap_does_not_stretch_the_last_hour(tmp_path):
+    h = history(tmp_path, [(NOW - 4 * 3600_000, {"BTC": 100.0}), (NOW, {"BTC": 90.0})])
+    assert h.change_pct("BTC", NOW, 3600) is None  # the only baseline is 4 hours old
+
+
 def test_corrupt_oi_file_starts_empty(tmp_path):
     (tmp_path / "oi.json").write_text("{not json")
     assert mb.OiHistory(tmp_path / "oi.json").change_pct("BTC", NOW, 3600) is None
@@ -319,7 +326,7 @@ def make_scheduler(tmp_path, start_ms, data=None, config=None):
         calls.append(1)
         return data if data is not None else alert_data()
     sched = mb.BriefScheduler(config or mb.BriefConfig(coins=["BTC"]), tmp_path, sent.append,
-                              fetch=fetch, clock=clock, sleep=lambda s: None)
+                              fetch=fetch, clock=clock, sleep=lambda s: None, spawn=lambda fn: fn())
     return sched, sent, clock, calls
 
 
@@ -409,13 +416,73 @@ def test_samples_oi_every_15_minutes_only(tmp_path):
 
 
 def test_liquidity_reply_reuses_a_briefing_under_5_minutes_old(tmp_path):
-    sched, _, clock, calls = make_scheduler(tmp_path, NOW)
-    first = sched.liquidity_reply()
+    sched, sent, clock, calls = make_scheduler(tmp_path, NOW)
+    assert sched.liquidity_reply() == mb.LIQUIDITY_PENDING_TEXT  # built off-thread, then sent
+    first = briefs(sent)[-1]
     clock.ms += 4 * 60_000
     assert sched.liquidity_reply() == first and len(calls) == 1
     clock.ms += 2 * 60_000
     sched.liquidity_reply()
     assert len(calls) == 2
+
+
+def test_liquidity_reply_never_blocks_and_starts_one_build_at_a_time(tmp_path):
+    spawned = []
+    sent = []
+    sched = mb.BriefScheduler(mb.BriefConfig(coins=["BTC"]), tmp_path, sent.append,
+                              fetch=lambda cfg: alert_data(), clock=Clock(NOW),
+                              sleep=lambda s: None, spawn=spawned.append)
+    assert sched.liquidity_reply() == mb.LIQUIDITY_PENDING_TEXT
+    assert sched.liquidity_reply() == mb.LIQUIDITY_PENDING_TEXT
+    assert len(spawned) == 1 and sent == []  # nothing fetched on the caller's thread
+    spawned[0]()
+    assert len(briefs(sent)) == 1
+    sched.liquidity_reply()
+    assert len(spawned) == 1  # the fresh briefing is cached now
+
+
+def test_liquidity_build_failure_is_reported_and_releases_the_build(tmp_path):
+    sent = []
+    def fetch(cfg):
+        raise RuntimeError("boom")
+    sched = mb.BriefScheduler(mb.BriefConfig(coins=["BTC"]), tmp_path, sent.append, fetch=fetch,
+                              clock=Clock(NOW), sleep=lambda s: None, spawn=lambda fn: fn())
+    sched.liquidity_reply()
+    sched.liquidity_reply()
+    assert sent == ["Could not build the liquidity briefing — see the watcher logs."] * 2
+
+
+def test_liquidity_requests_do_not_mute_alerts(tmp_path):
+    hot = alert_data(funding=0.0001)
+    sched, sent, clock, _ = make_scheduler(tmp_path, NOW - 3600_000 * 2, data=hot)
+    for _ in range(4):  # a /liquidity every 10 minutes keeps resetting the sampling timer
+        clock.ms += 10 * 60_000 + 1
+        sched.liquidity_reply()
+        sched.tick()
+    assert len([m for m in sent if m.startswith("LIQUIDITY ALERT")]) == 1
+
+
+def test_two_overdue_slots_are_both_skipped(tmp_path):
+    # 22:00 SGT with no state: 08:00 is 14h late and 20:30 is 90 minutes late.
+    sched, sent, _, _ = make_scheduler(tmp_path, NOW + 14 * 3600_000)
+    sched.tick()
+    assert briefs(sent) == []
+
+
+def test_collect_deadline_marks_a_hung_source_unavailable():
+    import threading as _t
+    release = _t.Event()
+
+    def slow_get(url, **kwargs):
+        if "llama" in url:
+            release.wait(5)
+        return fake_get(url, **kwargs)
+    started = time.monotonic()
+    data = mb.collect(mb.BriefConfig(coins=["BTC"]), get=slow_get, post=fake_post, deadline_s=0.5)
+    release.set()
+    assert time.monotonic() - started < 3
+    assert "Stablecoins (DefiLlama)" in data["unavailable"]
+    assert data["results"]["Hyperliquid markets"] is not None
 
 
 def test_tick_failure_in_the_fetch_is_contained_by_run_loop(tmp_path):
