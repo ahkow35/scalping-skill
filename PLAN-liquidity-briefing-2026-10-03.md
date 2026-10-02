@@ -1,6 +1,6 @@
 # Liquidity briefing on the Railway watcher (plan, 2026-10-03)
 
-Status: DRAFT v1, awaiting Nyan's approval. Nothing built.
+Status: APPROVED by Nyan 2026-10-03; built in PR #20 (draft, not merged or deployed).
 
 ## Objective
 

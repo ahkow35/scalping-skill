@@ -13,7 +13,10 @@ and never stops the rest. Read-only: no order, no account read, and
 `railway_watch.py`'s docstring now says the briefing adds public market reads.
 Optional env vars: `BRIEF_ENABLED` (set false to turn it off), `BRIEF_TIMES`,
 `BRIEF_COINS`, `BRIEF_FUNDING_ALERT_PCT`, `BRIEF_OI_DROP_PCT`,
-`BRIEF_EVENT_MINUTES`. Conditions, not signals. Plan:
+`BRIEF_EVENT_MINUTES`, set to the same defaults as plain values in
+`.railway/railway.ts`. Order-book depth within 1% comes from the finest
+aggregated `l2Book` (`nSigFigs` 4, 3, 2) that reaches the band; the spread
+from the full-precision book. Conditions, not signals. Plan:
 `PLAN-liquidity-briefing-2026-10-03.md`.
 
 ## 2026-09-29 — recorder disk-space warning floor is configurable

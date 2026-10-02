@@ -49,7 +49,9 @@ def fake_post(url, json=None, **kwargs):
     if "hyperliquid" in url:
         if json["type"] == "metaAndAssetCtxs":
             return Resp(js("meta.json"))
-        return Resp(js("l2book_btc.json"))  # the same real book serves every coin
+        # The same real books serve every coin: the full-precision one, and
+        # one 3-significant-figure aggregation for every nSigFigs request.
+        return Resp(js("l2book_btc_sig3.json" if "nSigFigs" in json else "l2book_btc.json"))
     if "sosovalue" in url:
         return Resp(js("etf.json"))
     raise AssertionError(url)
@@ -107,6 +109,44 @@ def test_book_depth_flags_a_book_too_shallow_to_reach_the_band():
 def test_real_btc_book_fixture_parses():
     out = mb.book_depth(js("l2book_btc.json"))
     assert out["depth_usd"] > 0 and out["spread_bp"] >= 0
+
+
+def _book(bid_px, ask_px, size="1"):
+    return {"levels": [[{"px": str(p), "sz": size} for p in bid_px],
+                       [{"px": str(p), "sz": size} for p in ask_px]]}
+
+
+def test_depth_uses_the_finest_aggregation_that_reaches_the_band():
+    full = _book([100, 99.99], [100.01, 100.02])                 # spread 1bp, reaches nowhere near 1%
+    sig4 = _book([100, 99.9], [100.1, 100.2])                    # still short of 99.0 / 101.0
+    sig3 = _book([100, 99.5, 98], [100.5, 101, 102], size="2")   # reaches past both edges
+    calls = []
+
+    def post(url, json=None, **kwargs):
+        calls.append(json.get("nSigFigs"))
+        return Resp({None: full, 4: sig4, 3: sig3}[json.get("nSigFigs")])
+
+    out = mb.fetch_hl_depth("BTC", post=post)
+    assert calls == [None, 4, 3]                                 # stops at the first book that reaches
+    assert out["truncated"] is False
+    assert out["spread_bp"] == pytest.approx(0.01 / 100.005 * 1e4)  # from the full book, not the buckets
+    # band around the full-book mid 100.005: bids >= 99.00495, asks <= 101.00505
+    assert out["depth_usd"] == pytest.approx(2 * (100 + 99.5) + 2 * (100.5 + 101))
+
+
+def test_depth_is_a_flagged_lower_bound_when_no_aggregation_reaches():
+    shallow = _book([100, 99.9], [100.1, 100.2])
+
+    def post(url, json=None, **kwargs):
+        return Resp(shallow)
+
+    out = mb.fetch_hl_depth("BTC", post=post)
+    assert out["truncated"] is True
+
+
+def test_real_btc_books_reach_the_band():
+    out = mb.fetch_hl_depth("BTC", post=fake_post)
+    assert out["truncated"] is False and out["depth_usd"] > 0
 
 
 def test_stablecoins_parse():

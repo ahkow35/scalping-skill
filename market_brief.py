@@ -39,6 +39,7 @@ CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
 HTTP_TIMEOUT_S = 8.0
 USER_AGENT = "Mozilla/5.0 (compatible; scalp-market-brief)"
+DEPTH_SIG_FIGS = (4, 3, 2)              # l2Book aggregations tried for the ±1% depth, finest first
 BRIEF_TIMEZONE = "Asia/Singapore"
 TZ_LABEL = "SGT"
 MAX_TEXT = 4000
@@ -156,23 +157,38 @@ def fetch_hl_markets(coins, post=requests.post):
     return out
 
 
-def book_depth(book, band=0.01):
+def book_depth(book, band=0.01, mid=None):
     """Depth within +-`band` of the mid, in USD, and the spread in bp.
-    `truncated` is True when the 20 levels l2Book returns do not reach the
-    band edge, so the depth is a lower bound."""
+    `mid` defaults to this book's own mid; pass the full-precision mid when
+    `book` is an aggregated one, whose top levels are rounded. `truncated`
+    is True when the 20 levels l2Book returns do not reach the band edge,
+    so the depth is a lower bound."""
     bids, asks = book["levels"]
     best_bid, best_ask = float(bids[0]["px"]), float(asks[0]["px"])
-    mid = (best_bid + best_ask) / 2
+    if mid is None:
+        mid = (best_bid + best_ask) / 2
     low, high = mid * (1 - band), mid * (1 + band)
     bid_usd = sum(float(l["px"]) * float(l["sz"]) for l in bids if float(l["px"]) >= low)
     ask_usd = sum(float(l["px"]) * float(l["sz"]) for l in asks if float(l["px"]) <= high)
     truncated = float(bids[-1]["px"]) >= low or float(asks[-1]["px"]) <= high
     return {"depth_usd": bid_usd + ask_usd, "spread_bp": (best_ask - best_bid) / mid * 1e4,
-            "truncated": truncated}
+            "mid": mid, "truncated": truncated}
 
 
 def fetch_hl_depth(coin, post=requests.post):
-    return book_depth(_hl_post(post, {"type": "l2Book", "coin": coin}))
+    """Spread from the full-precision book; depth from the finest aggregated
+    book (nSigFigs 4, then 3, then 2) whose 20 levels reach the +-1% band.
+    Aggregated levels are price buckets, so the depth is accurate to within
+    one bucket at each band edge (about 0.1% of price at 3 significant
+    figures). If no aggregation reaches the band, the lower bound from the
+    coarsest one is returned with `truncated` set."""
+    full = book_depth(_hl_post(post, {"type": "l2Book", "coin": coin}))
+    for sig_figs in DEPTH_SIG_FIGS:
+        book = _hl_post(post, {"type": "l2Book", "coin": coin, "nSigFigs": sig_figs})
+        depth = book_depth(book, mid=full["mid"])
+        if not depth["truncated"]:
+            break
+    return {**full, "depth_usd": depth["depth_usd"], "truncated": depth["truncated"]}
 
 
 def fetch_stablecoins(get=requests.get):
