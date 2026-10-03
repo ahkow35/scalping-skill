@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import time
 
 import pytest
+import requests
 
 import market_brief as mb
 
@@ -35,6 +36,9 @@ class Resp:
 def fake_get(url, **kwargs):
     if "stablecoins" in url:
         return Resp(js("stablecoins.json"))
+    if "api.stlouisfed.org" in url:
+        assert kwargs["params"]["api_key"] == "test-key"
+        return Resp(js(f"fred_api_{kwargs['params']['series_id']}.json"))
     if "fredgraph" in url:
         series = url.split("id=")[1]
         return Resp(raw=text(f"fred_{series}.csv"))
@@ -174,8 +178,47 @@ def test_fred_csv_skips_missing_observations():
 
 
 def test_net_liquidity_from_fixtures_is_plausible():
-    out = mb.fetch_net_liquidity(get=fake_get)
+    out = mb.fetch_net_liquidity(get=fake_get, api_key="")
     assert 4000 < out["net_b"] < 9000
+
+
+def test_net_liquidity_uses_the_fred_api_when_a_key_is_set():
+    csv_out = mb.fetch_net_liquidity(get=fake_get, api_key="")
+    api_out = mb.fetch_net_liquidity(get=fake_get, api_key="test-key")
+    assert api_out == csv_out  # same observations through either route
+
+
+def test_net_liquidity_reads_the_key_from_the_environment(monkeypatch):
+    urls = []
+
+    def get(url, **kwargs):
+        urls.append(url)
+        return fake_get(url, **kwargs)
+    monkeypatch.setenv("FRED_API_KEY", "test-key")
+    mb.fetch_net_liquidity(get=get)
+    monkeypatch.delenv("FRED_API_KEY")
+    mb.fetch_net_liquidity(get=get)
+    assert [u.startswith(mb.FRED_API_URL) for u in urls] == [True] * 3 + [False] * 3
+
+
+def test_fred_api_skips_missing_observations_and_sorts():
+    body = {"observations": [{"date": "2026-01-03", "value": "7"}, {"date": "2026-01-01", "value": "."},
+                             {"date": "2026-01-02", "value": "5"}]}
+    assert mb.parse_fred_api(body) == [("2026-01-02", 5.0), ("2026-01-03", 7.0)]
+
+
+def test_fred_api_error_never_logs_the_key(caplog, monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "secret-key-123")
+
+    def get(url, **kwargs):
+        if url == mb.FRED_API_URL:
+            key = kwargs["params"]["api_key"]
+            raise requests.HTTPError(f"400 Client Error for url: {url}?api_key={key}")
+        return fake_get(url, **kwargs)
+    caplog.set_level("DEBUG")
+    data = mb.collect(mb.BriefConfig(coins=["BTC"]), get=get, post=fake_post, pool=mb.SourcePool())
+    assert "Fed net liquidity (FRED)" in data["unavailable"]
+    assert "HTTPError" in caplog.text and "secret-key-123" not in caplog.text
 
 
 def test_yahoo_uses_previous_close_not_range_start():

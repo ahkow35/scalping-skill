@@ -37,7 +37,7 @@ export default defineRailway(() => {
     replicas: { "asia-southeast1-eqsg3a": 1 },
     volumeMounts: { "/data": watcherVolume },
     env: {
-      DATA_DIR: preserve(), HEALTHCHECK_PING_URL: preserve(), MONITOR_DAILY_LOSS_USDC: preserve(), MONITOR_MAX_POSITION_NOTIONAL_USDC: preserve(), MONITOR_TIMEZONE: preserve(), MONITOR_WALLET: preserve(), REPORT_TOKEN: preserve(), TELEGRAM_BOT_TOKEN: preserve(), TELEGRAM_CHAT_ID: preserve(),
+      DATA_DIR: preserve(), FRED_API_KEY: preserve(), HEALTHCHECK_PING_URL: preserve(), MONITOR_DAILY_LOSS_USDC: preserve(), MONITOR_MAX_POSITION_NOTIONAL_USDC: preserve(), MONITOR_TIMEZONE: preserve(), MONITOR_WALLET: preserve(), REPORT_TOKEN: preserve(), TELEGRAM_BOT_TOKEN: preserve(), TELEGRAM_CHAT_ID: preserve(),
       RECORDER_STATUS_URL: "http://${{recorder.RAILWAY_PRIVATE_DOMAIN}}:8080/status",
       // Liquidity briefing (market_brief.py): plain defaults, not preserve() —
       // none of these exist on Railway yet. Same values as the code defaults.
