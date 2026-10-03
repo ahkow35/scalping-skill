@@ -4,8 +4,9 @@ Describes market CONDITIONS (how deep the book is, how crowded positioning
 is, what events are coming) — never direction, and never an entry signal.
 It places, cancels and closes nothing and never reads the account: the only
 Hyperliquid calls are the PUBLIC market reads `metaAndAssetCtxs` and
-`l2Book`. Other sources are free and keyless (DefiLlama, FRED CSV, Yahoo,
-SoSoValue, ForexFactory); requests + stdlib only.
+`l2Book`. Other sources are free and keyless (DefiLlama, the Fed's H.4.1
+page and the New York Fed for Fed net liquidity with FRED as the fallback,
+Yahoo, SoSoValue, ForexFactory); requests + stdlib only.
 
 Every source fails on its own: a failure becomes an "Unavailable: <source>"
 line and never stops the rest. Each fetch function takes injectable HTTP
@@ -15,10 +16,12 @@ callables, so tests run on saved fixtures with no network.
 """
 
 import csv
+import html
 import io
 import json
 import logging
 import os
+import re
 import threading
 import time
 from concurrent.futures import Future
@@ -32,6 +35,12 @@ logger = logging.getLogger("market_brief")
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 LLAMA_URL = "https://stablecoins.llama.fi/stablecoins"
+# Fed net liquidity comes first from the official publishers, which answer from
+# Railway: the Fed's weekly H.4.1 release (balance sheet total, Treasury cash
+# account) and the New York Fed's daily reverse repo results. FRED republishes
+# the same three series but times out from Railway's servers; it is the fallback.
+H41_URL = "https://www.federalreserve.gov/releases/h41/current/h41.htm"
+NYFED_RRP_URL = "https://markets.newyorkfed.org/api/rp/reverserepo/propositions/search.json"
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}"
 # Official FRED API, used when FRED_API_KEY is set: the CSV download above
 # times out from Railway's servers (2026-10-03) while this host answers.
@@ -260,12 +269,74 @@ def _fred_series(get, series, api_key):
     return parse_fred_api(_get(get, FRED_API_URL, params=params).json())
 
 
-def fetch_net_liquidity(get=requests.get, api_key=None):
+def fetch_net_liquidity_fred(get=requests.get, api_key=None):
     """From the FRED API when FRED_API_KEY is set, else the keyless CSV."""
     api_key = os.environ.get("FRED_API_KEY", "").strip() if api_key is None else api_key
     series = {s: _fred_series(get, s, api_key) for s in ("WALCL", "WTREGEN", "RRPONTSYD")}
     return net_liquidity(series["WALCL"], series["WTREGEN"], series["RRPONTSYD"])
 
+
+
+def _h41_row(text, label):
+    """(level, signed change from the previous week) from the first row named
+    `label`: the label, an optional footnote like "(0)", then the level and the
+    change ("- 28,410", "+ 5" or a bare "0")."""
+    m = re.search(re.escape(label) + r" (?:\(\d+\) )?([\d,]+) (?:([+-]) ([\d,]+)|0)\b", text)
+    if not m:
+        raise ValueError(f"H.4.1 row not found: {label}")
+    level = float(m.group(1).replace(",", ""))
+    change = float(m.group(3).replace(",", "")) * (-1 if m.group(2) == "-" else 1) if m.group(2) else 0.0
+    return level, change
+
+
+def parse_h41(page):
+    """The Fed's H.4.1 release, in millions of dollars: total assets (the
+    Wednesday level, FRED's WALCL) and the Treasury General Account (the week
+    average, FRED's WTREGEN), each for the release week and the week before."""
+    text = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", page)))
+    m = re.search(r"Week ended ([A-Z][a-z]{2})[a-z]*\.? (\d{1,2}), (\d{4})", text)
+    if not m:
+        raise ValueError("H.4.1 week date not found")
+    date = datetime.strptime(" ".join(m.groups()), "%b %d %Y")
+    dates = [(date - timedelta(days=7)).date().isoformat(), date.date().isoformat()]
+    out = {"dates": dates}
+    for key, label, low, high in (("total_assets", "Total assets", 1e6, 2e7),
+                                  ("tga", "U.S. Treasury, General Account", 0, 3e6)):
+        level, change = _h41_row(text, label)
+        if not low < level < high:
+            raise ValueError(f"H.4.1 {label} out of range")
+        out[key] = [(dates[0], level - change), (dates[1], level)]
+    return out
+
+
+def parse_nyfed_rrp(body):
+    """[(date, $B)] oldest first: overnight reverse repo accepted per day,
+    summed across a day's operations (FRED's RRPONTSYD, in billions)."""
+    totals = {}
+    for op in body["repo"]["operations"]:
+        if op.get("operationType") == "Reverse Repo":
+            totals[op["operationDate"]] = totals.get(op["operationDate"], 0.0) + float(op["totalAmtAccepted"]) / 1e9
+    if not totals:
+        raise ValueError("no reverse repo operations")
+    return sorted(totals.items())
+
+
+def fetch_net_liquidity_fed(get=requests.get):
+    """From the Fed's H.4.1 page and the New York Fed's reverse repo results."""
+    h41 = parse_h41(_get(get, H41_URL).text)
+    start = (datetime.fromisoformat(h41["dates"][0]) - timedelta(days=7)).date().isoformat()
+    rrp = parse_nyfed_rrp(_get(get, NYFED_RRP_URL, params={"startDate": start}).json())
+    return net_liquidity(h41["total_assets"], h41["tga"], rrp)
+
+
+def fetch_net_liquidity(get=requests.get):
+    """Official Fed sources first; FRED if they fail. The fallback is logged
+    by error type only, like every other source failure."""
+    try:
+        return fetch_net_liquidity_fed(get)
+    except Exception as e:  # noqa: BLE001 - any failure falls back to FRED
+        logger.warning("Fed net liquidity: official sources failed (%s); trying FRED", type(e).__name__)
+        return fetch_net_liquidity_fred(get)
 
 def parse_yahoo(body):
     result = body["chart"]["result"][0]
@@ -355,7 +426,7 @@ def collect(config, *, get=requests.get, post=requests.post, deadline_s=COLLECT_
     jobs = {
         "Hyperliquid markets": lambda: fetch_hl_markets(config.coins, post),
         "Stablecoins (DefiLlama)": lambda: fetch_stablecoins(get),
-        "Fed net liquidity (FRED)": lambda: fetch_net_liquidity(get),
+        "Fed net liquidity": lambda: fetch_net_liquidity(get),
         "VIX (Yahoo)": lambda: fetch_yahoo("^VIX", get),
         "Dollar index (Yahoo)": lambda: fetch_yahoo("DX-Y.NYB", get),
         "US 10y (Yahoo)": lambda: fetch_yahoo("^TNX", get),
@@ -457,7 +528,7 @@ def format_brief(data, config, history, now_ms, *, late=False):
     lines = [head + (" (late)" if late else ""), ""]
 
     lines.append("MACRO")
-    net = res.get("Fed net liquidity (FRED)")
+    net = res.get("Fed net liquidity")
     if net:
         lines.append(f"Fed net liquidity  {_money(net['net_b'] * 1e9)}  "
                      f"({_signed_money(net['week_change_b'] * 1e9)} w/w)")

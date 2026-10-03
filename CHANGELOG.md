@@ -1,5 +1,15 @@
 # Changelog — scalp skill
 
+## 2026-10-04 — Fed net liquidity from the Fed's own pages
+Both FRED routes (API and CSV) time out from Railway's servers; a test inside
+the container showed the Fed, New York Fed and Treasury sites all answer.
+`market_brief.py` now reads the balance sheet total and the Treasury cash
+account from the Fed's weekly H.4.1 release page, and the reverse repo from
+the New York Fed's daily results. On the release of 1 Oct 2026 this gives the
+same figure as FRED to the dollar ($5,782.8B). FRED stays as the fallback,
+logged as a warning when used. The source is now listed as "Fed net
+liquidity" (was "Fed net liquidity (FRED)").
+
 ## 2026-10-04 — ZEC added to the briefing, the scalp2 scanner and the Railway recorder
 - Liquidity briefing: `BRIEF_COINS` default is now `BTC,ETH,HYPE,ZEC`
   (`market_brief.py`, `.railway/railway.ts` and `ACCOUNT-MONITOR.md` agree).
