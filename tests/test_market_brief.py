@@ -36,6 +36,11 @@ class Resp:
 def fake_get(url, **kwargs):
     if "stablecoins" in url:
         return Resp(js("stablecoins.json"))
+    if url == mb.H41_URL:
+        return Resp(raw=text("h41.htm"))
+    if url == mb.NYFED_RRP_URL:
+        assert kwargs["params"] == {"startDate": "2026-09-16"}
+        return Resp(js("nyfed_rrp.json"))
     if "api.stlouisfed.org" in url:
         assert kwargs["params"]["api_key"] == "test-key"
         return Resp(js(f"fred_api_{kwargs['params']['series_id']}.json"))
@@ -178,13 +183,13 @@ def test_fred_csv_skips_missing_observations():
 
 
 def test_net_liquidity_from_fixtures_is_plausible():
-    out = mb.fetch_net_liquidity(get=fake_get, api_key="")
+    out = mb.fetch_net_liquidity_fred(get=fake_get, api_key="")
     assert 4000 < out["net_b"] < 9000
 
 
 def test_net_liquidity_uses_the_fred_api_when_a_key_is_set():
-    csv_out = mb.fetch_net_liquidity(get=fake_get, api_key="")
-    api_out = mb.fetch_net_liquidity(get=fake_get, api_key="test-key")
+    csv_out = mb.fetch_net_liquidity_fred(get=fake_get, api_key="")
+    api_out = mb.fetch_net_liquidity_fred(get=fake_get, api_key="test-key")
     assert api_out == csv_out  # same observations through either route
 
 
@@ -195,9 +200,9 @@ def test_net_liquidity_reads_the_key_from_the_environment(monkeypatch):
         urls.append(url)
         return fake_get(url, **kwargs)
     monkeypatch.setenv("FRED_API_KEY", "test-key")
-    mb.fetch_net_liquidity(get=get)
+    mb.fetch_net_liquidity_fred(get=get)
     monkeypatch.delenv("FRED_API_KEY")
-    mb.fetch_net_liquidity(get=get)
+    mb.fetch_net_liquidity_fred(get=get)
     assert [u.startswith(mb.FRED_API_URL) for u in urls] == [True] * 3 + [False] * 3
 
 
@@ -211,15 +216,89 @@ def test_fred_api_error_never_logs_the_key(caplog, monkeypatch):
     monkeypatch.setenv("FRED_API_KEY", "secret-key-123")
 
     def get(url, **kwargs):
+        if url == mb.H41_URL:
+            raise requests.ConnectionError("fed down")
         if url == mb.FRED_API_URL:
             key = kwargs["params"]["api_key"]
             raise requests.HTTPError(f"400 Client Error for url: {url}?api_key={key}")
         return fake_get(url, **kwargs)
     caplog.set_level("DEBUG")
     data = mb.collect(mb.BriefConfig(coins=["BTC"]), get=get, post=fake_post, pool=mb.SourcePool())
-    assert "Fed net liquidity (FRED)" in data["unavailable"]
+    assert "Fed net liquidity" in data["unavailable"]
     assert "HTTPError" in caplog.text and "secret-key-123" not in caplog.text
 
+
+
+def test_h41_parses_the_real_release_rows():
+    out = mb.parse_h41(text("h41.htm"))
+    assert out["dates"] == ["2026-09-23", "2026-09-30"]
+    # Week change "- 4,673" and "- 28,410": the week before was higher.
+    assert out["total_assets"] == [("2026-09-23", 6_747_704.0), ("2026-09-30", 6_743_031.0)]
+    assert out["tga"] == [("2026-09-23", 977_084.0), ("2026-09-30", 948_674.0)]
+
+
+def test_h41_reads_a_zero_change_and_a_footnote_free_row():
+    page = ("Week ended Oct 7, 2026 U.S. Treasury, General Account 900,000 0 + 1 "
+            "Total assets 6,000,000 + 12 - 3")
+    out = mb.parse_h41(page)
+    assert out["dates"] == ["2026-09-30", "2026-10-07"]
+    assert out["tga"] == [("2026-09-30", 900_000.0), ("2026-10-07", 900_000.0)]
+    assert out["total_assets"] == [("2026-09-30", 5_999_988.0), ("2026-10-07", 6_000_000.0)]
+
+
+@pytest.mark.parametrize("page", [
+    "<html>Service unavailable</html>",
+    "Week ended Sep 30, 2026 Total assets 6,743,031 - 4,673",  # no TGA row
+    "Week ended Sep 30, 2026 U.S. Treasury, General Account 948,674 - 1 Total assets 6,743 - 4",  # $6.7B: wrong units
+])
+def test_h41_refuses_a_page_it_cannot_read(page):
+    with pytest.raises(ValueError):
+        mb.parse_h41(page)
+
+
+def test_nyfed_rrp_is_billions_summed_per_day():
+    body = {"repo": {"operations": [
+        {"operationDate": "2026-09-30", "operationType": "Reverse Repo", "totalAmtAccepted": 1_000_000_000},
+        {"operationDate": "2026-09-30", "operationType": "Reverse Repo", "totalAmtAccepted": 500_000_000},
+        {"operationDate": "2026-09-29", "operationType": "Repo", "totalAmtAccepted": 9_000_000_000},
+        {"operationDate": "2026-09-29", "operationType": "Reverse Repo", "totalAmtAccepted": 2_000_000_000}]}}
+    assert mb.parse_nyfed_rrp(body) == [("2026-09-29", 2.0), ("2026-09-30", 1.5)]
+    with pytest.raises(ValueError):
+        mb.parse_nyfed_rrp({"repo": {"operations": []}})
+
+
+def test_official_sources_match_fred_on_the_same_week():
+    # Same release week through both routes: the Fed's own numbers and FRED's
+    # copy of them must give the same net liquidity.
+    fed = mb.fetch_net_liquidity_fed(get=fake_get)
+    fred = mb.fetch_net_liquidity_fred(get=fake_get, api_key="")
+    assert fed["as_of"] == fred["as_of"] == "2026-09-30"
+    assert fed["net_b"] == pytest.approx(fred["net_b"], abs=0.01)
+    assert fed["week_change_b"] == pytest.approx(fred["week_change_b"], abs=0.01)
+    assert fed["net_b"] == pytest.approx(6743.031 - 948.674 - 11.539)
+
+
+def test_net_liquidity_prefers_official_sources():
+    urls = []
+
+    def get(url, **kwargs):
+        urls.append(url)
+        return fake_get(url, **kwargs)
+    mb.fetch_net_liquidity(get=get)
+    assert urls == [mb.H41_URL, mb.NYFED_RRP_URL]
+
+
+def test_net_liquidity_falls_back_to_fred_and_says_so(caplog, monkeypatch):
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+
+    def get(url, **kwargs):
+        if url == mb.H41_URL:
+            return Resp(raw="<html>maintenance</html>")
+        return fake_get(url, **kwargs)
+    caplog.set_level("WARNING")
+    out = mb.fetch_net_liquidity(get=get)
+    assert out == mb.fetch_net_liquidity_fred(get=fake_get, api_key="")
+    assert "official sources failed (ValueError); trying FRED" in caplog.text
 
 def test_yahoo_uses_previous_close_not_range_start():
     out = mb.fetch_yahoo("^VIX", get=fake_get)
