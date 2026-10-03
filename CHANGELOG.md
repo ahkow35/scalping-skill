@@ -1,5 +1,12 @@
 # Changelog — scalp skill
 
+## 2026-10-03 — Fed net liquidity via the FRED API on Railway
+FRED's keyless CSV download timed out from Railway's servers on every call
+after the briefing deployed (it answers instantly from a Mac). With the new
+optional `FRED_API_KEY` set, `market_brief.py` reads the same three series
+(WALCL, WTREGEN, RRPONTSYD, same units) from the official FRED API instead;
+without it, the CSV route is unchanged. The key is never logged.
+
 ## 2026-10-03 — liquidity briefing on the Railway watcher
 New `market_brief.py`, run by `railway_watch.py` on its own thread. It sends a
 market-liquidity briefing to the Telegram chat at 08:00 and 20:30 Singapore

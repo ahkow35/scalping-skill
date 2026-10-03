@@ -33,6 +33,10 @@ logger = logging.getLogger("market_brief")
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 LLAMA_URL = "https://stablecoins.llama.fi/stablecoins"
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}"
+# Official FRED API, used when FRED_API_KEY is set: the CSV download above
+# times out from Railway's servers (2026-10-03) while this host answers.
+FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
+FRED_API_LOOKBACK_DAYS = 60
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=5d&interval=1d"
 ETF_URL = "https://api.sosovalue.xyz/openapi/v2/etf/historicalInflowChart"
 CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -236,9 +240,30 @@ def net_liquidity(walcl, tga, rrp):
     return {"net_b": values[1], "week_change_b": values[1] - values[0], "as_of": walcl[-1][0]}
 
 
-def fetch_net_liquidity(get=requests.get):
-    series = {s: parse_fred_csv(_get(get, FRED_URL.format(series=s)).text)
-              for s in ("WALCL", "WTREGEN", "RRPONTSYD")}
+def parse_fred_api(body):
+    """[(date, value)] oldest first, from the FRED API's observations JSON;
+    '.' (no observation) is skipped, as in parse_fred_csv."""
+    rows = [(o["date"], float(o["value"])) for o in body["observations"]
+            if str(o.get("value", "")).strip() not in ("", ".")]
+    if not rows:
+        raise ValueError("no FRED observations")
+    return sorted(rows)
+
+
+def _fred_series(get, series, api_key):
+    if not api_key:
+        return parse_fred_csv(_get(get, FRED_URL.format(series=series)).text)
+    start = (datetime.now(ZoneInfo("UTC")) - timedelta(days=FRED_API_LOOKBACK_DAYS)).date().isoformat()
+    # The key travels in the query string, so it is in the URL of any HTTP
+    # error: collect() logs only the exception's class, never its text.
+    params = {"series_id": series, "api_key": api_key, "file_type": "json", "observation_start": start}
+    return parse_fred_api(_get(get, FRED_API_URL, params=params).json())
+
+
+def fetch_net_liquidity(get=requests.get, api_key=None):
+    """From the FRED API when FRED_API_KEY is set, else the keyless CSV."""
+    api_key = os.environ.get("FRED_API_KEY", "").strip() if api_key is None else api_key
+    series = {s: _fred_series(get, s, api_key) for s in ("WALCL", "WTREGEN", "RRPONTSYD")}
     return net_liquidity(series["WALCL"], series["WTREGEN"], series["RRPONTSYD"])
 
 
