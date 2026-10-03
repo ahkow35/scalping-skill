@@ -1,5 +1,17 @@
 # Changelog — scalp skill
 
+## 2026-10-04 — ZEC added to the briefing, the scalp2 scanner and the Railway recorder
+- Liquidity briefing: `BRIEF_COINS` default is now `BTC,ETH,HYPE,ZEC`
+  (`market_brief.py`, `.railway/railway.ts` and `ACCOUNT-MONITOR.md` agree).
+- scalp2 scanner (`universe2.py`): ZEC is pinned next to HYPE, so the universe
+  is `["HYPE", "ZEC"]` plus the top 3 by realised volatility (5 coins, was 4).
+  ZEC is excluded from the rotation pool so it cannot appear twice.
+- Railway recorder: `RECORDER_COINS: "HYPE,ZEC"` set in `.railway/railway.ts`.
+  Code defaults and the local `scripts/flow_recorder.sh` still record HYPE only.
+  Output files and bucket keys are per coin (`<coin>_<channel>_<day>`), so the
+  two coins do not collide. Needs `railway config plan` then `railway config
+  apply` after merge.
+
 ## 2026-10-03 — Fed net liquidity via the FRED API on Railway
 FRED's keyless CSV download timed out from Railway's servers on every call
 after the briefing deployed (it answers instantly from a Mac). With the new

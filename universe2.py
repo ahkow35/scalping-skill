@@ -1,4 +1,4 @@
-"""scalp2 universe selection: HYPE + top-realized-vol liquid HL perps.
+"""scalp2 universe selection: HYPE + ZEC + top-realized-vol liquid HL perps.
 
 Deterministic, injectable fetchers for tests. BTC is macro input only and
 never a tradable (spec §4).
@@ -27,7 +27,7 @@ def select_universe(now_ms=None, *, meta=None, candle_fetch=None):
     names = [u["name"] for u in meta[0]["universe"]]
     eligible = []
     for name, ctx in zip(names, meta[1]):
-        if name in ("BTC", "HYPE"):
+        if name in ("BTC", "HYPE", "ZEC"):
             continue
         mark = float(ctx["markPx"])
         oi_usdc = float(ctx["openInterest"]) * mark
@@ -40,4 +40,4 @@ def select_universe(now_ms=None, *, meta=None, candle_fetch=None):
         key=lambda c: realized_vol_24h(
             candle_fetch(c, "1h", now_ms - _H24_MS, now_ms)),
         reverse=True)
-    return ["HYPE"] + ranked[:ROTATION_SLOTS]
+    return ["HYPE", "ZEC"] + ranked[:ROTATION_SLOTS]
