@@ -18,6 +18,12 @@
     "name": "HYPE",
     "maxLeverage": 10,
     "marginTableId": 52
+   },
+   {
+    "szDecimals": 2,
+    "name": "ZEC",
+    "maxLeverage": 10,
+    "marginTableId": 52
    }
   ]
  },
@@ -66,6 +72,21 @@
     "88.8084"
    ],
    "dayBaseVlm": "5816404.3700000001"
+  },
+  {
+   "funding": "0.0000125",
+   "openInterest": "1500000.0",
+   "prevDayPx": "40.0",
+   "dayNtlVlm": "120000000.0",
+   "premium": "-0.0000500000",
+   "oraclePx": "41.0",
+   "markPx": "41.02",
+   "midPx": "41.01",
+   "impactPxs": [
+    "41.0",
+    "41.02"
+   ],
+   "dayBaseVlm": "3000000.0"
   }
  ]
 ]

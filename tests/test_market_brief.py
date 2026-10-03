@@ -599,7 +599,7 @@ def test_tick_failure_in_the_fetch_is_contained_by_run_loop(tmp_path):
 
 def test_config_defaults_and_overrides():
     cfg = mb.BriefConfig.from_env({})
-    assert cfg.enabled and cfg.times == ["08:00", "20:30"] and cfg.coins == ["BTC", "ETH", "HYPE"]
+    assert cfg.enabled and cfg.times == ["08:00", "20:30"] and cfg.coins == ["BTC", "ETH", "HYPE", "ZEC"]
     assert (cfg.funding_alert_pct, cfg.oi_drop_pct, cfg.event_minutes) == (0.005, 5.0, 60.0)
     cfg = mb.BriefConfig.from_env({"BRIEF_ENABLED": "false", "BRIEF_TIMES": "9:5,bad", "BRIEF_COINS": "sol, btc",
                                    "BRIEF_OI_DROP_PCT": "x"})

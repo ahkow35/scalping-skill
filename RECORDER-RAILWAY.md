@@ -63,7 +63,7 @@ own bucket docs.
 
 Also set, optionally:
 
-- `RECORDER_COINS` — comma-separated, default `HYPE`.
+- `RECORDER_COINS` — comma-separated, default `HYPE`; `.railway/railway.ts` sets `HYPE,ZEC`, so the Railway recorder now captures HYPE and ZEC (files are named per coin, so the two never share a file or bucket key).
 - `RECORDER_KEEP_DAYS` — default `3`.
 - `DATA_DIR` — default `/data` (matches the attached volume).
 - `RECORDER_DISK_FLOOR_GB` — free-space warning floor, default `10`; `.railway/railway.ts` sets `2` to suit the 5 GB volume. Below it the recorder logs a warning and reports `disk_low` in `/status`; it never deletes anything because of it.
@@ -145,4 +145,6 @@ step 1 — never paste them into chat.)
 ## Costs (measured in the 2026-09-27 recorder acceptance run)
 
 About 13 KB/minute compressed for HYPE alone — roughly 20 MB/day, 0.6
-GB/month.
+GB/month. With ZEC added the Railway recorder is expected to roughly double
+that if ZEC trades at a similar rate (unmeasured; check `/status` and the
+volume graph after the first full day).

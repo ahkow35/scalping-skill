@@ -24,7 +24,7 @@ export default defineRailway(() => {
     healthcheckTimeout: 30,
     replicas: { "asia-southeast1-eqsg3a": 1 },
     volumeMounts: { "/data": recorderVolume },
-    env: { PORT: preserve(), RECORDER_DISK_FLOOR_GB: "2", S3_ACCESS_KEY_ID: preserve(), S3_BUCKET: preserve(), S3_ENDPOINT: preserve(), S3_REGION: preserve(), S3_SECRET_ACCESS_KEY: preserve() },
+    env: { PORT: preserve(), RECORDER_COINS: "HYPE,ZEC", RECORDER_DISK_FLOOR_GB: "2", S3_ACCESS_KEY_ID: preserve(), S3_BUCKET: preserve(), S3_ENDPOINT: preserve(), S3_REGION: preserve(), S3_SECRET_ACCESS_KEY: preserve() },
   });
 
   // Account watcher (ACCOUNT-MONITOR.md).
@@ -41,7 +41,7 @@ export default defineRailway(() => {
       RECORDER_STATUS_URL: "http://${{recorder.RAILWAY_PRIVATE_DOMAIN}}:8080/status",
       // Liquidity briefing (market_brief.py): plain defaults, not preserve() —
       // none of these exist on Railway yet. Same values as the code defaults.
-      BRIEF_ENABLED: "true", BRIEF_TIMES: "08:00,20:30", BRIEF_COINS: "BTC,ETH,HYPE",
+      BRIEF_ENABLED: "true", BRIEF_TIMES: "08:00,20:30", BRIEF_COINS: "BTC,ETH,HYPE,ZEC",
       BRIEF_FUNDING_ALERT_PCT: "0.005", BRIEF_OI_DROP_PCT: "5", BRIEF_EVENT_MINUTES: "60",
     },
   });

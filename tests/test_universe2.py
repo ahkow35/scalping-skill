@@ -29,17 +29,19 @@ def test_select_universe_hype_first_btc_excluded_floors_applied():
     rows = [
         ("BTC",  2_400_000_000, 1_800_000_000, 65000.0),
         ("HYPE", 1_300_000_000,   280_000_000, 58.0),
+        ("ZEC",   400_000_000,   120_000_000, 40.0),
         ("SOL",    350_000_000,   110_000_000, 75.0),
         ("WIF",     60_000_000,    30_000_000, 2.0),
         ("DUST",     1_000_000,       500_000, 0.1),   # fails floors
     ]
-    vols = {"SOL": [0.001] * 24, "WIF": [0.01] * 24, "HYPE": [0.005] * 24}
+    vols = {"SOL": [0.001] * 24, "WIF": [0.01] * 24, "HYPE": [0.005] * 24, "ZEC": [0.02] * 24}
 
     def fake_fetch(coin, interval, s, e):
         return _candles(vols[coin])
 
     got = universe2.select_universe(0, meta=_meta(rows), candle_fetch=fake_fetch)
-    assert got[0] == "HYPE"
+    assert got[:2] == ["HYPE", "ZEC"]
+    assert got.count("ZEC") == 1 and len(got) == 4   # pinned, not also in rotation
     assert "BTC" not in got and "DUST" not in got
     # WIF (vol 0.24) ranks above SOL (0.024)
-    assert got[1] == "WIF"
+    assert got[2] == "WIF"

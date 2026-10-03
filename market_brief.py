@@ -49,7 +49,7 @@ TZ_LABEL = "SGT"
 MAX_TEXT = 4000
 
 DEFAULT_TIMES = "08:00,20:30"
-DEFAULT_COINS = "BTC,ETH,HYPE"
+DEFAULT_COINS = "BTC,ETH,HYPE,ZEC"
 DEFAULT_FUNDING_ALERT_PCT = 0.005       # hourly funding, in percent
 DEFAULT_OI_DROP_PCT = 5.0               # open-interest drop within 1 hour
 DEFAULT_EVENT_MINUTES = 60
