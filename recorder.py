@@ -394,6 +394,12 @@ class FlowRecorder:
         self._connected = False
         self._stop = None             # set in run() (needs a live loop)
 
+    @property
+    def connected(self):
+        """Live socket state, readable from another thread (a single bool).
+        /flow uses it so a drop is seen at once, not at the next status tick."""
+        return self._connected
+
     # -- message handling (pure-ish: no socket I/O, easy to unit test) --
 
     def handle_trade(self, coin, trade):
@@ -859,7 +865,7 @@ class _CoinTail:
 
     def reset(self):
         self.offsets = {}        # plain trades file -> bytes already consumed
-        self.gz_done = set()     # rotated .gz files already read
+        self.gz_done = {}        # rotated .gz file already read -> its size then
         self.minutes = {}        # minute start ms -> _Minute
         self.seen = set()        # tids inside the window (dedupe)
         self.gaps = {}           # reconnect_ts_ms -> gap dict
@@ -949,7 +955,6 @@ class _CoinTail:
                 except ValueError:
                     continue
                 self.ingest(record, now, win_start)
-        self.gz_done.add(path)
 
     def sync(self, out_dir, coin, now, win_start, window_ms):
         day_ms = 86_400_000
@@ -957,11 +962,16 @@ class _CoinTail:
                   for d in range(((now - window_ms) // day_ms) * day_ms, now + 1, day_ms)]
         keep = set(plains) | {p + ".gz" for p in plains}
         self.offsets = {p: o for p, o in self.offsets.items() if p in keep}
-        self.gz_done &= keep
+        self.gz_done = {p: n for p, n in self.gz_done.items() if p in keep}
         for plain in plains:
             gz = plain + ".gz"
-            if gz not in self.gz_done and os.path.exists(gz):
-                self._read_gz(gz, now, win_start)
+            if os.path.exists(gz):
+                size = os.path.getsize(gz)
+                if gz not in self.gz_done:
+                    self._read_gz(gz, now, win_start)
+                    self.gz_done[gz] = size
+                elif self.gz_done[gz] != size:
+                    return False             # archive gained a member (clock stepped back): rebuild
             if not self._read_new_lines(plain, now, win_start):
                 return False
         return True

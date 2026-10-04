@@ -692,7 +692,9 @@ def run():
         coin = resolve_flow_coin(config["coins"], requested)
         if coin is None:
             return None
-        connected = build_full_status(snapshot, uploader)["connected"]
+        # Both must agree: the live socket flag (a drop shows at once) and the
+        # status snapshot (which also reads a stalled recorder as disconnected).
+        connected = fr.connected and build_full_status(snapshot, uploader)["connected"]
         return tail.read(coin, connected=connected)
 
     server = DualStackHTTPServer(("::", config["port"]), make_handler(snapshot, uploader, flow))

@@ -1,5 +1,23 @@
 # Changelog — scalp skill
 
+## 2026-10-04 — Cross-review fixes to the recorder tape (Codex, round 1)
+
+Five ways an incomplete or stale tape could still read as reliable, all closed:
+
+- **Late-starting or holed tape.** Coverage now counts every closed minute of
+  the window, not just from the tape's first trade. A minute the exchange
+  traded in but the tape has nothing for makes the window not complete
+  (new fallback reason: `capture incomplete`).
+- **Recorder dropped between status ticks.** `/flow` now reads the live socket
+  flag as well as the 30-second status snapshot, so a drop shows at once.
+- **Tape ageing out during the candle requests.** Freshness is checked again
+  after the candles arrive.
+- **Wrong coin.** A tape whose `coin` is not the one asked for is refused.
+- **Archive that grew.** The cache re-reads a finished day's `.gz` if its size
+  changed (the writer appends a member when the clock steps back over midnight).
+
+No threshold changed. 818 tests pass.
+
 ## 2026-10-04 — Review fixes to the recorder tape, and BTC on the recorder
 An independent review blocked the tape change; this round fixes it.
 - Tape age no longer goes negative: the tape is measured on the recorder's own

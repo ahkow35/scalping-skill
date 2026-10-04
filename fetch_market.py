@@ -747,6 +747,7 @@ def bucket_taker_delta_tape(tape, candles_1m,
         count = sum(r["count"] for r in in_window)
         total = buy + sell
         gap_count = sum(1 for g in tape["gaps"] if g["reconnect_ts_ms"] >= win_start)
+        hole = False   # a minute the exchange traded in but the tape has nothing for
 
         has_candles = mins <= TAPE_CANDLE_MINUTES
         coverage = None
@@ -754,12 +755,15 @@ def bucket_taker_delta_tape(tape, candles_1m,
         if not has_candles:
             n_known = False
         elif first_ms is not None and last_ms is not None:
-            span_start = -(-max(first_minute, first_ms) // _MINUTE_MS) * _MINUTE_MS
+            # Every closed minute of the window counts, from its first whole
+            # minute: a tape that starts late (or has a silent hole) must not
+            # shorten its own coverage test.
             span_end = min(now_ms, last_ms) // _MINUTE_MS * _MINUTE_MS
-            compared = range(span_start, span_end, _MINUTE_MS)
+            compared = range(first_minute, span_end, _MINUTE_MS)
             if len(compared) > 0:
                 ns = [n_by_minute.get(t) for t in compared]
                 n_known = all(n is not None for n in ns)
+                hole = any(n and t not in rows for t, n in zip(compared, ns))
                 if n_known and sum(ns) > 0:
                     recorded = sum(rows[t]["count"] for t in compared if t in rows)
                     coverage = round(min(100.0, 100.0 * recorded / sum(ns)), 1)
@@ -770,7 +774,7 @@ def bucket_taker_delta_tape(tape, candles_1m,
 
         if not has_candles:
             complete = None
-        elif gap_count or not tape.get("connected"):
+        elif gap_count or hole or not tape.get("connected"):
             complete = False
         else:
             complete = True if (n_known and coverage is not None) else None
@@ -814,6 +818,8 @@ def tape_fallback_reason(buckets, tape, interval="5m"):
         return "gap"
     if b["coverage_pct"] is None:
         return "candle counts missing"
+    if b["capture_complete"] is False:
+        return "capture incomplete"
     return "coverage low"
 
 
@@ -829,12 +835,23 @@ def _tape_candles(coin, tape_now_ms, candles):
     return list(rows.values())
 
 
+def _tape_is_stale(tape, our_now):
+    """The tape's clock and ours more than a minute apart, or its last trade
+    older than the 60 s freshness rule on OUR clock. The rule holds on
+    whichever clock is later, so a slow response or slow candle requests
+    cannot stretch it."""
+    if abs(our_now - tape["now_ms"]) > TAPE_CLOCK_TOLERANCE_MS:
+        return True
+    last_ms = tape.get("last_trade_ms")
+    return last_ms is not None and our_now - last_ms > flow_mod.DEFAULT_PARAMS["max_sample_age_ms"]
+
+
 def fetch_tape_taker_delta(coin, *, fetch_flow=None, candles=None, clock=None):
     """(buckets, None) from the recorder tape when its 5m window is reliable,
     else (None, reason) with reason one of: watcher not configured,
     unauthorized, bad request, recorder not configured, coin not recorded,
     unreachable, malformed tape, candles unavailable, stale, recorder
-    disconnected, gap, candle counts missing, coverage low. Never raises; the
+    disconnected, gap, candle counts missing, capture incomplete, coverage low. Never raises; the
     caller then uses the REST buckets exactly as before. The REST sample is
     never treated as confirmation.
 
@@ -854,13 +871,9 @@ def fetch_tape_taker_delta(coin, *, fetch_flow=None, candles=None, clock=None):
         tape_now = tape["now_ms"]
         if isinstance(tape_now, bool) or not isinstance(tape_now, int):
             return None, "malformed tape"
-        our_now = clock()
-        if abs(our_now - tape_now) > TAPE_CLOCK_TOLERANCE_MS:
-            return None, "stale"
-        # The 60 s freshness rule holds on whichever clock is later, so a slow
-        # response cannot stretch it: body age plus trade age stays within it.
-        last_ms = tape.get("last_trade_ms")
-        if last_ms is not None and our_now - last_ms > flow_mod.DEFAULT_PARAMS["max_sample_age_ms"]:
+        if str(tape.get("coin", "")).upper() != str(coin).upper():
+            return None, "malformed tape"     # never judge one coin on another's tape
+        if _tape_is_stale(tape, clock()):
             return None, "stale"
     except Exception:
         return None, "malformed tape"
@@ -873,6 +886,8 @@ def fetch_tape_taker_delta(coin, *, fetch_flow=None, candles=None, clock=None):
     except Exception:
         return None, "malformed tape"
     reason = tape_fallback_reason(buckets, tape)
+    if reason is None and _tape_is_stale(tape, clock()):
+        reason = "stale"                      # it aged out while the candles were fetched
     return (buckets, None) if reason is None else (None, reason)
 
 

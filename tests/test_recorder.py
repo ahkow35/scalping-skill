@@ -953,3 +953,28 @@ def test_tail_cache_is_per_coin(tmp_path):
                 [_tape_trade(FLOW_NOW - 5_000, "B", tid)])
     assert _same(cache, tmp_path, FLOW_NOW, "HYPE")["coin"] == "HYPE"
     assert _same(cache, tmp_path, FLOW_NOW, "ZEC")["coin"] == "ZEC"
+
+
+def test_tail_cache_rereads_an_archive_that_gained_a_member(tmp_path):
+    # The writer appends a second gzip member to a finished day when the clock
+    # steps back across midnight and recovers between two requests.
+    import gzip
+    out = str(tmp_path)
+    cache = rec.FlowTailCache(out)
+    gz = rec.file_path(out, "HYPE", "trades", rec.day_str_utc(MIDNIGHT - 1)) + ".gz"
+    with gzip.open(gz, "wt") as f:
+        f.write(json.dumps(_tape_trade(MIDNIGHT - 120_000, "B", 1)) + "\n")
+    now = MIDNIGHT + 60_000
+    assert sum(r["count"] for r in _same(cache, tmp_path, now)["rows"]) == 1
+    with gzip.open(gz, "at") as f:
+        f.write(json.dumps(rec.make_gap_record("HYPE", "trades", MIDNIGHT - 90_000, MIDNIGHT - 80_000)) + "\n")
+        f.write(json.dumps(_tape_trade(MIDNIGHT - 70_000, "A", 2)) + "\n")
+    got = _same(cache, tmp_path, now + 1_000)
+    assert sum(r["count"] for r in got["rows"]) == 2 and len(got["gaps"]) == 1
+
+
+def test_recorder_exposes_its_live_connection_flag(tmp_path):
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path))
+    assert fr.connected is False
+    fr._connected = True
+    assert fr.connected is True

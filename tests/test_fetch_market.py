@@ -910,3 +910,48 @@ def test_assemble_with_the_tape_stubs_only_the_network_boundaries(monkeypatch):
     assert out["taker_delta_source"] == {"used": "ws_recorder", "fallback_reason": None}
     assert out["taker_delta"]["5m"]["reliable"] is True
     assert out["flow"]["coverage_ok"] is True
+
+
+def test_tape_that_starts_late_without_a_gap_marker_is_not_complete():
+    # Only the last 150 s recorded, no gap record, the exchange traded all window.
+    start = TAPE_NOW - 150_000
+    rows = [{"t_ms": t, "buy_usdc": 100.0, "sell_usdc": 50.0, "count": 10}
+            for t in range(start // MIN * MIN, TAPE_M + 1, MIN)]
+    five = _five(_tape(rows=rows, first_trade_ms=start), _candles())
+    assert five["capture_complete"] is False and five["reliable"] is False
+    assert five["coverage_pct"] < 100.0
+    tape = _tape(rows=rows, first_trade_ms=start)
+    assert fm.tape_fallback_reason(fm.bucket_taker_delta_tape(tape, _candles()), tape) in (
+        "capture incomplete", "coverage low")
+
+
+def test_tape_with_a_silent_hole_in_a_traded_minute_is_not_complete():
+    tape = _tape()
+    tape["rows"] = [r for r in tape["rows"] if r["t_ms"] != TAPE_M - 2 * MIN]
+    five = _five(tape, _candles())
+    assert five["coverage_pct"] == 75.0                       # above the floor, still not complete
+    assert five["capture_complete"] is False and five["reliable"] is False
+    assert fm.tape_fallback_reason(fm.bucket_taker_delta_tape(tape, _candles()), tape) == "capture incomplete"
+
+
+def test_a_tape_for_another_coin_is_refused():
+    for body in (_tape(), _tape(coin=None)):
+        got = fm.fetch_tape_taker_delta("ZEC", fetch_flow=lambda c, b=body: (b, None),
+                                        candles=_candles_fn(), clock=lambda: TAPE_NOW)
+        assert got == (None, "malformed tape")
+    ok, why = fm.fetch_tape_taker_delta("hype", fetch_flow=lambda c: (_tape(), None),
+                                        candles=_candles_fn(), clock=lambda: TAPE_NOW)
+    assert why is None and ok["5m"]["reliable"] is True
+
+
+def test_a_tape_that_ages_out_while_candles_are_fetched_is_stale():
+    # last trade 45 s old at the first check; each of two candle calls takes 15 s
+    clock = {"now": TAPE_NOW}
+
+    def slow_candles(coin, iv, start, end):
+        clock["now"] += 15_000
+        return _candles_fn()(coin, iv, start, end)
+
+    got = fm.fetch_tape_taker_delta("HYPE", fetch_flow=lambda c: (_tape(last_trade_ms=TAPE_NOW - 45_000), None),
+                                    candles=slow_candles, clock=lambda: clock["now"])
+    assert got == (None, "stale")

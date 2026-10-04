@@ -272,7 +272,7 @@ an exchange count), coverage is at least 50% and the last trade is at most 60 s
 old. `out["taker_delta_source"]` says which source was used and, when the tape
 was not, why (`fallback_reason`: watcher not configured, unauthorized, bad request,
 recorder not configured, coin not recorded, unreachable, malformed tape,
-candles unavailable, stale, recorder disconnected, gap, candle counts missing,
+candles unavailable, stale, recorder disconnected, gap, candle counts missing, capture incomplete,
 coverage low). Only the `/scalp` command-line entry point looks the tape up
 (`assemble(use_tape=True)`); the scan2 scanner never does. Only the 5m, 15m and
 1h windows get coverage; the 4h window has coverage null and is never
