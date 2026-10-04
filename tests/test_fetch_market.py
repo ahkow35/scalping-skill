@@ -641,7 +641,7 @@ def test_tape_coverage_maths_recorded_over_exchange_trade_count():
     assert _five(_tape(), _candles(n=20))["reliable"] is True      # exactly the 50 floor
     low = _five(_tape(), _candles(n=25))
     assert low["coverage_pct"] == 40.0 and low["reliable"] is False
-    assert low["capture_complete"] is True                          # complete != covered enough
+    assert low["capture_complete"] is False                         # every minute is under the floor
     assert _five(_tape(), _candles(n=5))["coverage_pct"] == 100.0   # capped, never above 100
 
 
@@ -972,3 +972,19 @@ def test_the_last_closed_minute_is_inside_the_coverage_test():
     # ...and a traded last-closed minute with no tape row at all is a hole.
     tape["rows"] = [r for r in tape["rows"] if r["t_ms"] != last_closed]
     assert _five(tape, candles)["capture_complete"] is False
+
+
+def test_one_thin_minute_is_not_diluted_by_the_rest_of_the_window():
+    # Every minute caught all 1,000 trades except the last closed one: 1 of 1,000.
+    last_closed = TAPE_M - MIN
+    tape = _tape(last_trade_ms=TAPE_M - 10_000)
+    tape["rows"] = [dict(r, count=1 if r["t_ms"] == last_closed else 1000)
+                    for r in tape["rows"] if r["t_ms"] != TAPE_M]
+    buckets = fm.bucket_taker_delta_tape(tape, _candles(n=1000))
+    assert [buckets[w]["coverage_pct"] for w in ("5m", "15m", "1h")] == [75.0, 92.9, 98.3]
+    for w in ("5m", "15m", "1h"):
+        assert buckets[w]["capture_complete"] is False and buckets[w]["reliable"] is False
+    assert fm.tape_fallback_reason(buckets, tape) == "capture incomplete"
+    got = fm.fetch_tape_taker_delta("HYPE", fetch_flow=lambda c: (tape, None),
+                                    candles=lambda *a: _candles(n=1000), clock=lambda: TAPE_NOW)
+    assert got == (None, "capture incomplete")

@@ -716,9 +716,10 @@ def bucket_taker_delta_tape(tape, candles_1m,
     n, over every whole CLOSED 1m minute of the window (only the current
     partial minute is left out), capped at 100; None if any such
     minute has no candle n, or no minute qualifies. capture_complete is True
-    only when every compared minute had an n, no gap record falls in the
-    window and the recorder was connected; False when a gap or disconnect is
-    known; None when it cannot be told. reliable is True only when
+    only when every compared minute had an n and itself reached min_coverage,
+    no gap record falls in the window and the recorder was connected; False
+    when a gap, a disconnect or a thin or missing minute is known; None when
+    it cannot be told. reliable is True only when
     capture_complete, coverage_pct >= min_coverage and the last trade is at
     most max_sample_age_ms old (both from flow.DEFAULT_PARAMS). Windows longer
     than the candles supplied (TAPE_CANDLE_MINUTES, so 4h) keep their
@@ -747,7 +748,7 @@ def bucket_taker_delta_tape(tape, candles_1m,
         count = sum(r["count"] for r in in_window)
         total = buy + sell
         gap_count = sum(1 for g in tape["gaps"] if g["reconnect_ts_ms"] >= win_start)
-        hole = False   # a minute the exchange traded in but the tape has nothing for
+        hole = False   # a traded minute where the tape is missing or below the coverage floor
 
         has_candles = mins <= TAPE_CANDLE_MINUTES
         coverage = None
@@ -764,7 +765,10 @@ def bucket_taker_delta_tape(tape, candles_1m,
             if len(compared) > 0:
                 ns = [n_by_minute.get(t) for t in compared]
                 n_known = all(n is not None for n in ns)
-                hole = any(n and t not in rows for t, n in zip(compared, ns))
+                # Each minute must clear the floor on its own, so a full hour
+                # cannot dilute one minute that lost most of its trades.
+                hole = any(n and 100.0 * (rows[t]["count"] if t in rows else 0) < min_coverage * n
+                           for t, n in zip(compared, ns))
                 if n_known and sum(ns) > 0:
                     recorded = sum(rows[t]["count"] for t in compared if t in rows)
                     coverage = round(min(100.0, 100.0 * recorded / sum(ns)), 1)
@@ -819,9 +823,9 @@ def tape_fallback_reason(buckets, tape, interval="5m"):
         return "gap"
     if b["coverage_pct"] is None:
         return "candle counts missing"
-    if b["capture_complete"] is False:
-        return "capture incomplete"
-    return "coverage low"
+    if b["coverage_pct"] < flow_mod.DEFAULT_PARAMS["min_coverage"]:
+        return "coverage low"
+    return "capture incomplete"
 
 
 def _tape_candles(coin, tape_now_ms, candles):

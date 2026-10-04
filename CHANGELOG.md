@@ -1,5 +1,15 @@
 # Changelog — scalp skill
 
+## 2026-10-05 — Cross-review round 3: each minute must clear the coverage floor
+
+- **One thin minute hidden by a full window.** A minute that caught 1 of 1,000
+  trades was averaged away by the complete minutes around it (5m still read
+  75%, 1h 98%). Every compared minute must now reach the same 50% floor on its
+  own, or the window is not complete (`capture incomplete`). `flow.py`
+  thresholds are unchanged. Not yet checked against live data: if the
+  exchange's per-minute trade counts and the recorder's differ in normal
+  running, this shows as extra WAITs, never as a false confirmation.
+
 ## 2026-10-05 — Cross-review round 2: the newest closed minute now counts
 
 - **Tape that thins out at the end.** The coverage test stopped at the minute
