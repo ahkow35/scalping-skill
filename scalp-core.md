@@ -151,7 +151,7 @@ session timing logic is only meaningful for US-listed assets (NYSE hours
 indicative and lean on instrument-specific event awareness instead.
 
 The output includes `taker_delta` — aggressor flow per window. For coins the
-Railway recorder captures (HYPE, ZEC, PUMP) it is the recorder's complete tape
+Railway recorder captures (HYPE, ZEC, PUMP, BTC) it is the recorder's complete tape
 (`source: "ws_recorder"`) when that tape is complete and fresh; otherwise it is
 the sampled REST cache (`source: "recent_trades_rest"`, `reliable` false), and
 `out["taker_delta_source"].fallback_reason` says why the tape was not used. Use

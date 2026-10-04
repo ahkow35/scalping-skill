@@ -262,7 +262,7 @@ validate a current window.
 
 The Railway recorder (`recorder.py` + `railway_record.py`, holds a WebSocket
 connection open and writes an append-only tape of every trade) DOES feed this
-gate for the coins it captures (`RECORDER_COINS`, currently HYPE, ZEC, PUMP).
+gate for the coins it captures (`RECORDER_COINS`, currently HYPE, ZEC, PUMP, BTC).
 `fetch_market.py` asks the Railway watcher's token-protected `/flow` for the
 primary coin's per-minute tape, and builds the same 5m/15m/1h/4h windows with
 `source: "ws_recorder"`. `coverage_pct` is recorded trades over Hyperliquid's
@@ -270,9 +270,13 @@ own per-candle trade count; `reliable` is true only when the capture is
 complete (no gap in the window, recorder connected, every compared minute has
 an exchange count), coverage is at least 50% and the last trade is at most 60 s
 old. `out["taker_delta_source"]` says which source was used and, when the tape
-was not, why (`fallback_reason`: not configured, unreachable, coin not
-recorded, stale, recorder disconnected, gap, candle counts missing, coverage
-low).
+was not, why (`fallback_reason`: watcher not configured, unauthorized, bad request,
+recorder not configured, coin not recorded, unreachable, malformed tape,
+candles unavailable, stale, recorder disconnected, gap, candle counts missing,
+coverage low). Only the `/scalp` command-line entry point looks the tape up
+(`assemble(use_tape=True)`); the scan2 scanner never does. Only the 5m, 15m and
+1h windows get coverage; the 4h window has coverage null and is never
+`reliable`.
 
 **Fail closed.** If the recorder is unreachable or stale, there is a gap in the
 window, exchange trade counts are missing, or the coin is not recorded, the

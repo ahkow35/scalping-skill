@@ -187,12 +187,12 @@ def test_ws_recorder_bucket_is_accepted_and_rest_bucket_of_the_same_shape_is_not
     now = (1_750_000_000_000 // minute) * minute + 30_000
     start = now - 240 * minute
     first = -(-start // minute) * minute
-    tape = {"window_start_ms": start, "connected": True, "first_trade_ms": first + 1_000,
+    tape = {"now_ms": now, "window_start_ms": start, "connected": True, "first_trade_ms": first + 1_000,
             "last_trade_ms": now - 5_000, "gaps": [],
             "rows": [{"t_ms": t, "buy_usdc": 70.0, "sell_usdc": 30.0, "count": 10}
                      for t in range(first, now - 30_000 + 1, minute)]}
     candles = [{"t_ms": t, "n": 10} for t in range(now - 30_000 - 241 * minute, now, minute)]
-    buckets = fm.bucket_taker_delta_tape(tape, candles, now)
+    buckets = fm.bucket_taker_delta_tape(tape, candles)
     good = flow.classify({}, buckets, now_ms=now)
     assert good["coverage_ok"] is True
     assert good["capture_reliable"] is True

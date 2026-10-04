@@ -38,9 +38,21 @@ threshold (`flow.DEFAULT_PARAMS` unchanged; the gate stays cut-only).
 A standing block is removed: with a complete tape, `coverage_ok` can be true
 and live action verdicts become possible again, on entry logic that is still
 unvalidated. The 58/42 buyer/seller thresholds have never run against a
-complete tape. Reading four hours of trades files happens on the recorder's
-HTTP thread per request; recording is not touched, but the cost grows with
-trade rate and has not been measured on Railway. A quiet minute with no
+complete tape. The recorder's HTTP side keeps an incremental tail cache per
+coin (`recorder.FlowTailCache`, its own lock, nothing shared with the recording
+loop): the first request after a restart parses the day's file once (measured
+about 1 s for 300,000 trades on a laptop; Railway not yet measured), later
+requests read only the bytes appended since, plus the finished day's `.gz` once
+across UTC midnight. Memory is proportional to the trades in the 4 h window
+(about 26 MB for 300,000 on a laptop). The pure `aggregate_flow` full read
+remains the reference, and a test asserts the cache equals it. The tape is
+judged on the recorder's own clock (`now_ms` in the body), guarded against our
+clock by 60 s. Only the 5m, 15m and 1h windows get coverage (the last hour of
+1m candles, fetched in chunks of at most 50 bars); the 4h window keeps its sums
+but is never `reliable`. The lookup is opt-in (`assemble(use_tape=True)`, passed
+by the `/scalp` command-line entry point only) so the scan2 scanner makes no
+extra network calls. BTC joins the recorder (`HYPE,ZEC,PUMP,BTC`); it is the
+busiest market, so check the volume after its first full day. A quiet minute with no
 exchange candle counts as a missing count and makes the window unreliable, a
 deliberately conservative choice that may bite thinly traded coins such as
 PUMP. Merging redeploys both Railway services.

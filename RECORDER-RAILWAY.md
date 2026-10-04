@@ -63,7 +63,7 @@ own bucket docs.
 
 Also set, optionally:
 
-- `RECORDER_COINS` — comma-separated, default `HYPE`; `.railway/railway.ts` sets `HYPE,ZEC,PUMP`, so the Railway recorder now captures HYPE, ZEC and PUMP (files are named per coin, so the two never share a file or bucket key).
+- `RECORDER_COINS` — comma-separated, default `HYPE`; `.railway/railway.ts` sets `HYPE,ZEC,PUMP,BTC`, so the Railway recorder captures those four coins (files are named per coin, so coins never share a file or bucket key). `GET /flow` matches the requested coin case-insensitively against this list and uses the configured spelling for file names.
 - `RECORDER_KEEP_DAYS` — default `3`.
 - `DATA_DIR` — default `/data` (matches the attached volume).
 - `RECORDER_DISK_FLOOR_GB` — free-space warning floor, default `10`; `.railway/railway.ts` sets `2` to suit the 5 GB volume. Below it the recorder logs a warning and reports `disk_low` in `/status`; it never deletes anything because of it.
@@ -155,6 +155,14 @@ step 1 — never paste them into chat.)
 ## Costs (measured in the 2026-09-27 recorder acceptance run)
 
 About 13 KB/minute compressed for HYPE alone — roughly 20 MB/day, 0.6
-GB/month. With ZEC and PUMP added the Railway recorder is expected to grow
+GB/month. With ZEC, PUMP and BTC added the Railway recorder is expected to grow
 with their trade rates (unmeasured; check `/status` and the volume graph after
-the first full day, and the 5 GB volume headroom).
+the first full day, and the 5 GB volume headroom). BTC is the busiest market,
+so it will be the largest file by a wide margin: check the volume's free space
+after its first full day (the disk floor `RECORDER_DISK_FLOOR_GB` stops
+recording before the volume fills, but a stopped recorder means no tape).
+
+`GET /flow` keeps an in-memory tail cache per coin (a few tens of MB for a
+busy coin's four hours): the first request after a restart reads the day's
+file once (about 1 s per 300,000 trades), later requests read only the bytes
+appended since the last one.

@@ -25,6 +25,7 @@ DEFAULT_DIR = Path(__file__).resolve().parent / ".account_monitor"
 WATCHER_TOKEN_SERVICE = "scalp-watcher-report-token"
 WATCHER_KEYCHAIN_TIMEOUT_S = 5
 WATCHER_REQUEST_TIMEOUT_S = 10
+FLOW_REQUEST_TIMEOUT_S = 5
 WATCHER_FRESHNESS_S = 60
 WATCHER_FUTURE_SKEW_S = 5
 
@@ -204,33 +205,45 @@ def resolve_watcher_access(data_dir, env, keychain):
 
 
 def remote_flow(coin, data_dir=DEFAULT_DIR, *, env=None, get=None, keychain=None,
-                timeout=WATCHER_REQUEST_TIMEOUT_S):
+                timeout=FLOW_REQUEST_TIMEOUT_S):
     """(payload, None) from the watcher's token-protected GET /flow?coin=X, or
-    (None, reason) with reason one of "unreachable", "coin not recorded",
-    "not configured" or "error". Read-only; never raises and never includes the
-    token or the Authorization header in what it returns."""
+    (None, reason) with reason one of "watcher not configured", "unauthorized",
+    "bad request", "recorder not configured", "coin not recorded",
+    "unreachable" or "malformed tape". Read-only; never raises and never
+    includes the token, the Authorization header or any response text."""
     env = os.environ if env is None else env
     get = requests.get if get is None else get
     keychain = read_keychain_watcher_token if keychain is None else keychain
     url, token, problem = resolve_watcher_access(data_dir, env, keychain)
     if problem:
-        return None, "not configured"
+        return None, "watcher not configured"
     try:
         response = get(url + "/flow", params={"coin": coin}, headers={"Authorization": f"Bearer {token}"},
                        timeout=timeout, allow_redirects=False)
     except requests.RequestException:
         return None, "unreachable"
-    if response.status_code == 404:
-        return None, "coin not recorded"
-    if response.status_code != 200:
+    status = response.status_code
+    if status == 401:
+        return None, "unauthorized"
+    if status == 400:
+        return None, "bad request"
+    if status == 503:
+        return None, "recorder not configured"
+    if status not in (200, 404):
         return None, "unreachable"
     try:
         if token.encode() in response.content:
-            return None, "error"
+            return None, "malformed tape"
         payload = json.loads(response.content)
     except (ValueError, TypeError):
-        return None, "error"
-    return (payload, None) if isinstance(payload, dict) else (None, "error")
+        # A 404 that is not the recorder's JSON is a watcher without /flow.
+        return None, ("unreachable" if status == 404 else "malformed tape")
+    if not isinstance(payload, dict):
+        return None, "unreachable" if status == 404 else "malformed tape"
+    if status == 404:
+        return None, ("coin not recorded" if payload.get("error") == "coin_not_recorded"
+                      else "unreachable")
+    return payload, None
 
 
 def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=None,

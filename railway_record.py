@@ -544,7 +544,7 @@ def build_full_status(snapshot, uploader, *, status_interval_s=STATUS_INTERVAL_S
     return merged
 
 
-# ── HTTP: /health, /status, /flow — stdlib only, no secrets, dual-stack ───────────
+# ── HTTP: /health, /status, /flow — stdlib only, no secrets, dual-stack ────
 
 class DualStackHTTPServer(ThreadingHTTPServer):
     """Binds `::` so the service is reachable over Railway's IPv6 private
@@ -588,7 +588,7 @@ def make_handler(snapshot, uploader, flow=None):
         def do_GET(self):
             url = urlsplit(self.path)
             if url.path == "/flow" and flow is not None:
-                coin = (parse_qs(url.query).get("coin") or [""])[0].strip().upper()
+                coin = (parse_qs(url.query).get("coin") or [""])[0].strip()
                 body = flow(coin) if coin else None
                 if body is None:
                     self._respond_json(404, {"error": "coin_not_recorded", "coin": coin})
@@ -664,6 +664,14 @@ def build_s3_client(s3_config, make_client=make_real_s3_client):
     return client, s3_config.bucket, f"{s3_config.endpoint}|{s3_config.bucket}"
 
 
+def resolve_flow_coin(coins, requested):
+    """The configured spelling of `requested` (matched case-insensitively), or
+    None when this recorder does not capture it. Files are named by the
+    configured spelling, so that is what callers must use for paths."""
+    wanted = requested.upper()
+    return next((c for c in coins if c.upper() == wanted), None)
+
+
 def run():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     config = parse_env()
@@ -678,11 +686,14 @@ def run():
                         keep_days=config["keep_days"])
     uploader.start()
 
-    def flow(coin):
-        if coin not in config["coins"]:
+    tail = rec.FlowTailCache(config["out_dir"])
+
+    def flow(requested):
+        coin = resolve_flow_coin(config["coins"], requested)
+        if coin is None:
             return None
         connected = build_full_status(snapshot, uploader)["connected"]
-        return rec.read_flow(config["out_dir"], coin, connected=connected)
+        return tail.read(coin, connected=connected)
 
     server = DualStackHTTPServer(("::", config["port"]), make_handler(snapshot, uploader, flow))
     thread = threading.Thread(target=server.serve_forever, daemon=True)

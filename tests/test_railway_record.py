@@ -716,8 +716,15 @@ def test_flow_endpoint_returns_the_tape_for_a_recorded_coin():
 
     response = invoke(_flow_handler(flow), b"GET /flow?coin=hype HTTP/1.1\r\n\r\n")
     assert b"200" in status_line(response)
-    assert json.loads(response.split(b"\r\n\r\n", 1)[1])["coin"] == "HYPE"
-    assert seen == ["HYPE"]
+    assert json.loads(response.split(b"\r\n\r\n", 1)[1])["coin"] == "hype"
+    assert seen == ["hype"]      # the handler does not guess a spelling; flow() resolves it
+
+
+def test_resolve_flow_coin_is_case_insensitive_and_returns_the_configured_spelling():
+    coins = ["HYPE", "ZEC", "xyz:GOLD"]
+    assert rr.resolve_flow_coin(coins, "hype") == "HYPE"
+    assert rr.resolve_flow_coin(coins, "XYZ:gold") == "xyz:GOLD"
+    assert rr.resolve_flow_coin(coins, "DOGE") is None
 
 
 def test_flow_endpoint_404_json_for_an_unrecorded_or_missing_coin():

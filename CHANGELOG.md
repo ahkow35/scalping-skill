@@ -1,5 +1,33 @@
 # Changelog — scalp skill
 
+## 2026-10-04 — Review fixes to the recorder tape, and BTC on the recorder
+An independent review blocked the tape change; this round fixes it.
+- Tape age no longer goes negative: the tape is measured on the recorder's own
+  clock (`now_ms` in the `/flow` body) for the age, the window and the span.
+  The response itself is refused as `stale` if our clock (read after it
+  arrives) is more than 60 s from the tape's either way.
+- The recorder's `/flow` no longer re-reads the whole day's file on every
+  request: `recorder.FlowTailCache` reads only appended bytes (complete lines
+  only), prunes to the 4 h window and handles UTC midnight. A test asserts it
+  equals the full read. ADR 0003's cost note is updated.
+- The tape lookup is now opt-in: `assemble(..., use_tape=False)` by default.
+  Only `fetch_market.py`'s command-line entry point (what `/scalp` runs) passes
+  `use_tape=True`; scan2 and every other caller make no Keychain read and no
+  network call, as before. The Mac-side `/flow` timeout is 5 s (was 10).
+- Distinct fallback reasons: `watcher not configured`, `unauthorized`,
+  `bad request`, `recorder not configured`, `coin not recorded`,
+  `unreachable`, `malformed tape`, `candles unavailable`, `stale`.
+- Coverage thresholds are read from `flow.DEFAULT_PARAMS` (no copies).
+- Coverage uses only the trailing hour of 1m candles, fetched in chunks of at
+  most 50 bars (HL truncates big candle payloads). The 4h window keeps its
+  sums but has coverage and capture_complete null and is never `reliable`;
+  flow.py reads only 5m, 15m and 1h, so the gate is unchanged.
+- `/flow` matches the requested coin case-insensitively against the recorder's
+  configured coins.
+- `RECORDER_COINS` is now `HYPE,ZEC,PUMP,BTC`. BTC is the busiest market:
+  check the 5 GB volume's free space after its first full day.
+- No new signal or threshold; `flow.DEFAULT_PARAMS` is unchanged.
+
 ## 2026-10-04 — Recorder tape feeds the /scalp flow gate (fail closed)
 The flow gate (Step 1b) could never see complete flow: the REST sample is 10
 trades per call, so `coverage_ok` was always false. It can now read the
@@ -19,7 +47,7 @@ Railway recorder's complete trade tape.
 - No new signal or threshold; `flow.DEFAULT_PARAMS` is unchanged. Entry alpha is
   still unvalidated and the gate only cuts conviction. The 58/42 bias
   thresholds have never run against a complete tape.
-- `RECORDER_COINS` is now `HYPE,ZEC,PUMP` in `.railway/railway.ts`.
+- `RECORDER_COINS` gains PUMP in `.railway/railway.ts`.
 - Merging redeploys both Railway services (not within 10 minutes of midnight
   Singapore time). Live checks after deploy are listed in ADR 0003.
 

@@ -618,11 +618,11 @@ def _candles(n=10, skip=(), none_at=()):
 
 
 def _five(tape, candles):
-    return fm.bucket_taker_delta_tape(tape, candles, TAPE_NOW)["5m"]
+    return fm.bucket_taker_delta_tape(tape, candles)["5m"]
 
 
 def test_tape_bucket_good_window_is_reliable_with_exact_coverage_and_rest_keys():
-    tape_b = fm.bucket_taker_delta_tape(_tape(), _candles(), TAPE_NOW)
+    tape_b = fm.bucket_taker_delta_tape(_tape(), _candles())
     rest_b = fm.bucket_taker_delta([], TAPE_NOW)
     five = tape_b["5m"]
     assert set(five) == set(rest_b["5m"])
@@ -633,7 +633,7 @@ def test_tape_bucket_good_window_is_reliable_with_exact_coverage_and_rest_keys()
     # whole minutes from m-4 through the current partial minute m: 5 rows
     assert (five["trade_count"], five["buy_usdc"], five["sell_usdc"]) == (50, 500.0, 250.0)
     assert five["delta_usdc"] == 250.0 and five["buy_share_pct"] == 66.7
-    assert tape_b["4h"]["reliable"] is True
+    assert tape_b["4h"]["reliable"] is False      # no candle counts beyond the hour
 
 
 def test_tape_coverage_maths_recorded_over_exchange_trade_count():
@@ -647,12 +647,12 @@ def test_tape_coverage_maths_recorded_over_exchange_trade_count():
 
 def test_tape_gap_inside_the_window_means_not_complete_and_not_reliable():
     gap = {"reconnect_ts_ms": TAPE_NOW - 2 * MIN, "last_seen_exchange_ts_ms": TAPE_NOW - 3 * MIN}
-    tape_b = fm.bucket_taker_delta_tape(_tape(gaps=[gap]), _candles(), TAPE_NOW)
+    tape_b = fm.bucket_taker_delta_tape(_tape(gaps=[gap]), _candles())
     assert tape_b["5m"]["capture_complete"] is False and tape_b["5m"]["reliable"] is False
     assert tape_b["5m"]["observed_gap_count"] == 1
-    assert tape_b["4h"]["capture_complete"] is False
+    assert tape_b["4h"]["capture_complete"] is None
     old_gap = {"reconnect_ts_ms": TAPE_NOW - 30 * MIN, "last_seen_exchange_ts_ms": None}
-    tape_b = fm.bucket_taker_delta_tape(_tape(gaps=[old_gap]), _candles(), TAPE_NOW)
+    tape_b = fm.bucket_taker_delta_tape(_tape(gaps=[old_gap]), _candles())
     assert tape_b["5m"]["reliable"] is True and tape_b["15m"]["reliable"] is True   # gap is older
     assert tape_b["1h"]["capture_complete"] is False
 
@@ -684,7 +684,7 @@ def test_tape_with_no_trades_stays_null_not_zero():
 
 def test_tape_fallback_reason_names_the_first_failing_condition():
     def reason(tape, candles):
-        return fm.tape_fallback_reason(fm.bucket_taker_delta_tape(tape, candles, TAPE_NOW), tape)
+        return fm.tape_fallback_reason(fm.bucket_taker_delta_tape(tape, candles), tape)
 
     assert reason(_tape(), _candles()) is None
     assert reason(_tape(last_trade_ms=TAPE_NOW - 90_000), _candles()) == "stale"
@@ -695,29 +695,125 @@ def test_tape_fallback_reason_names_the_first_failing_condition():
     assert reason(_tape(), _candles(n=100)) == "coverage low"
 
 
+def _candles_fn(rows=None, calls=None):
+    def fn(coin, iv, start, end):
+        if calls is not None:
+            calls.append((iv, start, end))
+        return [c for c in (rows or _candles()) if start <= c["t_ms"] <= end]
+    return fn
+
+
 def test_fetch_tape_taker_delta_uses_the_tape_only_when_the_5m_window_is_reliable():
-    candles = lambda coin, iv, s, e: _candles()
-    buckets, why = fm.fetch_tape_taker_delta("HYPE", TAPE_NOW, fetch_flow=lambda c: (_tape(), None),
-                                             candles=candles)
+    buckets, why = fm.fetch_tape_taker_delta("HYPE", fetch_flow=lambda c: (_tape(), None),
+                                             candles=_candles_fn(), clock=lambda: TAPE_NOW)
     assert why is None and buckets["5m"]["reliable"] is True
-    buckets, why = fm.fetch_tape_taker_delta("HYPE", TAPE_NOW, candles=candles,
+    buckets, why = fm.fetch_tape_taker_delta("HYPE", candles=_candles_fn(), clock=lambda: TAPE_NOW,
                                              fetch_flow=lambda c: (_tape(connected=False), None))
     assert buckets is None and why == "recorder disconnected"
 
 
-def test_fetch_tape_taker_delta_falls_back_on_unreachable_unrecorded_or_a_crash():
-    candles = lambda coin, iv, s, e: _candles()
-    for answer in ((None, "unreachable"), (None, "coin not recorded"), (None, "not configured")):
-        assert fm.fetch_tape_taker_delta("DOGE", TAPE_NOW, fetch_flow=lambda c, a=answer: a,
-                                         candles=candles) == answer
+def test_tape_is_measured_on_the_recorders_clock_not_the_callers():
+    # assemble() reads its clock before ~9 exchange calls; on a busy coin the
+    # tape's last trade is then "after" that old clock. Must still be reliable.
+    for behind in (1_500, 4_000):
+        tape = _tape(last_trade_ms=TAPE_NOW - 200)
+        buckets, why = fm.fetch_tape_taker_delta("HYPE", fetch_flow=lambda c, t=tape: (t, None),
+                                                 candles=_candles_fn(), clock=lambda b=behind: TAPE_NOW - b)
+        assert why is None, why
+        five = buckets["5m"]
+        assert five["reliable"] is True and five["sample_age_ms"] == 200 and five["sample_fresh"] is True
+        assert five["trade_count"] == 50
+
+
+def test_a_tape_body_older_than_60s_or_clocks_far_apart_is_stale():
+    def run(clock_offset):
+        return fm.fetch_tape_taker_delta("HYPE", fetch_flow=lambda c: (_tape(), None),
+                                         candles=_candles_fn(), clock=lambda: TAPE_NOW + clock_offset)
+
+    assert run(60_000)[1] is None            # exactly the tolerance still passes
+    for offset in (61_000, 300_000, -61_000):
+        assert run(offset) == (None, "stale")
+
+
+def test_tape_candles_are_the_trailing_hour_in_chunks_of_at_most_50_bars():
+    calls = []
+    buckets, why = fm.fetch_tape_taker_delta("HYPE", fetch_flow=lambda c: (_tape(), None),
+                                             candles=_candles_fn(calls=calls), clock=lambda: TAPE_NOW)
+    assert why is None
+    assert len(calls) == 2 and all(iv == "1m" for iv, _, _ in calls)
+    assert all((end - start + 1) <= 50 * MIN for _, start, end in calls)
+    assert calls[0][1] == TAPE_M - 60 * MIN and calls[-1][2] == TAPE_NOW
+    # the 4h window keeps its sums but has no coverage verdict
+    four = buckets["4h"]
+    assert four["trade_count"] > buckets["1h"]["trade_count"]
+    assert four["coverage_pct"] is None and four["capture_complete"] is None
+    assert four["reliable"] is False and "not computed" in four["note"]
+    assert "note" not in buckets["5m"]
+    assert buckets["1h"]["coverage_pct"] == 100.0 and buckets["1h"]["reliable"] is True
+
+
+def test_fetch_tape_taker_delta_falls_back_with_a_distinct_reason():
+    for answer in ((None, "unreachable"), (None, "coin not recorded"), (None, "watcher not configured"),
+                   (None, "unauthorized"), (None, "recorder not configured")):
+        assert fm.fetch_tape_taker_delta("DOGE", fetch_flow=lambda c, a=answer: a,
+                                         candles=_candles_fn()) == answer
 
     def boom(*a):
         raise fm.DataUnavailable("candles down")
 
-    assert fm.fetch_tape_taker_delta("HYPE", TAPE_NOW, fetch_flow=lambda c: (_tape(), None),
-                                     candles=boom) == (None, "unreachable")
-    assert fm.fetch_tape_taker_delta("HYPE", TAPE_NOW, fetch_flow=lambda c: ({"rows": "garbage"}, None),
-                                     candles=candles) == (None, "unreachable")
+    kw = dict(clock=lambda: TAPE_NOW)
+    assert fm.fetch_tape_taker_delta("HYPE", fetch_flow=lambda c: (_tape(), None),
+                                     candles=boom, **kw) == (None, "candles unavailable")
+    for garbage in ({"rows": "garbage"}, {"now_ms": "x"}, _tape(rows=[{"t_ms": TAPE_M}]),
+                    _tape(last_trade_ms=TAPE_NOW + 5_000)):
+        assert fm.fetch_tape_taker_delta("HYPE", fetch_flow=lambda c, g=garbage: (g, None),
+                                         candles=_candles_fn(), **kw) == (None, "malformed tape")
+
+
+def test_tape_thresholds_come_from_flow_params_not_copies():
+    assert not hasattr(fm, "TAPE_MIN_COVERAGE_PCT") and not hasattr(fm, "TAPE_MAX_AGE_MS")
+    import flow
+    stricter = {**flow.DEFAULT_PARAMS, "min_coverage": 70.0}
+    assert _five(_tape(), _candles(n=15))["coverage_pct"] == 66.7
+    assert _five(_tape(), _candles(n=15))["reliable"] is True
+    flow_params = flow.DEFAULT_PARAMS
+    try:
+        flow.DEFAULT_PARAMS = stricter
+        assert _five(_tape(), _candles(n=15))["reliable"] is False
+    finally:
+        flow.DEFAULT_PARAMS = flow_params
+
+
+def test_a_recorder_that_started_ten_minutes_ago_is_reliable_for_5m_only(tmp_path):
+    import recorder as rec
+
+    started = TAPE_NOW - 10 * MIN
+    records = [rec.make_gap_record("HYPE", "trades", None, started)]   # cold-start gap record
+    tid = 0
+    for t in range(-(-started // MIN) * MIN, TAPE_M + 1, MIN):
+        for k in range(10):
+            tid += 1
+            ms = t + 1_000 + k * 1_000
+            if ms <= TAPE_NOW - 5_000:
+                records.append(rec.make_data_record(
+                    "HYPE", "trades", {"coin": "HYPE", "side": "B" if k % 2 else "A", "px": "10",
+                                       "sz": "1", "time": ms, "tid": tid}, ms, ms + 5))
+    path = rec.file_path(str(tmp_path), "HYPE", "trades", rec.day_str_utc(TAPE_NOW))
+    with open(path, "w") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+    tape = rec.read_flow(str(tmp_path), "HYPE", connected=True, now=TAPE_NOW)
+    ns = {}
+    for r in tape["rows"]:
+        ns[r["t_ms"]] = r["count"]
+    candles = [{"t_ms": t, "n": ns.get(t, 10)} for t in range(TAPE_M - 61 * MIN, TAPE_M + 1, MIN)]
+    buckets, why = fm.fetch_tape_taker_delta("HYPE", fetch_flow=lambda c: (tape, None),
+                                             candles=_candles_fn(candles), clock=lambda: TAPE_NOW)
+    assert why is None
+    assert buckets["5m"]["reliable"] is True
+    for window in ("15m", "1h", "4h"):
+        assert buckets[window]["reliable"] is False
+    assert buckets["15m"]["observed_gap_count"] == 1 and buckets["15m"]["capture_complete"] is False
 
 
 def test_bucket_taker_delta_rest_is_still_unreliable_with_the_rest_source():
@@ -728,7 +824,7 @@ def test_bucket_taker_delta_rest_is_still_unreliable_with_the_rest_source():
         assert window["coverage_pct"] is None and window["capture_complete"] is None
 
 
-def _stub_assemble(monkeypatch, tape_answer):
+def _stub_assemble(monkeypatch):
     monkeypatch.setattr(fm, "fetch_core_meta", lambda: [
         {"universe": [{"name": "HYPE"}, {"name": "BTC"}]},
         [{"markPx": "46", "oraclePx": "46", "midPx": "46", "funding": "0", "premium": "0",
@@ -744,13 +840,17 @@ def _stub_assemble(monkeypatch, tape_answer):
                         lambda: (_ for _ in ()).throw(fm.DataUnavailable("DATA UNAVAILABLE: x")))
     monkeypatch.setattr(fm, "_read_latest_btcd",
                         lambda *a, **k: (_ for _ in ()).throw(fm.DataUnavailable("DATA UNAVAILABLE: x")))
-    monkeypatch.setattr(fm, "fetch_tape_taker_delta", lambda coin, now_ms, **kw: tape_answer)
+
+
+def _stub_tape(monkeypatch, tape_answer):
+    monkeypatch.setattr(fm, "fetch_tape_taker_delta", lambda coin, **kw: tape_answer)
 
 
 def test_assemble_falls_back_to_rest_with_reliable_false_and_says_why(monkeypatch):
     for reason in ("unreachable", "coin not recorded", "gap"):
-        _stub_assemble(monkeypatch, (None, reason))
-        out = fm.assemble("HYPE", now_ms=TAPE_NOW)
+        _stub_assemble(monkeypatch)
+        _stub_tape(monkeypatch, (None, reason))
+        out = fm.assemble("HYPE", now_ms=TAPE_NOW, use_tape=True)
         assert out["taker_delta_source"] == {"used": "recent_trades_rest", "fallback_reason": reason}
         assert out["taker_delta"]["5m"]["source"] == "recent_trades_rest"
         assert out["taker_delta"]["5m"]["reliable"] is False
@@ -759,10 +859,51 @@ def test_assemble_falls_back_to_rest_with_reliable_false_and_says_why(monkeypatc
 
 
 def test_assemble_uses_a_reliable_tape_and_the_flow_gate_accepts_it(monkeypatch):
-    buckets = fm.bucket_taker_delta_tape(_tape(), _candles(), TAPE_NOW)
-    _stub_assemble(monkeypatch, (buckets, None))
-    out = fm.assemble("HYPE", now_ms=TAPE_NOW)
+    buckets = fm.bucket_taker_delta_tape(_tape(), _candles())
+    _stub_assemble(monkeypatch)
+    _stub_tape(monkeypatch, (buckets, None))
+    out = fm.assemble("HYPE", now_ms=TAPE_NOW, use_tape=True)
     assert out["taker_delta_source"] == {"used": "ws_recorder", "fallback_reason": None}
     assert out["taker_delta"]["5m"]["source"] == "ws_recorder"
     assert out["flow"]["coverage_ok"] is True
     assert out["flow"]["aggressor_bias"] == "buyers"     # 66.7% buy share on a complete tape
+
+
+def test_assemble_without_use_tape_never_asks_for_the_tape(monkeypatch):
+    import account_monitor
+    _stub_assemble(monkeypatch)
+
+    def boom(*a, **k):
+        raise AssertionError("remote_flow must not be called")
+
+    monkeypatch.setattr(account_monitor, "remote_flow", boom)
+    monkeypatch.setattr(fm, "fetch_tape_taker_delta", boom)
+    out = fm.assemble("HYPE", now_ms=TAPE_NOW)
+    assert "taker_delta_source" not in out
+    assert out["taker_delta"]["5m"]["source"] == "recent_trades_rest"
+
+
+def test_main_asks_for_the_tape(monkeypatch, capsys):
+    seen = {}
+    monkeypatch.setattr(fm, "assemble", lambda coin, deep=False, now_ms=None, use_tape=False:
+                        seen.update(use_tape=use_tape) or {"primary": coin})
+    monkeypatch.setattr(fm, "snapshot_market", lambda out: None)
+    assert fm.main(["fetch_market.py", "HYPE"]) == 0
+    assert seen["use_tape"] is True
+
+
+def test_assemble_with_the_tape_stubs_only_the_network_boundaries(monkeypatch):
+    """No wholesale stub of fetch_tape_taker_delta: the caller's clock was read
+    long before the tape arrived and sits 4 s behind the recorder's."""
+    import account_monitor
+    _stub_assemble(monkeypatch)
+    tape = _tape(last_trade_ms=TAPE_NOW - 100)
+    monkeypatch.setattr(account_monitor, "remote_flow", lambda coin, *a, **k: (tape, None))
+    monkeypatch.setattr(fm, "_NOW", lambda: TAPE_NOW - 4_000)
+    monkeypatch.setattr(fm, "fetch_candles",
+                        lambda coin, iv, s, e: [c for c in _candles() if s <= c["t_ms"] <= e]
+                        if iv == "1m" else [])
+    out = fm.assemble("HYPE", now_ms=TAPE_NOW - 12_000, use_tape=True)
+    assert out["taker_delta_source"] == {"used": "ws_recorder", "fallback_reason": None}
+    assert out["taker_delta"]["5m"]["reliable"] is True
+    assert out["flow"]["coverage_ok"] is True
