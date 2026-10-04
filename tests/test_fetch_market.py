@@ -955,3 +955,20 @@ def test_a_tape_that_ages_out_while_candles_are_fetched_is_stale():
     got = fm.fetch_tape_taker_delta("HYPE", fetch_flow=lambda c: (_tape(last_trade_ms=TAPE_NOW - 45_000), None),
                                     candles=slow_candles, clock=lambda: clock["now"])
     assert got == (None, "stale")
+
+
+def test_the_last_closed_minute_is_inside_the_coverage_test():
+    # Last trade fell in the minute that has just closed, where the tape caught
+    # 1 of the exchange's 1,000 trades; nothing yet in the current minute.
+    last_closed = TAPE_M - MIN
+    tape = _tape(last_trade_ms=TAPE_M - 10_000)
+    tape["rows"] = [dict(r, count=1) if r["t_ms"] == last_closed else r
+                    for r in tape["rows"] if r["t_ms"] != TAPE_M]
+    candles = [dict(c, n=1000) if c["t_ms"] == last_closed else c for c in _candles()]
+    five = _five(tape, candles)
+    assert five["sample_fresh"] is True
+    assert five["coverage_pct"] == 3.0 and five["reliable"] is False
+    assert fm.tape_fallback_reason(fm.bucket_taker_delta_tape(tape, candles), tape) == "coverage low"
+    # ...and a traded last-closed minute with no tape row at all is a hole.
+    tape["rows"] = [r for r in tape["rows"] if r["t_ms"] != last_closed]
+    assert _five(tape, candles)["capture_complete"] is False

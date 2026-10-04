@@ -1,5 +1,13 @@
 # Changelog — scalp skill
 
+## 2026-10-05 — Cross-review round 2: the newest closed minute now counts
+
+- **Tape that thins out at the end.** The coverage test stopped at the minute
+  of the tape's last trade, so the minute that had just closed was never
+  checked: a tape that caught 1 of 1,000 trades there still read 100%. The
+  test now runs on the clock alone, through every closed minute; only the
+  current partial minute is left out.
+
 ## 2026-10-04 — Cross-review fixes to the recorder tape (Codex, round 1)
 
 Five ways an incomplete or stale tape could still read as reliable, all closed:

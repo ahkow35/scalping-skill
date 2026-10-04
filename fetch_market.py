@@ -713,8 +713,8 @@ def bucket_taker_delta_tape(tape, candles_1m,
     that clock against the caller's.
 
     coverage_pct = recorded trades / the exchange's own per-candle trade count
-    n, over whole CLOSED 1m minutes inside both the window and the recorded
-    span (as recorder.verify_sample_pct does), capped at 100; None if any such
+    n, over every whole CLOSED 1m minute of the window (only the current
+    partial minute is left out), capped at 100; None if any such
     minute has no candle n, or no minute qualifies. capture_complete is True
     only when every compared minute had an n, no gap record falls in the
     window and the recorder was connected; False when a gap or disconnect is
@@ -756,9 +756,10 @@ def bucket_taker_delta_tape(tape, candles_1m,
             n_known = False
         elif first_ms is not None and last_ms is not None:
             # Every closed minute of the window counts, from its first whole
-            # minute: a tape that starts late (or has a silent hole) must not
-            # shorten its own coverage test.
-            span_end = min(now_ms, last_ms) // _MINUTE_MS * _MINUTE_MS
+            # minute up to the current partial one. The span comes from the
+            # clock alone: a tape that starts late, ends early or has a silent
+            # hole must not shorten its own coverage test.
+            span_end = now_ms // _MINUTE_MS * _MINUTE_MS
             compared = range(first_minute, span_end, _MINUTE_MS)
             if len(compared) > 0:
                 ns = [n_by_minute.get(t) for t in compared]
