@@ -150,11 +150,15 @@ session timing logic is only meaningful for US-listed assets (NYSE hours
 ≈ US session window); for non-US underlyings, treat session overlay as
 indicative and lean on instrument-specific event awareness instead.
 
-The output includes `taker_delta` — REAL aggressor flow from a local trade
-cache that grows across repeated /scalp calls. Use `delta_usdc` and
-`buy_share_pct` per window for sampled buyer-vs-seller pressure. REST samples
-do not prove capture: require explicit reliable execution-window data. Null
-coverage is unknown, not zero or full coverage; old cache age is not evidence.
+The output includes `taker_delta` — aggressor flow per window. For coins the
+Railway recorder captures (HYPE, ZEC, PUMP) it is the recorder's complete tape
+(`source: "ws_recorder"`) when that tape is complete and fresh; otherwise it is
+the sampled REST cache (`source: "recent_trades_rest"`, `reliable` false), and
+`out["taker_delta_source"].fallback_reason` says why the tape was not used. Use
+`delta_usdc` and `buy_share_pct` per window for buyer-vs-seller pressure. REST
+samples do not prove capture: require explicit reliable execution-window data.
+Null coverage is unknown, not zero or full coverage; old cache age is not
+evidence. A coin the recorder does not capture stays "flow unavailable".
 
 The output includes `book.execution` — Stoikov top-of-book microprice and the
 instantaneous lean of the book. Key field: `microprice_dev_bps` (positive = bid
@@ -208,7 +212,12 @@ this flow gate (1b), and the strip-BTC gate (1c). Tiers: high → med → low.
 
 1. **Coverage — can you even see the flow?** Missing, legacy or unreliable
    execution-window flow (`coverage_ok == false`) → WAIT, no executable size.
-   REST cache span and repeated polling do not establish complete capture.
+   `coverage_ok` is true only for a complete, fresh `ws_recorder` tape (see
+   Step 1). It fails closed: recorder unreachable or stale, a gap in the
+   window, missing exchange trade counts or an unrecorded coin all mean
+   `coverage_ok == false`. REST cache span and repeated polling do not
+   establish complete capture. A true `coverage_ok` only means the flow is
+   visible; entry alpha remains unvalidated and this gate only cuts conviction.
 2. **Aggressor bias must agree with `side`.** long wants `buyers`, short wants
    `sellers`.
    - `balanced` → no confirmation: WAIT.

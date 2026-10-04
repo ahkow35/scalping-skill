@@ -179,3 +179,27 @@ def test_invalid_directional_share_cannot_be_certified_as_reliable():
         result = flow.classify({}, tape)
         assert result["capture_reliable"] is False
         assert result["aggressor_bias"] is None
+
+
+def test_ws_recorder_bucket_is_accepted_and_rest_bucket_of_the_same_shape_is_not():
+    import fetch_market as fm
+    minute = 60_000
+    now = (1_750_000_000_000 // minute) * minute + 30_000
+    start = now - 240 * minute
+    first = -(-start // minute) * minute
+    tape = {"window_start_ms": start, "connected": True, "first_trade_ms": first + 1_000,
+            "last_trade_ms": now - 5_000, "gaps": [],
+            "rows": [{"t_ms": t, "buy_usdc": 70.0, "sell_usdc": 30.0, "count": 10}
+                     for t in range(first, now - 30_000 + 1, minute)]}
+    candles = [{"t_ms": t, "n": 10} for t in range(now - 30_000 - 241 * minute, now, minute)]
+    buckets = fm.bucket_taker_delta_tape(tape, candles, now)
+    good = flow.classify({}, buckets, now_ms=now)
+    assert good["coverage_ok"] is True
+    assert good["capture_reliable"] is True
+    assert good["reliable_windows"] == ["5m", "15m", "1h"]
+    assert good["aggressor_bias"] == "buyers" and good["avg_buy_share_pct"] == 70.0
+
+    rest = {w: {**b, "source": "recent_trades_rest"} for w, b in buckets.items()}
+    assert flow.classify({}, rest, now_ms=now)["coverage_ok"] is False
+    real_rest = fm.bucket_taker_delta([], now)
+    assert flow.classify({}, real_rest, now_ms=now)["coverage_ok"] is False

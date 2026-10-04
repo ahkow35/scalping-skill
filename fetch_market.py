@@ -694,6 +694,128 @@ def bucket_taker_delta(trades, now_ms,
     return result
 
 
+TAPE_MIN_COVERAGE_PCT = 50.0   # same cut as flow.DEFAULT_PARAMS["min_coverage"]
+TAPE_MAX_AGE_MS = 60_000       # same cut as flow.DEFAULT_PARAMS["max_sample_age_ms"]
+_MINUTE_MS = 60_000
+
+
+def bucket_taker_delta_tape(tape, candles_1m, now_ms,
+                            windows=(("5m", 5), ("15m", 15), ("1h", 60), ("4h", 240))):
+    """The same window dicts as bucket_taker_delta, built from the Railway
+    recorder's complete trade tape (recorder.aggregate_flow's body) instead of
+    the sampled REST trades. source is "ws_recorder".
+
+    coverage_pct = recorded trades / the exchange's own per-candle trade count
+    n, over whole CLOSED 1m minutes inside both the window and the recorded
+    span (as recorder.verify_sample_pct does), capped at 100; None if any such
+    minute has no candle n, or no minute qualifies. capture_complete is True
+    only when every compared minute had an n, no gap record falls in the
+    window and the recorder was connected; False when a gap or disconnect is
+    known; None when it cannot be told. reliable is True only when
+    capture_complete, coverage_pct >= 50 and the last trade is <= 60 s old.
+    Unknown stays None, never 0."""
+    rows = {r["t_ms"]: r for r in tape["rows"]}
+    n_by_minute = {c["t_ms"]: c.get("n") for c in candles_1m}
+    last_ms, first_ms = tape.get("last_trade_ms"), tape.get("first_trade_ms")
+    age = now_ms - last_ms if last_ms is not None else None
+    result = {}
+    for name, mins in windows:
+        win_ms = mins * _MINUTE_MS
+        win_start = now_ms - win_ms
+        # Minute rows cannot split a minute: start at the first whole minute,
+        # and never before the tape's own window start.
+        first_minute = -(-max(win_start, tape["window_start_ms"]) // _MINUTE_MS) * _MINUTE_MS
+        in_window = [r for t, r in rows.items() if t >= first_minute and t <= now_ms]
+        buy = sum(r["buy_usdc"] for r in in_window)
+        sell = sum(r["sell_usdc"] for r in in_window)
+        count = sum(r["count"] for r in in_window)
+        total = buy + sell
+        gap_count = sum(1 for g in tape["gaps"] if g["reconnect_ts_ms"] >= win_start)
+
+        coverage = None
+        n_known = True
+        if first_ms is not None and last_ms is not None:
+            span_start = -(-max(first_minute, first_ms) // _MINUTE_MS) * _MINUTE_MS
+            span_end = min(now_ms, last_ms) // _MINUTE_MS * _MINUTE_MS
+            compared = range(span_start, span_end, _MINUTE_MS)
+            if len(compared) > 0:
+                ns = [n_by_minute.get(t) for t in compared]
+                n_known = all(n is not None for n in ns)
+                if n_known and sum(ns) > 0:
+                    recorded = sum(rows[t]["count"] for t in compared if t in rows)
+                    coverage = round(min(100.0, 100.0 * recorded / sum(ns)), 1)
+            else:
+                n_known = False
+        else:
+            n_known = False
+
+        if gap_count or not tape.get("connected"):
+            complete = False
+        else:
+            complete = True if (n_known and coverage is not None) else None
+        span = (min(now_ms, last_ms) - max(win_start, first_ms)) if first_ms is not None else 0
+        result[name] = {
+            "buy_usdc": round(buy, 2),
+            "sell_usdc": round(sell, 2),
+            "delta_usdc": round(buy - sell, 2),
+            "buy_share_pct": round(100.0 * buy / total, 1) if total > 0 else None,
+            "trade_count": count,
+            "source": "ws_recorder",
+            "coverage_pct": coverage,
+            "capture_complete": complete,
+            "reliable": (complete is True and coverage is not None
+                         and coverage >= TAPE_MIN_COVERAGE_PCT
+                         and age is not None and 0 <= age <= TAPE_MAX_AGE_MS),
+            "sample_span_ms": max(span, 0),
+            "sample_span_pct": round(100.0 * max(span, 0) / win_ms, 1),
+            "sample_age_ms": age,
+            "sample_fresh": age is not None and 0 <= age <= TAPE_MAX_AGE_MS,
+            "leading_gap_ms": max(first_ms - win_start, 0) if first_ms is not None else win_ms,
+            "max_observed_gap_ms": None,
+            "observed_gap_count": gap_count,
+            "gap_threshold_ms": 60_000,
+        }
+    return result
+
+
+def tape_fallback_reason(buckets, tape, interval="5m"):
+    """Why `interval`'s tape bucket cannot confirm flow, or None if reliable."""
+    b = buckets[interval]
+    if b["reliable"]:
+        return None
+    if not b["sample_fresh"]:
+        return "stale"
+    if not tape.get("connected"):
+        return "recorder disconnected"
+    if b["observed_gap_count"]:
+        return "gap"
+    if b["coverage_pct"] is None:
+        return "candle counts missing"
+    return "coverage low"
+
+
+def fetch_tape_taker_delta(coin, now_ms, *, fetch_flow=None, candles=None):
+    """(buckets, None) from the recorder tape when its 5m window is reliable,
+    else (None, reason) with reason one of: not configured, unreachable, coin
+    not recorded, stale, recorder disconnected, gap, candle counts missing,
+    coverage low. Never raises; the caller then uses the REST buckets exactly
+    as before. The REST sample is never treated as confirmation."""
+    if fetch_flow is None:
+        import account_monitor
+        fetch_flow = account_monitor.remote_flow
+    candles = fetch_candles if candles is None else candles
+    try:
+        tape, reason = fetch_flow(coin)
+        if tape is None:
+            return None, reason
+        rows = candles(coin, "1m", now_ms - 240 * _MINUTE_MS, now_ms)
+        buckets = bucket_taker_delta_tape(tape, rows, now_ms)
+    except Exception:
+        return None, "unreachable"
+    reason = tape_fallback_reason(buckets, tape)
+    return (buckets, None) if reason is None else (None, reason)
+
+
 import sys
 import time as _time
 
@@ -753,18 +875,29 @@ def assemble(coin, deep=False, now_ms=None):
     out["book"] = fetch_l2(coin)
     out["ath_state"] = compute_ath_state(out["candles"].get("1d", []), out["ctx"]["mark"])
 
-    try:
-        fresh = fetch_recent_trades(coin)
-        merged = merge_trade_cache(coin, fresh, now_ms)
-        out["taker_delta"] = bucket_taker_delta(merged, now_ms)
+    # Complete tape from the Railway recorder first (fail closed: any problem
+    # or an unreliable 5m window means the REST buckets below, as before).
+    tape_buckets, tape_reason = fetch_tape_taker_delta(coin, now_ms)
+    if tape_buckets is not None:
+        out["taker_delta"] = tape_buckets
         out["taker_delta"]["_note"] = (
-            f"Sampled taker delta from REST cache ({len(merged)} observations). "
-            "Capture completeness is unknown; repeated polling and sample span "
-            "do not measure market coverage. Observation gaps and sample freshness "
-            "are diagnostics only. This data cannot confirm entry flow."
-        )
-    except DataUnavailable as exc:
-        out["taker_delta"] = str(exc)
+            "Complete taker tape from the Railway recorder (source ws_recorder); "
+            "coverage is recorded trades vs the exchange's own per-candle trade count.")
+        out["taker_delta_source"] = {"used": "ws_recorder", "fallback_reason": None}
+    else:
+        out["taker_delta_source"] = {"used": "recent_trades_rest", "fallback_reason": tape_reason}
+        try:
+            fresh = fetch_recent_trades(coin)
+            merged = merge_trade_cache(coin, fresh, now_ms)
+            out["taker_delta"] = bucket_taker_delta(merged, now_ms)
+            out["taker_delta"]["_note"] = (
+                f"Sampled taker delta from REST cache ({len(merged)} observations). "
+                "Capture completeness is unknown; repeated polling and sample span "
+                "do not measure market coverage. Observation gaps and sample freshness "
+                "are diagnostics only. This data cannot confirm entry flow."
+            )
+        except DataUnavailable as exc:
+            out["taker_delta"] = str(exc)
 
     out["regime"] = regime_mod.classify(
         out["candles"], out["btc_candles"],

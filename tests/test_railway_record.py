@@ -694,3 +694,44 @@ def test_secrets_never_appear_in_status_even_after_a_failure(tmp_path):
     up._pass_once()
     status_text = json.dumps(up.status())
     assert secret_key not in status_text
+
+
+# ── GET /flow?coin=X (no real socket bind) ────────────────────────────────
+
+def _flow_handler(flow):
+    class FakeUploader:
+        def status(self):
+            return {}
+    return rr.make_handler(rr.StatusSnapshot(clock=lambda: 1000), FakeUploader(), flow)
+
+
+def test_flow_endpoint_returns_the_tape_for_a_recorded_coin():
+    from test_railway_watch import invoke, status_line
+
+    seen = []
+
+    def flow(coin):
+        seen.append(coin)
+        return {"coin": coin, "rows": [], "gaps": []}
+
+    response = invoke(_flow_handler(flow), b"GET /flow?coin=hype HTTP/1.1\r\n\r\n")
+    assert b"200" in status_line(response)
+    assert json.loads(response.split(b"\r\n\r\n", 1)[1])["coin"] == "HYPE"
+    assert seen == ["HYPE"]
+
+
+def test_flow_endpoint_404_json_for_an_unrecorded_or_missing_coin():
+    from test_railway_watch import invoke, status_line
+
+    handler = _flow_handler(lambda coin: None)
+    for target in (b"/flow?coin=DOGE", b"/flow"):
+        response = invoke(handler, b"GET " + target + b" HTTP/1.1\r\n\r\n")
+        assert b"404" in status_line(response)
+        assert json.loads(response.split(b"\r\n\r\n", 1)[1])["error"] == "coin_not_recorded"
+
+
+def test_flow_endpoint_is_a_404_when_no_flow_source_is_given():
+    from test_railway_watch import invoke, status_line
+
+    response = invoke(_flow_handler(None), b"GET /flow?coin=HYPE HTTP/1.1\r\n\r\n")
+    assert b"404" in status_line(response)

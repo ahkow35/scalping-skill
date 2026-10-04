@@ -258,8 +258,27 @@ Each /scalp run dedupes by `tid` and appends. This sparse REST sample cannot
 establish complete capture, even after repeated calls. Per-window span,
 freshness and gap diagnostics are not coverage proof: `coverage_pct` and
 `capture_complete` remain null, `reliable` is false. Old cached trades cannot
-validate a current window. A research recorder now exists (`recorder.py`,
-holds a WebSocket connection open for trades/l2Book/bbo and writes an
-append-only tape to `.flow_data/`) but it does NOT feed this live flow
-gate — it is for the later paper-only signal experiment. REST samples remain
-unreliable for the gate exactly as above.
+validate a current window.
+
+The Railway recorder (`recorder.py` + `railway_record.py`, holds a WebSocket
+connection open and writes an append-only tape of every trade) DOES feed this
+gate for the coins it captures (`RECORDER_COINS`, currently HYPE, ZEC, PUMP).
+`fetch_market.py` asks the Railway watcher's token-protected `/flow` for the
+primary coin's per-minute tape, and builds the same 5m/15m/1h/4h windows with
+`source: "ws_recorder"`. `coverage_pct` is recorded trades over Hyperliquid's
+own per-candle trade count; `reliable` is true only when the capture is
+complete (no gap in the window, recorder connected, every compared minute has
+an exchange count), coverage is at least 50% and the last trade is at most 60 s
+old. `out["taker_delta_source"]` says which source was used and, when the tape
+was not, why (`fallback_reason`: not configured, unreachable, coin not
+recorded, stale, recorder disconnected, gap, candle counts missing, coverage
+low).
+
+**Fail closed.** If the recorder is unreachable or stale, there is a gap in the
+window, exchange trade counts are missing, or the coin is not recorded, the
+buckets are exactly the REST output described above (`recent_trades_rest`,
+`reliable` false, `coverage_pct` null, `capture_complete` null) and the gate
+says WAIT. The REST sample is never treated as confirmation. A complete tape
+only removes the "cannot see the flow" block: entry alpha is still unvalidated,
+the 58/42 bias thresholds have not been tested on a complete tape, and the
+gate only cuts conviction, never raises it.

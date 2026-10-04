@@ -742,3 +742,71 @@ def test_reconnect_that_drops_before_data_does_not_recount_the_gap(tmp_path):
     st = fr.status()
     assert st["gap_seconds_24h"] == 20.0
     assert st["reconnects_24h"] == 2
+
+
+# ── flow tape aggregation (GET /flow on the Railway recorder) ──────────────
+
+FLOW_NOW = MIDNIGHT + 10 * 3_600_000 + 30_000   # 10:00:30 UTC
+
+
+def _tape_trade(ms, side="B", tid=1, px="10", sz="2"):
+    return rec.make_data_record("HYPE", "trades", {"coin": "HYPE", "side": side, "px": px, "sz": sz,
+                                                   "time": ms, "tid": tid}, ms, ms + 5)
+
+
+def test_aggregate_flow_buckets_by_minute_with_side_and_notional():
+    minute = FLOW_NOW - 30_000 - 2 * 60_000
+    records = [_tape_trade(minute + 1_000, "B", 1, "10", "2"),
+               _tape_trade(minute + 2_000, "A", 2, "10", "1"),
+               _tape_trade(minute + 61_000, "B", 3, "5", "1")]
+    out = rec.aggregate_flow(records, coin="HYPE", now=FLOW_NOW, connected=True)
+    assert out["rows"] == [{"t_ms": minute, "buy_usdc": 20.0, "sell_usdc": 10.0, "count": 2},
+                           {"t_ms": minute + 60_000, "buy_usdc": 5.0, "sell_usdc": 0.0, "count": 1}]
+    assert out["first_trade_ms"] == minute + 1_000
+    assert out["last_trade_ms"] == minute + 61_000
+    assert out["now_ms"] == FLOW_NOW and out["coin"] == "HYPE" and out["connected"] is True
+    assert out["gaps"] == []
+
+
+def test_aggregate_flow_dedupes_by_tid_and_drops_trades_outside_the_window():
+    inside = FLOW_NOW - 60_000
+    records = [_tape_trade(inside, tid=7), _tape_trade(inside, tid=7),
+               _tape_trade(FLOW_NOW - rec.FLOW_WINDOW_MS - 1, tid=8),
+               _tape_trade(FLOW_NOW + 1, tid=9)]
+    out = rec.aggregate_flow(records, coin="HYPE", now=FLOW_NOW, connected=True)
+    assert sum(r["count"] for r in out["rows"]) == 1
+
+
+def test_aggregate_flow_with_no_trades_reports_none_not_zero():
+    out = rec.aggregate_flow([], coin="HYPE", now=FLOW_NOW, connected=False)
+    assert out["rows"] == [] and out["last_trade_ms"] is None and out["first_trade_ms"] is None
+    assert out["connected"] is False
+
+
+def test_aggregate_flow_lists_only_gaps_inside_the_window():
+    old = rec.make_gap_record("HYPE", "trades", 1, FLOW_NOW - rec.FLOW_WINDOW_MS - 5)
+    inside = rec.make_gap_record("HYPE", "trades", FLOW_NOW - 100_000, FLOW_NOW - 90_000)
+    cold = rec.make_gap_record("HYPE", "trades", None, FLOW_NOW - 3_600_000)
+    out = rec.aggregate_flow([old, inside, inside, cold], coin="HYPE", now=FLOW_NOW, connected=True)
+    assert out["gaps"] == [
+        {"reconnect_ts_ms": FLOW_NOW - 3_600_000, "last_seen_exchange_ts_ms": None},
+        {"reconnect_ts_ms": FLOW_NOW - 90_000, "last_seen_exchange_ts_ms": FLOW_NOW - 100_000}]
+
+
+def test_read_flow_crosses_utc_midnight_reading_gz_and_plain_and_dedupes(tmp_path):
+    import gzip
+    now = MIDNIGHT + 30 * 60_000 + 30_000        # 00:30:30 UTC
+    yesterday = MIDNIGHT - 60_000                 # 23:59 the day before
+    today = MIDNIGHT + 60_000
+    y_path = rec.file_path(str(tmp_path), "HYPE", "trades", rec.day_str_utc(yesterday)) + ".gz"
+    with gzip.open(y_path, "wt") as f:
+        for r in (_tape_trade(yesterday, "A", 1), _tape_trade(yesterday + 1, "B", 2)):
+            f.write(json.dumps(r) + "\n")
+    t_path = rec.file_path(str(tmp_path), "HYPE", "trades", rec.day_str_utc(today))
+    with open(t_path, "w") as f:
+        for r in (_tape_trade(yesterday + 1, "B", 2), _tape_trade(today, "B", 3)):  # tid 2 repeated
+            f.write(json.dumps(r) + "\n")
+        f.write('{"truncated": \n')  # a crash fragment is skipped, not fatal
+    out = rec.read_flow(str(tmp_path), "HYPE", connected=True, now=now)
+    assert sum(r["count"] for r in out["rows"]) == 3
+    assert [r["t_ms"] for r in out["rows"]] == [MIDNIGHT - 60_000, MIDNIGHT + 60_000]

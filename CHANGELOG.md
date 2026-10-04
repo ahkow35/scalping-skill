@@ -1,5 +1,28 @@
 # Changelog — scalp skill
 
+## 2026-10-04 — Recorder tape feeds the /scalp flow gate (fail closed)
+The flow gate (Step 1b) could never see complete flow: the REST sample is 10
+trades per call, so `coverage_ok` was always false. It can now read the
+Railway recorder's complete trade tape.
+- `recorder.py` / `railway_record.py`: `GET /flow?coin=X` on the recorder's
+  private server (per-minute taker rows for 4 hours, gap records, connected).
+- `railway_watch.py`: token-protected `GET /flow?coin=X` passes it on (503 when
+  `RECORDER_STATUS_URL` is unset, bare 502 on recorder errors). `/report` and
+  `entry_allowed` are untouched.
+- `fetch_market.py`: `bucket_taker_delta_tape` builds the same windows with
+  `source: "ws_recorder"`; coverage is recorded trades over the exchange's
+  per-candle trade count. `assemble()` tries the tape first and reports
+  `taker_delta_source` with a `fallback_reason`. Any failure, gap, stale tape,
+  missing count or unrecorded coin gives the old REST buckets (`reliable`
+  false), so the gate still says WAIT. `account_monitor.remote_flow` reuses
+  the `remote-check` URL and token handling.
+- No new signal or threshold; `flow.DEFAULT_PARAMS` is unchanged. Entry alpha is
+  still unvalidated and the gate only cuts conviction. The 58/42 bias
+  thresholds have never run against a complete tape.
+- `RECORDER_COINS` is now `HYPE,ZEC,PUMP` in `.railway/railway.ts`.
+- Merging redeploys both Railway services (not within 10 minutes of midnight
+  Singapore time). Live checks after deploy are listed in ADR 0003.
+
 ## 2026-10-04 — Fed net liquidity from the Fed's own pages
 Both FRED routes (API and CSV) time out from Railway's servers; a test inside
 the container showed the Fed, New York Fed and Treasury sites all answer.

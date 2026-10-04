@@ -721,6 +721,86 @@ def verify_sample_pct(out_dir, coin, window_min=30, now=None):
     }
 
 
+# ── flow tape: per-minute taker aggregation for the live /scalp flow gate ──
+
+FLOW_WINDOW_MS = 4 * 60 * 60 * 1000
+MINUTE_MS = 60_000
+
+
+def aggregate_flow(records, *, coin, now, connected, window_ms=FLOW_WINDOW_MS):
+    """Pure aggregation: no I/O, no socket. `records` are the recorder's
+    `trades` and `gap` records from a trades file (any order, duplicates
+    allowed; other record types are ignored). Returns per-minute taker
+    notional for the trailing `window_ms` plus what a reader needs to judge
+    completeness itself — this does no gate logic. side 'B' = taker buy, 'A' = taker sell; notional = px * sz.
+
+    Trades are deduped by tid across files (a day can sit in both `.gz` and
+    plain form). `last_trade_ms` and `first_trade_ms` come from the trades in
+    the window (None, never 0, when there are none). A gap is listed when the
+    hole could touch the window: its reconnect is inside it."""
+    win_start = now - window_ms
+    minutes = {}
+    seen_tids = set()
+    gaps = {}
+    first_ms = last_ms = None
+    for record in records:
+        if record.get("record_type") == "gap":
+            reconnect = record.get("reconnect_ts_ms")
+            if reconnect is not None and win_start <= reconnect <= now:
+                gaps[reconnect] = {"reconnect_ts_ms": reconnect,
+                                   "last_seen_exchange_ts_ms": record.get("last_seen_exchange_ts_ms")}
+            continue
+        if record.get("record_type") != "trades":
+            continue
+        trade = record.get("data") or {}
+        ex_ms = record.get("exchange_ts_ms")
+        if ex_ms is None or ex_ms < win_start or ex_ms > now:
+            continue
+        tid = trade.get("tid")
+        if tid is not None:
+            if tid in seen_tids:
+                continue
+            seen_tids.add(tid)
+        side = trade.get("side")
+        if side not in ("B", "A"):
+            continue
+        try:
+            notional = float(trade["px"]) * float(trade["sz"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        row = minutes.setdefault(ex_ms // MINUTE_MS * MINUTE_MS,
+                                 {"buy_usdc": 0.0, "sell_usdc": 0.0, "count": 0})
+        row["buy_usdc" if side == "B" else "sell_usdc"] += notional
+        row["count"] += 1
+        first_ms = ex_ms if first_ms is None else min(first_ms, ex_ms)
+        last_ms = ex_ms if last_ms is None else max(last_ms, ex_ms)
+
+    return {
+        "coin": coin,
+        "now_ms": now,
+        "window_start_ms": win_start,
+        "connected": bool(connected),
+        "first_trade_ms": first_ms,
+        "last_trade_ms": last_ms,
+        "rows": [{"t_ms": t, "buy_usdc": round(r["buy_usdc"], 2),
+                  "sell_usdc": round(r["sell_usdc"], 2), "count": r["count"]}
+                 for t, r in sorted(minutes.items())],
+        "gaps": [gaps[k] for k in sorted(gaps)],
+    }
+
+
+def read_flow(out_dir, coin, *, connected, now=None, window_ms=FLOW_WINDOW_MS):
+    """Read `coin`'s trades files (today's plain file plus, across UTC
+    midnight, the finished day's `.gz`) and aggregate the trailing window.
+    Read-only; runs on the HTTP thread, never the recording loop."""
+    now = now_ms() if now is None else now
+    day_ms = 86_400_000
+    paths = [file_path(out_dir, coin, "trades", day_str_utc(d))
+             for d in range(((now - window_ms) // day_ms) * day_ms, now + 1, day_ms)]
+    records = (r for path in paths for r in iter_jsonl_records(path))
+    return aggregate_flow(records, coin=coin, now=now, connected=connected, window_ms=window_ms)
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────
 
 def main(argv):

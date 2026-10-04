@@ -590,3 +590,179 @@ def test_classify_oi_read_matrix():
     assert fm.classify_oi_read(0.1, 5.0) == "flat"    # price inside noise
     assert fm.classify_oi_read(1.0, 0.2) == "flat"    # OI inside noise
     assert fm.classify_oi_read(None, 2.0) is None     # cache warming
+
+
+# ── recorder tape → taker_delta buckets (source ws_recorder) ──────────────
+
+MIN = 60_000
+TAPE_NOW = (1_750_000_000_000 // MIN) * MIN + 30_000   # 30 s into a minute
+TAPE_M = TAPE_NOW - 30_000                              # the current minute's start
+
+
+def _tape(**over):
+    """A healthy 4h tape: 10 trades / 100 buy / 50 sell every minute."""
+    start = TAPE_NOW - 240 * MIN
+    first_minute = -(-start // MIN) * MIN
+    tape = {"coin": "HYPE", "now_ms": TAPE_NOW, "window_start_ms": start, "connected": True,
+            "first_trade_ms": first_minute + 1_000, "last_trade_ms": TAPE_NOW - 5_000,
+            "rows": [{"t_ms": t, "buy_usdc": 100.0, "sell_usdc": 50.0, "count": 10}
+                     for t in range(first_minute, TAPE_M + 1, MIN)],
+            "gaps": []}
+    tape.update(over)
+    return tape
+
+
+def _candles(n=10, skip=(), none_at=()):
+    return [{"t_ms": t, "n": None if t in none_at else n}
+            for t in range(TAPE_M - 241 * MIN, TAPE_M + 1, MIN) if t not in skip]
+
+
+def _five(tape, candles):
+    return fm.bucket_taker_delta_tape(tape, candles, TAPE_NOW)["5m"]
+
+
+def test_tape_bucket_good_window_is_reliable_with_exact_coverage_and_rest_keys():
+    tape_b = fm.bucket_taker_delta_tape(_tape(), _candles(), TAPE_NOW)
+    rest_b = fm.bucket_taker_delta([], TAPE_NOW)
+    five = tape_b["5m"]
+    assert set(five) == set(rest_b["5m"])
+    assert five["source"] == "ws_recorder"
+    assert five["coverage_pct"] == 100.0
+    assert five["capture_complete"] is True and five["reliable"] is True
+    assert five["sample_age_ms"] == 5_000
+    # whole minutes from m-4 through the current partial minute m: 5 rows
+    assert (five["trade_count"], five["buy_usdc"], five["sell_usdc"]) == (50, 500.0, 250.0)
+    assert five["delta_usdc"] == 250.0 and five["buy_share_pct"] == 66.7
+    assert tape_b["4h"]["reliable"] is True
+
+
+def test_tape_coverage_maths_recorded_over_exchange_trade_count():
+    assert _five(_tape(), _candles(n=20))["coverage_pct"] == 50.0
+    assert _five(_tape(), _candles(n=20))["reliable"] is True      # exactly the 50 floor
+    low = _five(_tape(), _candles(n=25))
+    assert low["coverage_pct"] == 40.0 and low["reliable"] is False
+    assert low["capture_complete"] is True                          # complete != covered enough
+    assert _five(_tape(), _candles(n=5))["coverage_pct"] == 100.0   # capped, never above 100
+
+
+def test_tape_gap_inside_the_window_means_not_complete_and_not_reliable():
+    gap = {"reconnect_ts_ms": TAPE_NOW - 2 * MIN, "last_seen_exchange_ts_ms": TAPE_NOW - 3 * MIN}
+    tape_b = fm.bucket_taker_delta_tape(_tape(gaps=[gap]), _candles(), TAPE_NOW)
+    assert tape_b["5m"]["capture_complete"] is False and tape_b["5m"]["reliable"] is False
+    assert tape_b["5m"]["observed_gap_count"] == 1
+    assert tape_b["4h"]["capture_complete"] is False
+    old_gap = {"reconnect_ts_ms": TAPE_NOW - 30 * MIN, "last_seen_exchange_ts_ms": None}
+    tape_b = fm.bucket_taker_delta_tape(_tape(gaps=[old_gap]), _candles(), TAPE_NOW)
+    assert tape_b["5m"]["reliable"] is True and tape_b["15m"]["reliable"] is True   # gap is older
+    assert tape_b["1h"]["capture_complete"] is False
+
+
+def test_tape_not_connected_is_not_complete():
+    five = _five(_tape(connected=False), _candles())
+    assert five["capture_complete"] is False and five["reliable"] is False
+
+
+def test_tape_stale_last_trade_is_not_reliable():
+    five = _five(_tape(last_trade_ms=TAPE_NOW - 61_000), _candles())
+    assert five["sample_age_ms"] == 61_000 and five["sample_fresh"] is False
+    assert five["reliable"] is False
+    assert _five(_tape(last_trade_ms=TAPE_NOW - 60_000), _candles())["reliable"] is True
+
+
+def test_tape_missing_candle_count_gives_null_coverage_and_not_reliable():
+    for candles in (_candles(none_at={TAPE_M - 2 * MIN}), _candles(skip={TAPE_M - 2 * MIN})):
+        five = _five(_tape(), candles)
+        assert five["coverage_pct"] is None
+        assert five["capture_complete"] is None and five["reliable"] is False
+
+
+def test_tape_with_no_trades_stays_null_not_zero():
+    five = _five(_tape(rows=[], first_trade_ms=None, last_trade_ms=None), _candles())
+    assert five["buy_share_pct"] is None and five["coverage_pct"] is None
+    assert five["sample_age_ms"] is None and five["reliable"] is False
+
+
+def test_tape_fallback_reason_names_the_first_failing_condition():
+    def reason(tape, candles):
+        return fm.tape_fallback_reason(fm.bucket_taker_delta_tape(tape, candles, TAPE_NOW), tape)
+
+    assert reason(_tape(), _candles()) is None
+    assert reason(_tape(last_trade_ms=TAPE_NOW - 90_000), _candles()) == "stale"
+    assert reason(_tape(connected=False), _candles()) == "recorder disconnected"
+    gap = {"reconnect_ts_ms": TAPE_NOW - MIN, "last_seen_exchange_ts_ms": None}
+    assert reason(_tape(gaps=[gap]), _candles()) == "gap"
+    assert reason(_tape(), _candles(none_at={TAPE_M - MIN})) == "candle counts missing"
+    assert reason(_tape(), _candles(n=100)) == "coverage low"
+
+
+def test_fetch_tape_taker_delta_uses_the_tape_only_when_the_5m_window_is_reliable():
+    candles = lambda coin, iv, s, e: _candles()
+    buckets, why = fm.fetch_tape_taker_delta("HYPE", TAPE_NOW, fetch_flow=lambda c: (_tape(), None),
+                                             candles=candles)
+    assert why is None and buckets["5m"]["reliable"] is True
+    buckets, why = fm.fetch_tape_taker_delta("HYPE", TAPE_NOW, candles=candles,
+                                             fetch_flow=lambda c: (_tape(connected=False), None))
+    assert buckets is None and why == "recorder disconnected"
+
+
+def test_fetch_tape_taker_delta_falls_back_on_unreachable_unrecorded_or_a_crash():
+    candles = lambda coin, iv, s, e: _candles()
+    for answer in ((None, "unreachable"), (None, "coin not recorded"), (None, "not configured")):
+        assert fm.fetch_tape_taker_delta("DOGE", TAPE_NOW, fetch_flow=lambda c, a=answer: a,
+                                         candles=candles) == answer
+
+    def boom(*a):
+        raise fm.DataUnavailable("candles down")
+
+    assert fm.fetch_tape_taker_delta("HYPE", TAPE_NOW, fetch_flow=lambda c: (_tape(), None),
+                                     candles=boom) == (None, "unreachable")
+    assert fm.fetch_tape_taker_delta("HYPE", TAPE_NOW, fetch_flow=lambda c: ({"rows": "garbage"}, None),
+                                     candles=candles) == (None, "unreachable")
+
+
+def test_bucket_taker_delta_rest_is_still_unreliable_with_the_rest_source():
+    trades = [_trade(TAPE_NOW - 1_000 * i, "B" if i % 2 else "A", i) for i in range(1, 30)]
+    for window in fm.bucket_taker_delta(trades, TAPE_NOW).values():
+        assert window["source"] == "recent_trades_rest"
+        assert window["reliable"] is False
+        assert window["coverage_pct"] is None and window["capture_complete"] is None
+
+
+def _stub_assemble(monkeypatch, tape_answer):
+    monkeypatch.setattr(fm, "fetch_core_meta", lambda: [
+        {"universe": [{"name": "HYPE"}, {"name": "BTC"}]},
+        [{"markPx": "46", "oraclePx": "46", "midPx": "46", "funding": "0", "premium": "0",
+          "openInterest": "0", "prevDayPx": "46", "dayNtlVlm": "0"},
+         {"markPx": "1", "oraclePx": "1", "midPx": "1", "funding": "0", "premium": "0",
+          "openInterest": "0", "prevDayPx": "1", "dayNtlVlm": "0"}]])
+    monkeypatch.setattr(fm, "fetch_candles", lambda *a: [])
+    monkeypatch.setattr(fm, "fetch_l2", lambda c: {"asks": {}, "bids": {}})
+    monkeypatch.setattr(fm, "fetch_recent_trades", lambda coin: [_trade(TAPE_NOW - 1_000)])
+    monkeypatch.setattr(fm, "merge_trade_cache", lambda c, f, n: f)
+    monkeypatch.setattr(fm, "update_oi_cache", lambda *a, **k: [])
+    monkeypatch.setattr(fm, "fetch_btc_dominance",
+                        lambda: (_ for _ in ()).throw(fm.DataUnavailable("DATA UNAVAILABLE: x")))
+    monkeypatch.setattr(fm, "_read_latest_btcd",
+                        lambda *a, **k: (_ for _ in ()).throw(fm.DataUnavailable("DATA UNAVAILABLE: x")))
+    monkeypatch.setattr(fm, "fetch_tape_taker_delta", lambda coin, now_ms, **kw: tape_answer)
+
+
+def test_assemble_falls_back_to_rest_with_reliable_false_and_says_why(monkeypatch):
+    for reason in ("unreachable", "coin not recorded", "gap"):
+        _stub_assemble(monkeypatch, (None, reason))
+        out = fm.assemble("HYPE", now_ms=TAPE_NOW)
+        assert out["taker_delta_source"] == {"used": "recent_trades_rest", "fallback_reason": reason}
+        assert out["taker_delta"]["5m"]["source"] == "recent_trades_rest"
+        assert out["taker_delta"]["5m"]["reliable"] is False
+        assert out["taker_delta"]["5m"]["coverage_pct"] is None
+        assert out["flow"]["coverage_ok"] is False
+
+
+def test_assemble_uses_a_reliable_tape_and_the_flow_gate_accepts_it(monkeypatch):
+    buckets = fm.bucket_taker_delta_tape(_tape(), _candles(), TAPE_NOW)
+    _stub_assemble(monkeypatch, (buckets, None))
+    out = fm.assemble("HYPE", now_ms=TAPE_NOW)
+    assert out["taker_delta_source"] == {"used": "ws_recorder", "fallback_reason": None}
+    assert out["taker_delta"]["5m"]["source"] == "ws_recorder"
+    assert out["flow"]["coverage_ok"] is True
+    assert out["flow"]["aggressor_bias"] == "buyers"     # 66.7% buy share on a complete tape
