@@ -730,8 +730,11 @@ def test_a_tape_body_older_than_60s_or_clocks_far_apart_is_stale():
         return fm.fetch_tape_taker_delta("HYPE", fetch_flow=lambda c: (_tape(), None),
                                          candles=_candles_fn(), clock=lambda: TAPE_NOW + clock_offset)
 
-    assert run(60_000)[1] is None            # exactly the tolerance still passes
-    for offset in (61_000, 300_000, -61_000):
+    # _tape's last trade is 5 s before the tape's clock, so on our clock it is
+    # 60 s old at +55 s: the freshness rule holds on whichever clock is later.
+    assert run(55_000)[1] is None            # exactly 60 s old on our clock still passes
+    assert run(-60_000)[1] is None           # our clock behind by exactly the tolerance
+    for offset in (56_000, 61_000, 300_000, -61_000):
         assert run(offset) == (None, "stale")
 
 

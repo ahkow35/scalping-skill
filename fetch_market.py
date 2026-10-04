@@ -854,7 +854,13 @@ def fetch_tape_taker_delta(coin, *, fetch_flow=None, candles=None, clock=None):
         tape_now = tape["now_ms"]
         if isinstance(tape_now, bool) or not isinstance(tape_now, int):
             return None, "malformed tape"
-        if abs(clock() - tape_now) > TAPE_CLOCK_TOLERANCE_MS:
+        our_now = clock()
+        if abs(our_now - tape_now) > TAPE_CLOCK_TOLERANCE_MS:
+            return None, "stale"
+        # The 60 s freshness rule holds on whichever clock is later, so a slow
+        # response cannot stretch it: body age plus trade age stays within it.
+        last_ms = tape.get("last_trade_ms")
+        if last_ms is not None and our_now - last_ms > flow_mod.DEFAULT_PARAMS["max_sample_age_ms"]:
             return None, "stale"
     except Exception:
         return None, "malformed tape"
