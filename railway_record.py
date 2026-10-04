@@ -47,6 +47,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 import recorder as rec
 
@@ -543,7 +544,7 @@ def build_full_status(snapshot, uploader, *, status_interval_s=STATUS_INTERVAL_S
     return merged
 
 
-# ── HTTP: /health, /status — stdlib only, no secrets, dual-stack ───────────
+# ── HTTP: /health, /status, /flow — stdlib only, no secrets, dual-stack ────
 
 class DualStackHTTPServer(ThreadingHTTPServer):
     """Binds `::` so the service is reachable over Railway's IPv6 private
@@ -560,7 +561,11 @@ class DualStackHTTPServer(ThreadingHTTPServer):
         super().server_bind()
 
 
-def make_handler(snapshot, uploader):
+def make_handler(snapshot, uploader, flow=None):
+    """`flow`, when given, is `flow(coin) -> dict | None` backing GET
+    /flow?coin=X: a dict is the per-minute tape body, None means the coin is
+    not recorded here (404 with a JSON body). Without it /flow is a 404."""
+
     class RecordHandler(BaseHTTPRequestHandler):
         server_version = "railway-record/1"
 
@@ -576,7 +581,20 @@ def make_handler(snapshot, uploader):
             if body:
                 self.wfile.write(body)
 
+        def _respond_json(self, code, payload):
+            self._respond(code, json.dumps(payload, allow_nan=False).encode("utf-8"),
+                          content_type="application/json")
+
         def do_GET(self):
+            url = urlsplit(self.path)
+            if url.path == "/flow" and flow is not None:
+                coin = (parse_qs(url.query).get("coin") or [""])[0].strip()
+                body = flow(coin) if coin else None
+                if body is None:
+                    self._respond_json(404, {"error": "coin_not_recorded", "coin": coin})
+                else:
+                    self._respond_json(200, body)
+                return
             # Process-alive only — never tied to WS connectivity or upload
             # health, or Railway's own healthcheck would restart the
             # container during an ordinary exchange outage and manufacture
@@ -646,6 +664,14 @@ def build_s3_client(s3_config, make_client=make_real_s3_client):
     return client, s3_config.bucket, f"{s3_config.endpoint}|{s3_config.bucket}"
 
 
+def resolve_flow_coin(coins, requested):
+    """The configured spelling of `requested` (matched case-insensitively), or
+    None when this recorder does not capture it. Files are named by the
+    configured spelling, so that is what callers must use for paths."""
+    wanted = requested.upper()
+    return next((c for c in coins if c.upper() == wanted), None)
+
+
 def run():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     config = parse_env()
@@ -660,7 +686,18 @@ def run():
                         keep_days=config["keep_days"])
     uploader.start()
 
-    server = DualStackHTTPServer(("::", config["port"]), make_handler(snapshot, uploader))
+    tail = rec.FlowTailCache(config["out_dir"])
+
+    def flow(requested):
+        coin = resolve_flow_coin(config["coins"], requested)
+        if coin is None:
+            return None
+        # Both must agree: the live socket flag (a drop shows at once) and the
+        # status snapshot (which also reads a stalled recorder as disconnected).
+        connected = fr.connected and build_full_status(snapshot, uploader)["connected"]
+        return tail.read(coin, connected=connected)
+
+    server = DualStackHTTPServer(("::", config["port"]), make_handler(snapshot, uploader, flow))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     logger.info("recorder http server listening on :%d", config["port"])

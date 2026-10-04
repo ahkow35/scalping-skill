@@ -669,3 +669,61 @@ def test_huge_integer_blocks_without_crashing(capsys, monkeypatch):
     out = json.loads(capsys.readouterr().out)
     assert code == 2
     assert out["entry_allowed"] is False
+
+
+# ── remote_flow: the watcher's GET /flow, same URL and token mechanism ─────
+
+def _flow_env():
+    return {"SCALP_WATCHER_URL": URL, "SCALP_WATCHER_TOKEN": SECRET}
+
+
+def test_remote_flow_sends_the_bearer_token_and_returns_the_payload(tmp_path):
+    seen = {}
+
+    def get(url, **kwargs):
+        seen.update(url=url, **kwargs)
+        return FakeResponse(200, {"coin": "HYPE", "rows": []})
+
+    payload, reason = monitor.remote_flow("HYPE", tmp_path, env=_flow_env(), get=get, keychain=no_token)
+    assert (payload, reason) == ({"coin": "HYPE", "rows": []}, None)
+    assert seen["url"] == URL + "/flow"
+    assert seen["params"] == {"coin": "HYPE"}
+    assert seen["timeout"] == 5 == monitor.FLOW_REQUEST_TIMEOUT_S
+    assert seen["headers"] == {"Authorization": f"Bearer {SECRET}"}
+    assert seen["allow_redirects"] is False
+
+
+def test_remote_flow_reasons_for_every_failure_and_never_leaks_the_token(tmp_path):
+    def fails(response=None, exc=None):
+        def get(url, **kw):
+            if exc:
+                raise exc
+            return response
+        return get
+
+    cases = [
+        (fails(exc=requests.ConnectionError(SECRET)), "unreachable"),
+        (fails(FakeResponse(404, {"error": "coin_not_recorded"})), "coin not recorded"),
+        (fails(FakeResponse(401)), "unauthorized"),
+        (fails(FakeResponse(400)), "bad request"),
+        (fails(FakeResponse(503)), "recorder not configured"),
+        (fails(FakeResponse(502)), "unreachable"),
+        (fails(FakeResponse(404)), "unreachable"),                       # a watcher without /flow
+        (fails(FakeResponse(404, {"error": "other"})), "unreachable"),
+        (fails(FakeResponse(200, malformed=True)), "malformed tape"),
+        (fails(FakeResponse(200, [1, 2])), "malformed tape"),
+        (fails(FakeResponse(200, {"echo": SECRET})), "malformed tape"),
+    ]
+    for get, reason in cases:
+        payload, got = monitor.remote_flow("HYPE", tmp_path, env=_flow_env(), get=get, keychain=no_token)
+        assert payload is None and got == reason
+        assert SECRET not in got
+
+
+def test_remote_flow_not_configured_without_url_or_token(tmp_path):
+    def boom(*a, **k):
+        raise AssertionError("must not call the network")
+
+    assert monitor.remote_flow("HYPE", tmp_path, env={}, get=boom, keychain=no_token) == (None, "watcher not configured")
+    assert monitor.remote_flow("HYPE", tmp_path, env={"SCALP_WATCHER_URL": URL}, get=boom,
+                               keychain=no_token) == (None, "watcher not configured")

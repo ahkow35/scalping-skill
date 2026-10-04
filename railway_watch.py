@@ -36,12 +36,14 @@ import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections import deque
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, quote, urlsplit
 from zoneinfo import ZoneInfo
 
 import requests
@@ -81,6 +83,8 @@ RECORDER_STATUS_TIMEOUT_S = 5.0
 RECORDER_POLL_INTERVAL_S = 60
 RECORDER_SILENT_THRESHOLD_S = 5 * 60
 RECORDER_UPLOAD_FAILING_THRESHOLD_S = 24 * 3600
+FLOW_FETCH_TIMEOUT_S = 5.0
+FLOW_COIN_PATTERN = re.compile(r"[A-Za-z0-9:_.-]{1,32}")
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +531,23 @@ def fetch_recorder_status(url, *, timeout=RECORDER_STATUS_TIMEOUT_S, get=request
     return body if isinstance(body, dict) else None
 
 
+def fetch_recorder_flow(status_url, coin, *, timeout=FLOW_FETCH_TIMEOUT_S, get=requests.get):
+    """GET the recorder's `/flow?coin=X` at request time, over the same
+    private-network host as RECORDER_STATUS_URL. Returns (status, body_bytes)
+    to pass on: (200, body) for a tape, (404, body) when the recorder does not
+    capture the coin, otherwise (502, a fixed body). Never echoes the
+    recorder's error text or any URL, so nothing sensitive can leak."""
+    base = urlsplit(status_url)
+    url = f"{base.scheme}://{base.netloc}/flow?coin={quote(coin, safe='')}"
+    try:
+        response = get(url, timeout=timeout, allow_redirects=False)
+        if response.status_code in (200, 404) and isinstance(response.json(), dict):
+            return response.status_code, response.content
+    except (requests.RequestException, ValueError):
+        pass
+    return 502, b'{"error": "recorder_unavailable"}'
+
+
 # ---------------------------------------------------------------------------
 # Latest-report HTTP address — stdlib only, token-protected, nothing else
 # served. Built as a handler factory so it can be exercised in tests without
@@ -559,12 +580,14 @@ class ReportState:
             return self._latest
 
 
-def make_handler(state, token):
+def make_handler(state, token, flow_fetch=None):
     """Build a BaseHTTPRequestHandler bound to this state and token. GET
     /report needs 'Authorization: Bearer <token>', compared with
     hmac.compare_digest; a missing/wrong token is a bare 401, an unset token
     is a bare 503 (never open). GET /health is unauthenticated and serves no
-    data. Nothing else is served."""
+    data. GET /flow?coin=X (same token check) passes on the recorder's tape for
+    the coin via `flow_fetch(coin) -> (status, body)`; 503 when `flow_fetch` is
+    None (no RECORDER_STATUS_URL). Nothing else is served."""
 
     class ReportHandler(BaseHTTPRequestHandler):
         server_version = "railway-watch/1"
@@ -581,9 +604,31 @@ def make_handler(state, token):
             if body:
                 self.wfile.write(body)
 
+        def _flow(self, url):
+            if not token:
+                self._respond(503)
+                return
+            supplied = self.headers.get("Authorization", "").encode("utf-8")
+            if not hmac.compare_digest(supplied, f"Bearer {token}".encode("utf-8")):
+                self._respond(401)
+                return
+            if flow_fetch is None:
+                self._respond(503)
+                return
+            coin = (parse_qs(url.query).get("coin") or [""])[0]
+            if not FLOW_COIN_PATTERN.fullmatch(coin):
+                self._respond(400)
+                return
+            code, body = flow_fetch(coin)
+            self._respond(code, body, content_type="application/json")
+
         def do_GET(self):
             if self.path == "/health":
                 self._respond(200, b"ok")
+                return
+            url = urlsplit(self.path)
+            if url.path == "/flow":
+                self._flow(url)
                 return
             if self.path != "/report":
                 self._respond(404)
@@ -885,6 +930,9 @@ def run():
     # Unset (the default) means the recorder check never runs — see loop().
     recorder_status_url = os.environ.get("RECORDER_STATUS_URL")
 
+    flow_fetch = ((lambda coin: fetch_recorder_flow(recorder_status_url, coin))
+                  if recorder_status_url else None)
+
     def deliver(text):
         if bot_token and chat_id:
             return send_telegram(bot_token, chat_id, text)
@@ -895,7 +943,7 @@ def run():
     outbox.start()
 
     state = ReportState()
-    server = ThreadingHTTPServer(("0.0.0.0", port), make_handler(state, report_token))
+    server = ThreadingHTTPServer(("0.0.0.0", port), make_handler(state, report_token, flow_fetch))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     logger.info("report server listening on :%d (token %s)", port,

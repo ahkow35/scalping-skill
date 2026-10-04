@@ -52,7 +52,9 @@ import os
 import shutil
 import signal
 import sys
+import threading
 import time
+from array import array
 from datetime import datetime, timezone
 
 WS_URL = "wss://api.hyperliquid.xyz/ws"
@@ -392,6 +394,12 @@ class FlowRecorder:
         self._connected = False
         self._stop = None             # set in run() (needs a live loop)
 
+    @property
+    def connected(self):
+        """Live socket state, readable from another thread (a single bool).
+        /flow uses it so a drop is seen at once, not at the next status tick."""
+        return self._connected
+
     # -- message handling (pure-ish: no socket I/O, easy to unit test) --
 
     def handle_trade(self, coin, trade):
@@ -719,6 +727,327 @@ def verify_sample_pct(out_dir, coin, window_min=30, now=None):
         "candle_n_sum": n_sum,
         "sample_pct": sample_pct,
     }
+
+
+# ── flow tape: per-minute taker aggregation for the live /scalp flow gate ──
+
+FLOW_WINDOW_MS = 4 * 60 * 60 * 1000
+MINUTE_MS = 60_000
+
+
+def aggregate_flow(records, *, coin, now, connected, window_ms=FLOW_WINDOW_MS):
+    """Pure aggregation: no I/O, no socket. `records` are the recorder's
+    `trades` and `gap` records from a trades file (any order, duplicates
+    allowed; other record types are ignored). Returns per-minute taker
+    notional for the trailing `window_ms` plus what a reader needs to judge
+    completeness itself — this does no gate logic. side 'B' = taker buy, 'A' = taker sell; notional = px * sz.
+
+    Trades are deduped by tid across files (a day can sit in both `.gz` and
+    plain form). `last_trade_ms` and `first_trade_ms` come from the trades in
+    the window (None, never 0, when there are none). A gap is listed when the
+    hole could touch the window: its reconnect is inside it."""
+    win_start = now - window_ms
+    minutes = {}
+    seen_tids = set()
+    gaps = {}
+    first_ms = last_ms = None
+    for record in records:
+        if record.get("record_type") == "gap":
+            reconnect = record.get("reconnect_ts_ms")
+            if reconnect is not None and win_start <= reconnect <= now:
+                gaps[reconnect] = {"reconnect_ts_ms": reconnect,
+                                   "last_seen_exchange_ts_ms": record.get("last_seen_exchange_ts_ms")}
+            continue
+        if record.get("record_type") != "trades":
+            continue
+        trade = record.get("data") or {}
+        ex_ms = record.get("exchange_ts_ms")
+        if ex_ms is None or ex_ms < win_start or ex_ms > now:
+            continue
+        tid = trade.get("tid")
+        if tid is not None:
+            if tid in seen_tids:
+                continue
+            seen_tids.add(tid)
+        side = trade.get("side")
+        if side not in ("B", "A"):
+            continue
+        try:
+            notional = float(trade["px"]) * float(trade["sz"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        row = minutes.setdefault(ex_ms // MINUTE_MS * MINUTE_MS,
+                                 {"buy_usdc": 0.0, "sell_usdc": 0.0, "count": 0})
+        row["buy_usdc" if side == "B" else "sell_usdc"] += notional
+        row["count"] += 1
+        first_ms = ex_ms if first_ms is None else min(first_ms, ex_ms)
+        last_ms = ex_ms if last_ms is None else max(last_ms, ex_ms)
+
+    return {
+        "coin": coin,
+        "now_ms": now,
+        "window_start_ms": win_start,
+        "connected": bool(connected),
+        "first_trade_ms": first_ms,
+        "last_trade_ms": last_ms,
+        "rows": [{"t_ms": t, "buy_usdc": round(r["buy_usdc"], 2),
+                  "sell_usdc": round(r["sell_usdc"], 2), "count": r["count"]}
+                 for t, r in sorted(minutes.items())],
+        "gaps": [gaps[k] for k in sorted(gaps)],
+    }
+
+
+def read_flow(out_dir, coin, *, connected, now=None, window_ms=FLOW_WINDOW_MS):
+    """Read `coin`'s trades files (today's plain file plus, across UTC
+    midnight, the finished day's `.gz`) and aggregate the trailing window.
+    Read-only; runs on the HTTP thread, never the recording loop."""
+    now = now_ms() if now is None else now
+    day_ms = 86_400_000
+    paths = [file_path(out_dir, coin, "trades", day_str_utc(d))
+             for d in range(((now - window_ms) // day_ms) * day_ms, now + 1, day_ms)]
+    records = (r for path in paths for r in iter_jsonl_records(path))
+    return aggregate_flow(records, coin=coin, now=now, connected=connected, window_ms=window_ms)
+
+
+class _Minute:
+    """One UTC minute of one coin's tape: running totals, plus the raw trades
+    (compact arrays) so the window's oldest, part-expired minute can be
+    recomputed exactly instead of approximated."""
+    __slots__ = ("buy", "sell", "count", "lo", "hi", "ex", "notional", "is_buy", "tids")
+
+    def __init__(self):
+        self.buy = self.sell = 0.0
+        self.count = 0
+        self.lo = self.hi = None
+        self.ex = array("q")
+        self.notional = array("d")
+        self.is_buy = array("b")
+        self.tids = []
+
+    def add(self, ex_ms, is_buy, notional):
+        if is_buy:
+            self.buy += notional
+        else:
+            self.sell += notional
+        self.count += 1
+        self.lo = ex_ms if self.lo is None else min(self.lo, ex_ms)
+        self.hi = ex_ms if self.hi is None else max(self.hi, ex_ms)
+        self.ex.append(ex_ms)
+        self.notional.append(notional)
+        self.is_buy.append(1 if is_buy else 0)
+
+    def totals_from(self, win_start):
+        """(buy, sell, count, first_ms, last_ms) of the trades at or after
+        win_start, summed in arrival order like the full read."""
+        buy = sell = 0.0
+        count = 0
+        first = last = None
+        for ex_ms, n, b in zip(self.ex, self.notional, self.is_buy):
+            if ex_ms < win_start:
+                continue
+            if b:
+                buy += n
+            else:
+                sell += n
+            count += 1
+            first = ex_ms if first is None else min(first, ex_ms)
+            last = ex_ms if last is None else max(last, ex_ms)
+        return buy, sell, count, first, last
+
+
+class _CoinTail:
+    """One coin's incremental state. Only FlowTailCache.read touches it, under
+    `lock`; nothing here is shared with the recorder's receive loop."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.reset()
+
+    def reset(self):
+        self.offsets = {}        # plain trades file -> bytes already consumed
+        self.gz_done = {}        # rotated .gz file already read -> its size then
+        self.minutes = {}        # minute start ms -> _Minute
+        self.seen = set()        # tids inside the window (dedupe)
+        self.gaps = {}           # reconnect_ts_ms -> gap dict
+        self.future = []         # (ex_ms, trade) stamped after the request clock
+        self.last_now = None
+        self.ingested = 0        # records decoded so far (observability / tests)
+
+    def _add(self, ex_ms, trade):
+        tid = trade.get("tid")
+        minute_start = ex_ms // MINUTE_MS * MINUTE_MS
+        minute = self.minutes.get(minute_start)
+        if tid is not None:
+            if tid in self.seen:
+                return
+            self.seen.add(tid)
+            if minute is None:
+                minute = self.minutes[minute_start] = _Minute()
+            minute.tids.append(tid)
+        side = trade.get("side")
+        if side not in ("B", "A"):
+            return
+        try:
+            notional = float(trade["px"]) * float(trade["sz"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if minute is None:
+            minute = self.minutes[minute_start] = _Minute()
+        minute.add(ex_ms, side == "B", notional)
+
+    def ingest(self, record, now, win_start):
+        self.ingested += 1
+        if record.get("record_type") == "gap":
+            reconnect = record.get("reconnect_ts_ms")
+            if reconnect is not None and reconnect >= win_start:
+                self.gaps[reconnect] = {"reconnect_ts_ms": reconnect,
+                                        "last_seen_exchange_ts_ms": record.get("last_seen_exchange_ts_ms")}
+            return
+        if record.get("record_type") != "trades":
+            return
+        ex_ms = record.get("exchange_ts_ms")
+        if ex_ms is None or ex_ms < win_start:
+            return
+        trade = record.get("data") or {}
+        if ex_ms > now:
+            self.future.append((ex_ms, trade))
+        else:
+            self._add(ex_ms, trade)
+
+    def _read_new_lines(self, path, now, win_start):
+        """Consume the complete lines appended to `path` since the last read.
+        A trailing partial line (the recorder mid-write) stays for next time."""
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return True
+        offset = self.offsets.get(path, 0)
+        if size < offset:
+            return False                     # file replaced or truncated: rebuild
+        if size == offset:
+            return True
+        with open(path, "rb") as f:
+            f.seek(offset)
+            data = f.read(size - offset)
+        end = data.rfind(b"\n")
+        if end < 0:
+            return True
+        self.offsets[path] = offset + end + 1
+        for line in data[:end].split(b"\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            self.ingest(record, now, win_start)
+        return True
+
+    def _read_gz(self, path, now, win_start):
+        with gzip.open(path, "rt") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                self.ingest(record, now, win_start)
+
+    def sync(self, out_dir, coin, now, win_start, window_ms):
+        day_ms = 86_400_000
+        plains = [file_path(out_dir, coin, "trades", day_str_utc(d))
+                  for d in range(((now - window_ms) // day_ms) * day_ms, now + 1, day_ms)]
+        keep = set(plains) | {p + ".gz" for p in plains}
+        self.offsets = {p: o for p, o in self.offsets.items() if p in keep}
+        self.gz_done = {p: n for p, n in self.gz_done.items() if p in keep}
+        for plain in plains:
+            gz = plain + ".gz"
+            if os.path.exists(gz):
+                size = os.path.getsize(gz)
+                if gz not in self.gz_done:
+                    self._read_gz(gz, now, win_start)
+                    self.gz_done[gz] = size
+                elif self.gz_done[gz] != size:
+                    return False             # archive gained a member (clock stepped back): rebuild
+            if not self._read_new_lines(plain, now, win_start):
+                return False
+        return True
+
+    def snapshot(self, out_dir, coin, connected, now, window_ms):
+        win_start = now - window_ms
+        if self.last_now is not None and now < self.last_now:
+            self.reset()                     # clock stepped back: rebuild from disk
+        for _ in range(2):
+            if self.sync(out_dir, coin, now, win_start, window_ms):
+                break
+            self.reset()
+        self.last_now = now
+
+        still_future = []
+        for ex_ms, trade in self.future:
+            if ex_ms <= now:
+                self._add(ex_ms, trade)
+            else:
+                still_future.append((ex_ms, trade))
+        self.future = still_future
+
+        for t in [t for t in self.minutes if t + MINUTE_MS <= win_start]:
+            for tid in self.minutes.pop(t).tids:
+                self.seen.discard(tid)
+        self.gaps = {k: g for k, g in self.gaps.items() if k >= win_start}
+
+        rows = []
+        first_ms = last_ms = None
+        for t in sorted(self.minutes):
+            minute = self.minutes[t]
+            if t >= win_start:
+                buy, sell, count = minute.buy, minute.sell, minute.count
+                lo, hi = minute.lo, minute.hi
+            else:                            # the one part-expired minute
+                buy, sell, count, lo, hi = minute.totals_from(win_start)
+            if not count:
+                continue
+            rows.append({"t_ms": t, "buy_usdc": round(buy, 2), "sell_usdc": round(sell, 2),
+                         "count": count})
+            first_ms = lo if first_ms is None else min(first_ms, lo)
+            last_ms = hi if last_ms is None else max(last_ms, hi)
+        return {
+            "coin": coin,
+            "now_ms": now,
+            "window_start_ms": win_start,
+            "connected": bool(connected),
+            "first_trade_ms": first_ms,
+            "last_trade_ms": last_ms,
+            "rows": rows,
+            "gaps": [self.gaps[k] for k in sorted(self.gaps) if k <= now],
+        }
+
+
+class FlowTailCache:
+    """aggregate_flow's answer, kept up to date by reading only the bytes
+    appended to the trades file since the last request. Owned by the HTTP
+    side: its own lock per coin, no state shared with the recording loop. The
+    first request after a restart reads the day's file once; later requests
+    cost in proportion to what was appended. Across UTC midnight it reads the
+    finished day's `.gz` once (tids dedupe any overlap with the plain file it
+    had been tailing). Result equals a full read (read_flow) of the same files;
+    the pure aggregate_flow stays as the reference."""
+
+    def __init__(self, out_dir, *, window_ms=FLOW_WINDOW_MS):
+        self._out_dir = out_dir
+        self._window_ms = window_ms
+        self._meta = threading.Lock()
+        self._coins = {}
+
+    def read(self, coin, *, connected, now=None):
+        now = now_ms() if now is None else now
+        with self._meta:
+            tail = self._coins.setdefault(coin, _CoinTail())
+        with tail.lock:
+            return tail.snapshot(self._out_dir, coin, connected, now, self._window_ms)
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────

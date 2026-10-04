@@ -1248,3 +1248,108 @@ def test_liquidity_failure_replies_with_a_fallback():
                                     clock=lambda: 0)
     commands.poll_once()
     assert sent == ["Could not build the /liquidity reply — see the watcher logs."]
+
+
+# ---------------------------------------------------------------------------
+# GET /flow?coin=X — token-protected pass-through of the recorder's tape
+# ---------------------------------------------------------------------------
+
+FLOW_REQUEST = b"GET /flow?coin=HYPE HTTP/1.1\r\nAuthorization: Bearer correct-token\r\n\r\n"
+
+
+def _flow_fetch(code=200, body=b'{"coin": "HYPE", "rows": []}'):
+    calls = []
+
+    def fetch(coin):
+        calls.append(coin)
+        return code, body
+    fetch.calls = calls
+    return fetch
+
+
+def test_flow_endpoint_refuses_missing_and_wrong_token_without_calling_the_recorder():
+    fetch = _flow_fetch()
+    handler = rw.make_handler(rw.ReportState(), "correct-token", fetch)
+    missing = invoke(handler, b"GET /flow?coin=HYPE HTTP/1.1\r\n\r\n")
+    wrong = invoke(handler, b"GET /flow?coin=HYPE HTTP/1.1\r\nAuthorization: Bearer nope\r\n\r\n")
+    assert b"401" in status_line(missing) and b"401" in status_line(wrong)
+    assert missing.endswith(b"\r\n\r\n") and wrong.endswith(b"\r\n\r\n")  # nothing in the body
+    assert fetch.calls == []
+
+
+def test_flow_endpoint_503_when_token_unset_or_recorder_unconfigured():
+    assert b"503" in status_line(invoke(rw.make_handler(rw.ReportState(), None, _flow_fetch()), FLOW_REQUEST))
+    assert b"503" in status_line(invoke(rw.make_handler(rw.ReportState(), "correct-token", None), FLOW_REQUEST))
+
+
+def test_flow_endpoint_passes_the_recorder_body_through_with_the_right_token():
+    fetch = _flow_fetch()
+    response = invoke(rw.make_handler(rw.ReportState(), "correct-token", fetch), FLOW_REQUEST)
+    assert b"200" in status_line(response)
+    assert json.loads(response.split(b"\r\n\r\n", 1)[1]) == {"coin": "HYPE", "rows": []}
+    assert fetch.calls == ["HYPE"]
+
+
+def test_flow_endpoint_rejects_a_malformed_coin():
+    fetch = _flow_fetch()
+    handler = rw.make_handler(rw.ReportState(), "correct-token", fetch)
+    for target in (b"/flow", b"/flow?coin=", b"/flow?coin=a%2Fb"):
+        request = b"GET " + target + b" HTTP/1.1\r\nAuthorization: Bearer correct-token\r\n\r\n"
+        assert b"400" in status_line(invoke(handler, request))
+    assert fetch.calls == []
+
+
+class _Resp:
+    def __init__(self, status_code, body):
+        self.status_code = status_code
+        self.content = body
+
+    def json(self):
+        return json.loads(self.content)
+
+
+def test_fetch_recorder_flow_builds_the_recorder_url_from_the_status_url():
+    seen = {}
+
+    def get(url, **kwargs):
+        seen.update(url=url, **kwargs)
+        return _Resp(200, b'{"coin": "HYPE"}')
+
+    code, body = rw.fetch_recorder_flow("http://rec.railway.internal:8080/status", "HYPE", get=get)
+    assert (code, json.loads(body)) == (200, {"coin": "HYPE"})
+    assert seen["url"] == "http://rec.railway.internal:8080/flow?coin=HYPE"
+    assert seen["timeout"] == rw.FLOW_FETCH_TIMEOUT_S
+
+
+def test_fetch_recorder_flow_passes_a_404_and_turns_any_other_failure_into_a_bare_502():
+    def recorded_404(url, **kw):
+        return _Resp(404, b'{"error": "coin_not_recorded", "coin": "DOGE"}')
+
+    assert rw.fetch_recorder_flow("http://r:8080/status", "DOGE", get=recorded_404)[0] == 404
+
+    def boom(url, **kw):
+        raise rw.requests.ConnectionError("secret-host.internal refused")
+
+    def server_error(url, **kw):
+        return _Resp(500, b"Traceback: secret-token")
+
+    def not_json(url, **kw):
+        return _Resp(200, b"<html>")
+
+    for get in (boom, server_error, not_json):
+        code, body = rw.fetch_recorder_flow("http://r:8080/status", "HYPE", get=get)
+        assert code == 502
+        assert b"secret" not in body
+
+
+def test_report_response_is_byte_identical_with_and_without_the_flow_route():
+    state = rw.ReportState()
+    state.update(12345, {"status": "CLEAR", "entry_allowed": True})
+    request = b"GET /report HTTP/1.1\r\nAuthorization: Bearer correct-token\r\n\r\n"
+    without = invoke(rw.make_handler(state, "correct-token"), request)
+    with_flow = invoke(rw.make_handler(state, "correct-token", _flow_fetch()), request)
+    assert without == with_flow
+    for bad in (b"GET /report HTTP/1.1\r\n\r\n",
+                b"GET /report HTTP/1.1\r\nAuthorization: Bearer x\r\n\r\n"):
+        assert invoke(rw.make_handler(state, "correct-token"), bad) == \
+            invoke(rw.make_handler(state, "correct-token", _flow_fetch()), bad)

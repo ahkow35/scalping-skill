@@ -1,5 +1,92 @@
 # Changelog — scalp skill
 
+## 2026-10-05 — Cross-review round 3: each minute must clear the coverage floor
+
+- **One thin minute hidden by a full window.** A minute that caught 1 of 1,000
+  trades was averaged away by the complete minutes around it (5m still read
+  75%, 1h 98%). Every compared minute must now reach the same 50% floor on its
+  own, or the window is not complete (`capture incomplete`). `flow.py`
+  thresholds are unchanged. Not yet checked against live data: if the
+  exchange's per-minute trade counts and the recorder's differ in normal
+  running, this shows as extra WAITs, never as a false confirmation.
+
+## 2026-10-05 — Cross-review round 2: the newest closed minute now counts
+
+- **Tape that thins out at the end.** The coverage test stopped at the minute
+  of the tape's last trade, so the minute that had just closed was never
+  checked: a tape that caught 1 of 1,000 trades there still read 100%. The
+  test now runs on the clock alone, through every closed minute; only the
+  current partial minute is left out.
+
+## 2026-10-04 — Cross-review fixes to the recorder tape (Codex, round 1)
+
+Five ways an incomplete or stale tape could still read as reliable, all closed:
+
+- **Late-starting or holed tape.** Coverage now counts every closed minute of
+  the window, not just from the tape's first trade. A minute the exchange
+  traded in but the tape has nothing for makes the window not complete
+  (new fallback reason: `capture incomplete`).
+- **Recorder dropped between status ticks.** `/flow` now reads the live socket
+  flag as well as the 30-second status snapshot, so a drop shows at once.
+- **Tape ageing out during the candle requests.** Freshness is checked again
+  after the candles arrive.
+- **Wrong coin.** A tape whose `coin` is not the one asked for is refused.
+- **Archive that grew.** The cache re-reads a finished day's `.gz` if its size
+  changed (the writer appends a member when the clock steps back over midnight).
+
+No threshold changed. 818 tests pass.
+
+## 2026-10-04 — Review fixes to the recorder tape, and BTC on the recorder
+An independent review blocked the tape change; this round fixes it.
+- Tape age no longer goes negative: the tape is measured on the recorder's own
+  clock (`now_ms` in the `/flow` body) for the age, the window and the span.
+  The response itself is refused as `stale` if our clock (read after it
+  arrives) is more than 60 s from the tape's either way.
+- The recorder's `/flow` no longer re-reads the whole day's file on every
+  request: `recorder.FlowTailCache` reads only appended bytes (complete lines
+  only), prunes to the 4 h window and handles UTC midnight. A test asserts it
+  equals the full read. ADR 0003's cost note is updated.
+- The tape lookup is now opt-in: `assemble(..., use_tape=False)` by default.
+  Only `fetch_market.py`'s command-line entry point (what `/scalp` runs) passes
+  `use_tape=True`; scan2 and every other caller make no Keychain read and no
+  network call, as before. The Mac-side `/flow` timeout is 5 s (was 10).
+- Distinct fallback reasons: `watcher not configured`, `unauthorized`,
+  `bad request`, `recorder not configured`, `coin not recorded`,
+  `unreachable`, `malformed tape`, `candles unavailable`, `stale`.
+- Coverage thresholds are read from `flow.DEFAULT_PARAMS` (no copies).
+- Coverage uses only the trailing hour of 1m candles, fetched in chunks of at
+  most 50 bars (HL truncates big candle payloads). The 4h window keeps its
+  sums but has coverage and capture_complete null and is never `reliable`;
+  flow.py reads only 5m, 15m and 1h, so the gate is unchanged.
+- `/flow` matches the requested coin case-insensitively against the recorder's
+  configured coins.
+- `RECORDER_COINS` is now `HYPE,ZEC,PUMP,BTC`. BTC is the busiest market:
+  check the 5 GB volume's free space after its first full day.
+- No new signal or threshold; `flow.DEFAULT_PARAMS` is unchanged.
+
+## 2026-10-04 — Recorder tape feeds the /scalp flow gate (fail closed)
+The flow gate (Step 1b) could never see complete flow: the REST sample is 10
+trades per call, so `coverage_ok` was always false. It can now read the
+Railway recorder's complete trade tape.
+- `recorder.py` / `railway_record.py`: `GET /flow?coin=X` on the recorder's
+  private server (per-minute taker rows for 4 hours, gap records, connected).
+- `railway_watch.py`: token-protected `GET /flow?coin=X` passes it on (503 when
+  `RECORDER_STATUS_URL` is unset, bare 502 on recorder errors). `/report` and
+  `entry_allowed` are untouched.
+- `fetch_market.py`: `bucket_taker_delta_tape` builds the same windows with
+  `source: "ws_recorder"`; coverage is recorded trades over the exchange's
+  per-candle trade count. `assemble()` tries the tape first and reports
+  `taker_delta_source` with a `fallback_reason`. Any failure, gap, stale tape,
+  missing count or unrecorded coin gives the old REST buckets (`reliable`
+  false), so the gate still says WAIT. `account_monitor.remote_flow` reuses
+  the `remote-check` URL and token handling.
+- No new signal or threshold; `flow.DEFAULT_PARAMS` is unchanged. Entry alpha is
+  still unvalidated and the gate only cuts conviction. The 58/42 bias
+  thresholds have never run against a complete tape.
+- `RECORDER_COINS` gains PUMP in `.railway/railway.ts`.
+- Merging redeploys both Railway services (not within 10 minutes of midnight
+  Singapore time). Live checks after deploy are listed in ADR 0003.
+
 ## 2026-10-04 — Fed net liquidity from the Fed's own pages
 Both FRED routes (API and CSV) time out from Railway's servers; a test inside
 the container showed the Fed, New York Fed and Treasury sites all answer.

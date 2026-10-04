@@ -24,7 +24,7 @@ export default defineRailway(() => {
     healthcheckTimeout: 30,
     replicas: { "asia-southeast1-eqsg3a": 1 },
     volumeMounts: { "/data": recorderVolume },
-    env: { PORT: preserve(), RECORDER_COINS: "HYPE,ZEC", RECORDER_DISK_FLOOR_GB: "2", S3_ACCESS_KEY_ID: preserve(), S3_BUCKET: preserve(), S3_ENDPOINT: preserve(), S3_REGION: preserve(), S3_SECRET_ACCESS_KEY: preserve() },
+    env: { PORT: preserve(), RECORDER_COINS: "HYPE,ZEC,PUMP,BTC", RECORDER_DISK_FLOOR_GB: "2", S3_ACCESS_KEY_ID: preserve(), S3_BUCKET: preserve(), S3_ENDPOINT: preserve(), S3_REGION: preserve(), S3_SECRET_ACCESS_KEY: preserve() },
   });
 
   // Account watcher (ACCOUNT-MONITOR.md).

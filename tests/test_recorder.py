@@ -742,3 +742,239 @@ def test_reconnect_that_drops_before_data_does_not_recount_the_gap(tmp_path):
     st = fr.status()
     assert st["gap_seconds_24h"] == 20.0
     assert st["reconnects_24h"] == 2
+
+
+# ── flow tape aggregation (GET /flow on the Railway recorder) ──────────────
+
+FLOW_NOW = MIDNIGHT + 10 * 3_600_000 + 30_000   # 10:00:30 UTC
+
+
+def _tape_trade(ms, side="B", tid=1, px="10", sz="2"):
+    return rec.make_data_record("HYPE", "trades", {"coin": "HYPE", "side": side, "px": px, "sz": sz,
+                                                   "time": ms, "tid": tid}, ms, ms + 5)
+
+
+def test_aggregate_flow_buckets_by_minute_with_side_and_notional():
+    minute = FLOW_NOW - 30_000 - 2 * 60_000
+    records = [_tape_trade(minute + 1_000, "B", 1, "10", "2"),
+               _tape_trade(minute + 2_000, "A", 2, "10", "1"),
+               _tape_trade(minute + 61_000, "B", 3, "5", "1")]
+    out = rec.aggregate_flow(records, coin="HYPE", now=FLOW_NOW, connected=True)
+    assert out["rows"] == [{"t_ms": minute, "buy_usdc": 20.0, "sell_usdc": 10.0, "count": 2},
+                           {"t_ms": minute + 60_000, "buy_usdc": 5.0, "sell_usdc": 0.0, "count": 1}]
+    assert out["first_trade_ms"] == minute + 1_000
+    assert out["last_trade_ms"] == minute + 61_000
+    assert out["now_ms"] == FLOW_NOW and out["coin"] == "HYPE" and out["connected"] is True
+    assert out["gaps"] == []
+
+
+def test_aggregate_flow_dedupes_by_tid_and_drops_trades_outside_the_window():
+    inside = FLOW_NOW - 60_000
+    records = [_tape_trade(inside, tid=7), _tape_trade(inside, tid=7),
+               _tape_trade(FLOW_NOW - rec.FLOW_WINDOW_MS - 1, tid=8),
+               _tape_trade(FLOW_NOW + 1, tid=9)]
+    out = rec.aggregate_flow(records, coin="HYPE", now=FLOW_NOW, connected=True)
+    assert sum(r["count"] for r in out["rows"]) == 1
+
+
+def test_aggregate_flow_with_no_trades_reports_none_not_zero():
+    out = rec.aggregate_flow([], coin="HYPE", now=FLOW_NOW, connected=False)
+    assert out["rows"] == [] and out["last_trade_ms"] is None and out["first_trade_ms"] is None
+    assert out["connected"] is False
+
+
+def test_aggregate_flow_lists_only_gaps_inside_the_window():
+    old = rec.make_gap_record("HYPE", "trades", 1, FLOW_NOW - rec.FLOW_WINDOW_MS - 5)
+    inside = rec.make_gap_record("HYPE", "trades", FLOW_NOW - 100_000, FLOW_NOW - 90_000)
+    cold = rec.make_gap_record("HYPE", "trades", None, FLOW_NOW - 3_600_000)
+    out = rec.aggregate_flow([old, inside, inside, cold], coin="HYPE", now=FLOW_NOW, connected=True)
+    assert out["gaps"] == [
+        {"reconnect_ts_ms": FLOW_NOW - 3_600_000, "last_seen_exchange_ts_ms": None},
+        {"reconnect_ts_ms": FLOW_NOW - 90_000, "last_seen_exchange_ts_ms": FLOW_NOW - 100_000}]
+
+
+def test_read_flow_crosses_utc_midnight_reading_gz_and_plain_and_dedupes(tmp_path):
+    import gzip
+    now = MIDNIGHT + 30 * 60_000 + 30_000        # 00:30:30 UTC
+    yesterday = MIDNIGHT - 60_000                 # 23:59 the day before
+    today = MIDNIGHT + 60_000
+    y_path = rec.file_path(str(tmp_path), "HYPE", "trades", rec.day_str_utc(yesterday)) + ".gz"
+    with gzip.open(y_path, "wt") as f:
+        for r in (_tape_trade(yesterday, "A", 1), _tape_trade(yesterday + 1, "B", 2)):
+            f.write(json.dumps(r) + "\n")
+    t_path = rec.file_path(str(tmp_path), "HYPE", "trades", rec.day_str_utc(today))
+    with open(t_path, "w") as f:
+        for r in (_tape_trade(yesterday + 1, "B", 2), _tape_trade(today, "B", 3)):  # tid 2 repeated
+            f.write(json.dumps(r) + "\n")
+        f.write('{"truncated": \n')  # a crash fragment is skipped, not fatal
+    out = rec.read_flow(str(tmp_path), "HYPE", connected=True, now=now)
+    assert sum(r["count"] for r in out["rows"]) == 3
+    assert [r["t_ms"] for r in out["rows"]] == [MIDNIGHT - 60_000, MIDNIGHT + 60_000]
+
+
+# ── FlowTailCache == the full read, incrementally ──────────────────────────
+
+def _append(path, records, partial=None):
+    with open(path, "a") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+        if partial:
+            f.write(partial)
+
+
+def _same(cache, tmp_path, now, coin="HYPE"):
+    got = cache.read(coin, connected=True, now=now)
+    want = rec.read_flow(str(tmp_path), coin, connected=True, now=now)
+    assert got == want
+    return got
+
+
+def test_tail_cache_matches_the_full_read_through_appends_gaps_duplicates_and_partial_lines(tmp_path):
+    out = str(tmp_path)
+    cache = rec.FlowTailCache(out)
+    path = rec.file_path(out, "HYPE", "trades", rec.day_str_utc(FLOW_NOW))
+    now = FLOW_NOW
+
+    assert _same(cache, tmp_path, now)["rows"] == []            # no file yet
+
+    _append(path, [_tape_trade(now - 3_600_000 + i * 1_000, "B" if i % 3 else "A", i, "10.5", "1.25")
+                   for i in range(1, 200)])
+    _same(cache, tmp_path, now)
+    first = cache._coins["HYPE"].ingested
+    assert first == 199
+
+    # appended trades: only the new lines are decoded
+    now += 20_000
+    _append(path, [_tape_trade(now - 5_000, "B", 1_000), _tape_trade(now - 4_000, "A", 1_001)])
+    got = _same(cache, tmp_path, now)
+    assert cache._coins["HYPE"].ingested == first + 2
+    assert got["last_trade_ms"] == now - 4_000
+
+    # a gap record appended, then duplicates of existing tids (same trade twice)
+    now += 20_000
+    _append(path, [rec.make_gap_record("HYPE", "trades", now - 50_000, now - 40_000),
+                   _tape_trade(now - 5_000, "B", 1_000), _tape_trade(now - 3_000, "B", 2_000),
+                   _tape_trade(now - 3_000, "B", 2_000)])
+    got = _same(cache, tmp_path, now)
+    assert got["gaps"] == [{"reconnect_ts_ms": now - 40_000, "last_seen_exchange_ts_ms": now - 50_000}]
+
+    # a partial trailing line waits for its newline, and is not counted twice
+    now += 20_000
+    whole = json.dumps(_tape_trade(now - 2_000, "A", 3_000))
+    _append(path, [], partial=whole[:25])
+    before = cache._coins["HYPE"].ingested
+    _same(cache, tmp_path, now)
+    assert cache._coins["HYPE"].ingested == before
+    _append(path, [], partial=whole[25:] + "\n")
+    got = _same(cache, tmp_path, now)
+    assert got["last_trade_ms"] == now - 2_000
+
+    # nothing appended: nothing read
+    before = cache._coins["HYPE"].ingested
+    _same(cache, tmp_path, now)
+    assert cache._coins["HYPE"].ingested == before
+
+
+def test_tail_cache_is_exact_while_the_window_start_moves_through_a_minute(tmp_path):
+    out = str(tmp_path)
+    cache = rec.FlowTailCache(out)
+    path = rec.file_path(out, "HYPE", "trades", rec.day_str_utc(FLOW_NOW))
+    start = FLOW_NOW - rec.FLOW_WINDOW_MS
+    _append(path, [_tape_trade(start - 90_000 + i * 2_300, "B" if i % 2 else "A", i, "3.1", "0.7")
+                   for i in range(120)])
+    for step in range(0, 150_000, 13_000):          # the oldest minute is part-expired throughout
+        _same(cache, tmp_path, FLOW_NOW + step)
+    minutes = cache._coins["HYPE"].minutes
+    assert all(t + 60_000 > FLOW_NOW + 137_000 - rec.FLOW_WINDOW_MS for t in minutes)   # pruned
+
+
+def test_tail_cache_holds_a_trade_stamped_ahead_of_the_clock_until_the_clock_catches_up(tmp_path):
+    out = str(tmp_path)
+    cache = rec.FlowTailCache(out)
+    path = rec.file_path(out, "HYPE", "trades", rec.day_str_utc(FLOW_NOW))
+    _append(path, [_tape_trade(FLOW_NOW - 1_000, "B", 1), _tape_trade(FLOW_NOW + 2_000, "A", 2)])
+    first = _same(cache, tmp_path, FLOW_NOW)
+    assert first["last_trade_ms"] == FLOW_NOW - 1_000
+    later = _same(cache, tmp_path, FLOW_NOW + 5_000)
+    assert later["last_trade_ms"] == FLOW_NOW + 2_000 and later["rows"][-1]["count"] >= 1
+
+
+def test_tail_cache_matches_the_full_read_across_utc_midnight(tmp_path):
+    import gzip
+    out = str(tmp_path)
+    cache = rec.FlowTailCache(out)
+    before = MIDNIGHT - 10 * 60_000
+    y_plain = rec.file_path(out, "HYPE", "trades", rec.day_str_utc(before))
+    _append(y_plain, [_tape_trade(MIDNIGHT - 3_600_000 + i * 5_000, "B" if i % 2 else "A", i)
+                      for i in range(1, 100)])
+    _same(cache, tmp_path, before)                       # tailing yesterday's plain file
+
+    # more trades land, then the recorder rotates yesterday to .gz and starts today's file
+    _append(y_plain, [_tape_trade(MIDNIGHT - 30_000, "B", 500)])
+    with open(y_plain) as src, gzip.open(y_plain + ".gz", "wt") as dst:
+        dst.write(src.read())
+    os.remove(y_plain)
+    t_path = rec.file_path(out, "HYPE", "trades", rec.day_str_utc(MIDNIGHT + 1))
+    _append(t_path, [_tape_trade(MIDNIGHT + 5_000, "A", 501), _tape_trade(MIDNIGHT + 6_000, "B", 502)])
+    now = MIDNIGHT + 60_000
+    got = _same(cache, tmp_path, now)
+    assert got["last_trade_ms"] == MIDNIGHT + 6_000
+    assert sum(r["count"] for r in got["rows"]) == 99 + 1 + 2     # tid-deduped against the plain read
+
+    _append(t_path, [_tape_trade(MIDNIGHT + 70_000, "A", 503)])
+    _same(cache, tmp_path, MIDNIGHT + 90_000)
+
+    # a fresh cache seeds from the .gz once
+    seeded = rec.FlowTailCache(out)
+    assert _same(seeded, tmp_path, MIDNIGHT + 90_000)["rows"]
+    # four hours later yesterday has left the window and is no longer read
+    late = MIDNIGHT + 4 * 3_600_000 + 120_000
+    _same(cache, tmp_path, late)
+    assert not any(p.endswith(".gz") for p in cache._coins["HYPE"].offsets)
+
+
+def test_tail_cache_rebuilds_when_the_file_shrinks_or_the_clock_steps_back(tmp_path):
+    out = str(tmp_path)
+    cache = rec.FlowTailCache(out)
+    path = rec.file_path(out, "HYPE", "trades", rec.day_str_utc(FLOW_NOW))
+    _append(path, [_tape_trade(FLOW_NOW - 5_000 - i, "B", i) for i in range(1, 20)])
+    _same(cache, tmp_path, FLOW_NOW)
+    os.remove(path)
+    _append(path, [_tape_trade(FLOW_NOW - 4_000, "A", 99)])
+    assert sum(r["count"] for r in _same(cache, tmp_path, FLOW_NOW + 1_000)["rows"]) == 1
+    _same(cache, tmp_path, FLOW_NOW - 60_000)        # clock went backwards
+
+
+def test_tail_cache_is_per_coin(tmp_path):
+    out = str(tmp_path)
+    cache = rec.FlowTailCache(out)
+    for coin, tid in (("HYPE", 1), ("ZEC", 2)):
+        _append(rec.file_path(out, coin, "trades", rec.day_str_utc(FLOW_NOW)),
+                [_tape_trade(FLOW_NOW - 5_000, "B", tid)])
+    assert _same(cache, tmp_path, FLOW_NOW, "HYPE")["coin"] == "HYPE"
+    assert _same(cache, tmp_path, FLOW_NOW, "ZEC")["coin"] == "ZEC"
+
+
+def test_tail_cache_rereads_an_archive_that_gained_a_member(tmp_path):
+    # The writer appends a second gzip member to a finished day when the clock
+    # steps back across midnight and recovers between two requests.
+    import gzip
+    out = str(tmp_path)
+    cache = rec.FlowTailCache(out)
+    gz = rec.file_path(out, "HYPE", "trades", rec.day_str_utc(MIDNIGHT - 1)) + ".gz"
+    with gzip.open(gz, "wt") as f:
+        f.write(json.dumps(_tape_trade(MIDNIGHT - 120_000, "B", 1)) + "\n")
+    now = MIDNIGHT + 60_000
+    assert sum(r["count"] for r in _same(cache, tmp_path, now)["rows"]) == 1
+    with gzip.open(gz, "at") as f:
+        f.write(json.dumps(rec.make_gap_record("HYPE", "trades", MIDNIGHT - 90_000, MIDNIGHT - 80_000)) + "\n")
+        f.write(json.dumps(_tape_trade(MIDNIGHT - 70_000, "A", 2)) + "\n")
+    got = _same(cache, tmp_path, now + 1_000)
+    assert sum(r["count"] for r in got["rows"]) == 2 and len(got["gaps"]) == 1
+
+
+def test_recorder_exposes_its_live_connection_flag(tmp_path):
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path))
+    assert fr.connected is False
+    fr._connected = True
+    assert fr.connected is True

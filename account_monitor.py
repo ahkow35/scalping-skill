@@ -25,6 +25,7 @@ DEFAULT_DIR = Path(__file__).resolve().parent / ".account_monitor"
 WATCHER_TOKEN_SERVICE = "scalp-watcher-report-token"
 WATCHER_KEYCHAIN_TIMEOUT_S = 5
 WATCHER_REQUEST_TIMEOUT_S = 10
+FLOW_REQUEST_TIMEOUT_S = 5
 WATCHER_FRESHNESS_S = 60
 WATCHER_FUTURE_SKEW_S = 5
 
@@ -182,6 +183,69 @@ def watcher_report_problem(report, age_s):
     return None
 
 
+def resolve_watcher_access(data_dir, env, keychain):
+    """(url, token, None) for the Railway watcher, or (None, None, (reason,
+    status)) when the URL or token is missing/invalid. The one place both
+    remote_check (/report) and remote_flow (/flow) read the watcher URL
+    (SCALP_WATCHER_URL or the saved config) and the token (SCALP_WATCHER_TOKEN
+    or Keychain). Never prints or logs the token."""
+    url = env.get("SCALP_WATCHER_URL") or _local_config(data_dir).get("watcher_url")
+    if not isinstance(url, str) or not url:
+        return None, None, ("watcher URL not configured (configure --watcher-url or SCALP_WATCHER_URL)",
+                            "CONFIG_REQUIRED")
+    try:
+        url = validate_watcher_url(url)
+    except AccountDataError:
+        return None, None, ("watcher URL must be an https:// URL", "CONFIG_REQUIRED")
+    token = env.get("SCALP_WATCHER_TOKEN") or keychain()
+    if not token:
+        return None, None, ("watcher token not configured (SCALP_WATCHER_TOKEN or Keychain)",
+                            "CONFIG_REQUIRED")
+    return url, token, None
+
+
+def remote_flow(coin, data_dir=DEFAULT_DIR, *, env=None, get=None, keychain=None,
+                timeout=FLOW_REQUEST_TIMEOUT_S):
+    """(payload, None) from the watcher's token-protected GET /flow?coin=X, or
+    (None, reason) with reason one of "watcher not configured", "unauthorized",
+    "bad request", "recorder not configured", "coin not recorded",
+    "unreachable" or "malformed tape". Read-only; never raises and never
+    includes the token, the Authorization header or any response text."""
+    env = os.environ if env is None else env
+    get = requests.get if get is None else get
+    keychain = read_keychain_watcher_token if keychain is None else keychain
+    url, token, problem = resolve_watcher_access(data_dir, env, keychain)
+    if problem:
+        return None, "watcher not configured"
+    try:
+        response = get(url + "/flow", params={"coin": coin}, headers={"Authorization": f"Bearer {token}"},
+                       timeout=timeout, allow_redirects=False)
+    except requests.RequestException:
+        return None, "unreachable"
+    status = response.status_code
+    if status == 401:
+        return None, "unauthorized"
+    if status == 400:
+        return None, "bad request"
+    if status == 503:
+        return None, "recorder not configured"
+    if status not in (200, 404):
+        return None, "unreachable"
+    try:
+        if token.encode() in response.content:
+            return None, "malformed tape"
+        payload = json.loads(response.content)
+    except (ValueError, TypeError):
+        # A 404 that is not the recorder's JSON is a watcher without /flow.
+        return None, ("unreachable" if status == 404 else "malformed tape")
+    if not isinstance(payload, dict):
+        return None, "unreachable" if status == 404 else "malformed tape"
+    if status == 404:
+        return None, ("coin not recorded" if payload.get("error") == "coin_not_recorded"
+                      else "unreachable")
+    return payload, None
+
+
 def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=None,
                   keychain=None, clock=None,
                   timeout=WATCHER_REQUEST_TIMEOUT_S):
@@ -207,18 +271,9 @@ def remote_check(data_dir=DEFAULT_DIR, *, env=None, get=None,
         report["status"] = status
         return report
 
-    url = env.get("SCALP_WATCHER_URL") or _local_config(data_dir).get("watcher_url")
-    if not isinstance(url, str) or not url:
-        return unavailable("watcher URL not configured (configure --watcher-url or SCALP_WATCHER_URL)",
-                            status="CONFIG_REQUIRED")
-    try:
-        url = validate_watcher_url(url)
-    except AccountDataError:
-        return unavailable("watcher URL must be an https:// URL", status="CONFIG_REQUIRED")
-    token = env.get("SCALP_WATCHER_TOKEN") or keychain()
-    if not token:
-        return unavailable("watcher token not configured (SCALP_WATCHER_TOKEN or Keychain)",
-                            status="CONFIG_REQUIRED")
+    url, token, problem = resolve_watcher_access(data_dir, env, keychain)
+    if problem:
+        return unavailable(*problem)
     try:
         response = get(url + "/report", headers={"Authorization": f"Bearer {token}"},
                        timeout=timeout, allow_redirects=False)
