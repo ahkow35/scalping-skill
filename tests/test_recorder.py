@@ -1036,3 +1036,25 @@ def test_run_reports_a_write_failure_loudly_not_as_a_connection_error(tmp_path, 
     assert "disk write failed" in err
     assert "connection error (OSError(28" not in err
     assert "No space left on device" in st["write_error"]
+
+
+def test_run_retries_a_failed_cold_start_gap_once_the_disk_recovers(tmp_path, monkeypatch):
+    # A full disk at startup must not leave the tape without its "recording
+    # began here" marker: pre-restart tape would then read as continuous.
+    real_write = rec.FlowFileSet.write
+    clock = {"t": MIDNIGHT}
+
+    def full_until_2s(self, *a, **k):
+        if clock["t"] < MIDNIGHT + 2000:
+            raise OSError(28, "No space left on device")
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(rec.FlowFileSet, "write", full_until_2s)
+    fr, st = _run_with_script(tmp_path, monkeypatch, clock, [
+        ("fail", MIDNIGHT + 1000),                                # disk still full
+        ("ws", MIDNIGHT + 2000, [_bbo(MIDNIGHT + 2000)], "stop"),  # disk free again
+    ])
+    path = rec.file_path(str(tmp_path), "HYPE", "bbo", rec.day_str_utc(MIDNIGHT))
+    records = list(rec.iter_jsonl_records(path))
+    assert records[0]["record_type"] == "gap"                     # marker precedes new tape
+    assert st["write_error"] is None

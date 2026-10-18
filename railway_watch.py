@@ -227,7 +227,8 @@ class Watcher:
                 self.active[pid]["alerted_hold"] = hold
             return
         existing["message"] = message
-        if abs(hold - baseline) >= USDC_HOLD_ALERT_STEP_USD:
+        # Cents, not raw floats: 2082.14 - 1982.14 is 99.99999999999977.
+        if abs(round(hold * 100) - round(baseline * 100)) >= round(USDC_HOLD_ALERT_STEP_USD * 100):
             existing["alerted_hold"] = hold
             existing["last_alerted_ms"] = now_ms
             messages.append(f"PROBLEM (ongoing): {message}")
@@ -266,8 +267,11 @@ class Watcher:
         if kind == "config":
             reasons = report.get("reasons") or []
             detail = reasons[0] if reasons else str(report.get("status"))
+            # Change-based only when the hold is the sole reason: any other
+            # unsupported reason keeps the ordinary 30-minute repeat.
+            hold = usdc_hold_amount(report) if len(reasons) == 1 else None
             self._note_usdc_hold("CONFIG_UNSUPPORTED", f"account monitor: {detail}",
-                                 usdc_hold_amount(report), now_ms, messages)
+                                 hold, now_ms, messages)
         elif kind == "evaluated":
             self._clear("CONFIG_UNSUPPORTED", now_ms, messages)
 

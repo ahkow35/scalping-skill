@@ -1477,5 +1477,22 @@ def test_other_config_unsupported_reasons_keep_the_30_minute_repeat():
     assert len(w.step(unsupported, MIDNIGHT + 30 * 60_000)) == 1
 
 
+def test_usdc_hold_exact_100_move_re_alerts_despite_float_error():
+    w = make_watcher()
+    w.step(hold_report("1982.14"), MIDNIGHT)
+    assert len(w.step(hold_report("2082.14"), MIDNIGHT + 1000)) == 1
+
+
+def test_usdc_hold_beside_another_reason_keeps_the_30_minute_repeat():
+    w = make_watcher()
+    hold = "USDC hold 1000 on a perps-only unified account: open spot orders; equity unknown"
+    report = {"status": "UNSUPPORTED", "daily": None,
+              "reasons": ["core collateral is not verified USDC", hold]}
+    first = w.step(report, MIDNIGHT)
+    assert len(first) == 1 and "core collateral" in first[0]
+    assert w.step(report, MIDNIGHT + 29 * 60_000) == []
+    assert len(w.step(report, MIDNIGHT + 30 * 60_000)) == 1
+
+
 def test_usdc_hold_threshold_is_100_usd():
     assert rw.USDC_HOLD_ALERT_STEP_USD == 100

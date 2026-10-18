@@ -596,7 +596,10 @@ class FlowRecorder:
         try:
             self.emit_gaps()  # cold-start marker: "recording begins here"
         except _WriteFailed:
-            pass  # already logged loudly and shown in /status; keep serving it
+            # Already logged loudly and shown in /status. Open an outage so
+            # the marker is retried on every connect until it lands: without
+            # it, tape from before this start reads as continuous.
+            self._down_since_ms = self.clock()
         status_task = asyncio.create_task(self._status_loop())
         backoff = RECONNECT_BASE_S
         try:
