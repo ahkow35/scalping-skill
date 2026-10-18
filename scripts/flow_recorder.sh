@@ -3,7 +3,7 @@
 # flow gate (see recorder.py's module docstring and SKILL.md). Meant to run
 # continuously under launchd (com.nyanyk.scalp-flow-recorder.plist), which
 # captures stdout/stderr to logs/.
-cd /Users/nyanyk/Claude/research/scalp || exit 1
+cd /Users/nyanyk/Claude/projects/scalp || exit 1
 mkdir -p logs
 # Pinned interpreter: launchd's minimal PATH resolves the system Python 3.9,
 # which reproducibly fails on Hyperliquid responses (http.client

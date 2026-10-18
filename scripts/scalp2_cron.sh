@@ -1,7 +1,7 @@
 #!/bin/zsh
 # scalp2 US-open scan. Cron runs in LOCAL time; Asia/Singapore has no DST,
 # so 20:55 SGT == 12:55 UTC year-round (spec §3).
-cd /Users/nyanyk/Claude/research/scalp || exit 1
+cd /Users/nyanyk/Claude/projects/scalp || exit 1
 mkdir -p logs
 # Pinned interpreter: cron's minimal PATH resolves the system Python 3.9,
 # which reproducibly fails on Hyperliquid responses (http.client

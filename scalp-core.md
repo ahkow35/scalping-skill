@@ -36,7 +36,7 @@ Five checks:
 ### 0a. Behavioral state + daily stop (ENTRY + MANAGE)
 Read state from the audit log — works under /loop with no conversation:
 ```bash
-python3 /Users/nyanyk/Claude/research/scalp/behavioral.py
+python3 /Users/nyanyk/Claude/projects/scalp/behavioral.py
 ```
 Returns `daily_stop {active, until_utc, realized_r_24h, reason}`,
 `cooldown {active, until_utc, reasons}`, `oop_this_week`.
@@ -136,7 +136,7 @@ Printing rule (silence-by-default):
   of scalp-passive.md).
 
 ## Step 1 — Fetch data (deterministic, never inline-curl)
-Run: `python3 /Users/nyanyk/Claude/research/scalp/fetch_market.py <COIN> [--deep]`
+Run: `python3 /Users/nyanyk/Claude/projects/scalp/fetch_market.py <COIN> [--deep]`
 Use ONLY the returned block. Never re-derive timestamps. If output is a
 `DATA UNAVAILABLE` line, report it and STOP — no estimated numbers.
 
@@ -325,7 +325,7 @@ with stop tightened to BE+.
 Read both from the profile — required for the sizing math, and the only way
 /loop can size without asking:
 ```bash
-python3 /Users/nyanyk/Claude/research/scalp/profile.py get
+python3 /Users/nyanyk/Claude/projects/scalp/profile.py get
 ```
 Returns `{equity, phase}`. Default cap follows phase:
 - **0.5%** — Phase 1 default.
@@ -431,7 +431,7 @@ performance accountability — without it, the skill is unfalsifiable.
 Right after printing the output block, shell out:
 
 ```bash
-python3 /Users/nyanyk/Claude/research/scalp/audit_log.py log <<'JSON'
+python3 /Users/nyanyk/Claude/projects/scalp/audit_log.py log <<'JSON'
 {
   "coin": "HYPE",
   "side": "long",
@@ -516,7 +516,7 @@ If two apply, use the larger change (`EXIT` > `REDUCE-AND-STOP` > `REDUCE` /
 When the trade closes (or the thesis is invalidated without an entry), run:
 
 ```bash
-python3 /Users/nyanyk/Claude/research/scalp/audit_log.py resolve \
+python3 /Users/nyanyk/Claude/projects/scalp/audit_log.py resolve \
   <trade_id> <outcome_r> <exit_reason> "<lesson>"
 ```
 
@@ -527,7 +527,7 @@ is optional but recommended — that's the part that compounds.
 ### Reviewing performance
 
 ```bash
-python3 /Users/nyanyk/Claude/research/scalp/audit_log.py summary [--since-days N]
+python3 /Users/nyanyk/Claude/projects/scalp/audit_log.py summary [--since-days N]
 ```
 
 Returns verdict distribution (catches calibration drift — if VETOED is 90%
@@ -535,7 +535,7 @@ of calls, the gate is mis-tuned) and per-setup expectancy across resolved
 trades (catches "trigger A is actually net-negative at 2am" patterns).
 
 ```bash
-python3 /Users/nyanyk/Claude/research/scalp/audit_log.py list-open
+python3 /Users/nyanyk/Claude/projects/scalp/audit_log.py list-open
 ```
 
 Shows entries not yet resolved with age in hours. Stale entries (>72h open

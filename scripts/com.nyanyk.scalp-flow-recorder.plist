@@ -7,7 +7,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string><string>-lc</string>
-    <string>/Users/nyanyk/Claude/research/scalp/scripts/flow_recorder.sh</string>
+    <string>/Users/nyanyk/Claude/projects/scalp/scripts/flow_recorder.sh</string>
   </array>
   <!-- Research-only WS tape recorder (recorder.py) — does NOT feed the live
        /scalp flow gate. Runs continuously: start at load and restart on any
@@ -17,8 +17,8 @@
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>30</integer>
   <key>StandardOutPath</key>
-  <string>/Users/nyanyk/Claude/research/scalp/logs/flow-recorder.out</string>
+  <string>/Users/nyanyk/Claude/projects/scalp/logs/flow-recorder.out</string>
   <key>StandardErrorPath</key>
-  <string>/Users/nyanyk/Claude/research/scalp/logs/flow-recorder.err</string>
+  <string>/Users/nyanyk/Claude/projects/scalp/logs/flow-recorder.err</string>
 </dict>
 </plist>

@@ -13,18 +13,18 @@ description: >
 # scalp2
 
 Activating the scalp2 scanner + judgment companion. Full protocol lives in
-`/Users/nyanyk/Claude/research/scalp/scalp2.md` — read it before applying
+`/Users/nyanyk/Claude/projects/scalp/scalp2.md` — read it before applying
 judgment to any card.
 
 ## Step 0 — Admin passthrough (short-circuit)
 
 If the first arg is `summary`, `resolve`, `list-open`, or `replay`, run the
 matching `audit_log.py` / `replay.py` command from
-`/Users/nyanyk/Claude/research/scalp/` (same CLI as v1 `/scalp`), scoped to
+`/Users/nyanyk/Claude/projects/scalp/` (same CLI as v1 `/scalp`), scoped to
 scan2 entries:
 
 ```bash
-python3 /Users/nyanyk/Claude/research/scalp/audit_log.py summary --system scan2
+python3 /Users/nyanyk/Claude/projects/scalp/audit_log.py summary --system scan2
 ```
 
 `resolve <trade_id> <R> <exit_reason> [lesson]` and `list-open` / `replay`
@@ -32,7 +32,7 @@ take the same arguments as v1 — no scan2-specific flags.
 
 ## Step 1 — Scan (`/scalp2` or `/scalp2 <COIN>`)
 
-Run from `/Users/nyanyk/Claude/research/scalp/`:
+Run from `/Users/nyanyk/Claude/projects/scalp/`:
 
 ```bash
 python3 scan2.py --session manual --window-sec 120 [--coins <COIN>]
