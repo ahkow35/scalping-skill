@@ -1405,7 +1405,7 @@ def test_recorder_write_failing_appears_with_reason_and_clears():
 # ---------------------------------------------------------------------------
 
 def hold_report(hold):
-    from test_account_observation import unified, spot
+    from test_account_observation import spot, unified
     data = unified(now=MIDNIGHT)
     data["spot"] = spot(hold=hold)
     report, _ = observe(data)
