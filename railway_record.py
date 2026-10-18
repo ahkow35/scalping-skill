@@ -521,6 +521,7 @@ def build_full_status(snapshot, uploader, *, status_interval_s=STATUS_INTERVAL_S
         reconnects = rec_status.get("reconnects_24h") if rec_status else None
         total_gap_seconds = rec_status.get("gap_seconds_24h") if rec_status else None
         disk_free_gb = rec_status.get("disk_free_gb") if rec_status else None
+        disk_low = None   # a stale or missing snapshot is no evidence either way
     else:
         connected = rec_status.get("connected", False)
         lag_s = rec_status.get("lag_s")
@@ -532,6 +533,7 @@ def build_full_status(snapshot, uploader, *, status_interval_s=STATUS_INTERVAL_S
         reconnects = rec_status.get("reconnects_24h")
         total_gap_seconds = rec_status.get("gap_seconds_24h")
         disk_free_gb = rec_status.get("disk_free_gb")
+        disk_low = rec_status.get("disk_low")
 
     merged = {
         "connected": connected,
@@ -539,7 +541,14 @@ def build_full_status(snapshot, uploader, *, status_interval_s=STATUS_INTERVAL_S
         "reconnects": reconnects,
         "total_gap_seconds": total_gap_seconds,
         "disk_free_gb": disk_free_gb,
+        # None = unknown (no fresh recorder snapshot); the watcher leaves its
+        # disk alert untouched on unknown, same rule as an unreachable poll.
+        "disk_low": disk_low,
     }
+    if not (rec_status is None or stale):
+        # Absent (not None) without a fresh snapshot, so "no evidence" can
+        # never read as "the write failure cleared".
+        merged["write_error"] = rec_status.get("write_error")
     merged.update(uploader.status())
     return merged
 
@@ -694,7 +703,10 @@ def run():
             return None
         # Both must agree: the live socket flag (a drop shows at once) and the
         # status snapshot (which also reads a stalled recorder as disconnected).
-        connected = fr.connected and build_full_status(snapshot, uploader)["connected"]
+        # A failing disk write also reads as not connected: the tape is not
+        # being recorded, so the flow gate must fail closed.
+        connected = (fr.connected and fr.write_error is None
+                     and build_full_status(snapshot, uploader)["connected"])
         return tail.read(coin, connected=connected)
 
     server = DualStackHTTPServer(("::", config["port"]), make_handler(snapshot, uploader, flow))

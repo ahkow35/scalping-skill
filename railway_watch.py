@@ -83,6 +83,11 @@ RECORDER_STATUS_TIMEOUT_S = 5.0
 RECORDER_POLL_INTERVAL_S = 60
 RECORDER_SILENT_THRESHOLD_S = 5 * 60
 RECORDER_UPLOAD_FAILING_THRESHOLD_S = 24 * 3600
+# USDC-hold alert (CONFIG_UNSUPPORTED caused by open spot orders): after the
+# first alert, re-alert only when the held amount has moved by at least this
+# many USD from the amount in the last alert sent — never on a timer.
+USDC_HOLD_ALERT_STEP_USD = 100.0
+USDC_HOLD_PATTERN = re.compile(r"USDC hold (\S+) on a perps-only unified account")
 FLOW_FETCH_TIMEOUT_S = 5.0
 FLOW_COIN_PATTERN = re.compile(r"[A-Za-z0-9:_.-]{1,32}")
 
@@ -104,6 +109,22 @@ def classify(report):
     if report.get("status") in ("UNSUPPORTED", "CONFIG_REQUIRED"):
         return "config"
     return "failed"
+
+
+def usdc_hold_amount(report):
+    """The held USDC amount named by an UNSUPPORTED report's reasons, or None
+    if the report is not a USDC-hold one or the number cannot be parsed. The
+    report carries it only inside the reason text (account_observation.py), so
+    the text is the one source."""
+    for reason in report.get("reasons") or []:
+        match = USDC_HOLD_PATTERN.search(str(reason))
+        if match:
+            try:
+                amount = float(match.group(1))
+            except ValueError:
+                return None
+            return amount if amount == amount and abs(amount) != float("inf") else None
+    return None
 
 
 def stop_problems(report):
@@ -191,6 +212,26 @@ class Watcher:
             existing["last_alerted_ms"] = now_ms
             messages.append(f"PROBLEM (ongoing): {message}")
 
+    def _note_usdc_hold(self, pid, message, hold, now_ms, messages):
+        """`_note` for the USDC-hold condition: alerts on appearance, then only
+        when the held amount differs by USDC_HOLD_ALERT_STEP_USD or more from
+        the amount in the last alert sent (either direction) — no timer.
+        Without a parseable amount (now, or in the last alert) it falls back
+        to the ordinary 30-minute repeat."""
+        existing = self.active.get(pid)
+        baseline = existing.get("alerted_hold") if existing else None
+        if existing is None or hold is None or baseline is None:
+            before = len(messages)
+            self._note(pid, message, now_ms, messages)
+            if hold is not None and len(messages) > before:
+                self.active[pid]["alerted_hold"] = hold
+            return
+        existing["message"] = message
+        if abs(hold - baseline) >= USDC_HOLD_ALERT_STEP_USD:
+            existing["alerted_hold"] = hold
+            existing["last_alerted_ms"] = now_ms
+            messages.append(f"PROBLEM (ongoing): {message}")
+
     def _clear(self, pid, now_ms, messages):
         existing = self.active.pop(pid, None)
         if existing is not None:
@@ -225,7 +266,8 @@ class Watcher:
         if kind == "config":
             reasons = report.get("reasons") or []
             detail = reasons[0] if reasons else str(report.get("status"))
-            self._note("CONFIG_UNSUPPORTED", f"account monitor: {detail}", now_ms, messages)
+            self._note_usdc_hold("CONFIG_UNSUPPORTED", f"account monitor: {detail}",
+                                 usdc_hold_amount(report), now_ms, messages)
         elif kind == "evaluated":
             self._clear("CONFIG_UNSUPPORTED", now_ms, messages)
 
@@ -255,7 +297,7 @@ class Watcher:
 
     def recorder_step(self, status, now_ms):
         """Feed one poll of the recorder's `/status` (PR C), or None if it
-        was unreachable/unparseable. Two problem ids, through the same
+        was unreachable/unparseable. Four problem ids, through the same
         appear/30-min-repeat/all-clear machinery as account problems
         (`_note`/`_clear`) and the same Outbox — but a fully separate group
         (`RECORDER_*` ids) that never reads or touches account-derived
@@ -275,7 +317,16 @@ class Watcher:
         server-side by the recorder itself (see railway_record.py's
         /status) so no date math happens here. Left exactly as it was on an
         unreachable poll (`status is None`) — no evidence either way, same
-        rule `step()` applies to account problems on a failed report."""
+        rule `step()` applies to account problems on a failed report.
+
+        RECORDER_DISK_LOW: the recorder reports `disk_low` true (free space
+        under its floor); the message carries `disk_free_gb`. Clears when it
+        reports false.
+
+        RECORDER_WRITE_FAILING: the recorder reports a `write_error` (the
+        tape could not be written to disk). Clears when it reports none.
+        Both are left as they were when the status is unreachable or carries
+        no definite reading."""
         messages = []
         healthy = (status is not None
                    and status.get("connected") is True
@@ -307,6 +358,27 @@ class Watcher:
                 self._note("RECORDER_UPLOAD_FAILING", reason, now_ms, messages)
             else:
                 self._clear("RECORDER_UPLOAD_FAILING", now_ms, messages)
+
+            # Disk alerts act only on a definite reading: disk_low missing or
+            # None (no fresh recorder snapshot) and an absent write_error key
+            # leave the alert exactly as it was.
+            disk_low = status.get("disk_low")
+            if disk_low is True:
+                free = status.get("disk_free_gb")
+                free_text = f"{free:g} GB free" if isinstance(free, (int, float)) else "free space unknown"
+                self._note("RECORDER_DISK_LOW",
+                           f"recorder disk is nearly full — {free_text}; the tape will stop recording when it fills",
+                           now_ms, messages)
+            elif disk_low is False:
+                self._clear("RECORDER_DISK_LOW", now_ms, messages)
+            if "write_error" in status:
+                write_error = status["write_error"]
+                if write_error:
+                    self._note("RECORDER_WRITE_FAILING",
+                               f"recorder cannot write the tape to disk — {write_error}",
+                               now_ms, messages)
+                else:
+                    self._clear("RECORDER_WRITE_FAILING", now_ms, messages)
 
         return messages
 

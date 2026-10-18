@@ -72,6 +72,13 @@ class _StopRequested(Exception):
     """Internal signal: SIGINT/SIGTERM fired — unwind the recv loop cleanly."""
 
 
+class _WriteFailed(Exception):
+    """Internal signal: the tape could not be written to disk (full disk,
+    permissions, read-only volume). Kept apart from connection errors so the
+    failure is logged loudly and shown in /status, never read as a network
+    blip."""
+
+
 class _WatchdogTimeout(Exception):
     """Internal signal: no message on any stream for watchdog_s seconds. The
     socket may be half-open (this happens after Mac sleep or a network
@@ -315,7 +322,8 @@ def status_path_for(out_dir):
 
 def build_status(counts, last_recv_ms, connected, now=None,
                   last_recv_per_stream=None, reconnects_24h=0,
-                  gap_seconds_24h=0.0, disk_low=False, disk_free_gb=None):
+                  gap_seconds_24h=0.0, disk_low=False, disk_free_gb=None,
+                  write_error=None):
     now = now_ms() if now is None else now
     lag_s = None
     if last_recv_ms is not None:
@@ -334,6 +342,10 @@ def build_status(counts, last_recv_ms, connected, now=None,
         "gap_seconds_24h": round(gap_seconds_24h, 1),
         "disk_low": disk_low,
         "disk_free_gb": round(disk_free_gb, 1) if disk_free_gb is not None else None,
+        # Reason string while a disk write is failing (full disk, permissions,
+        # read-only volume), else None. Distinct from a network drop so the
+        # watcher never mistakes a lost tape for a reconnect blip.
+        "write_error": write_error,
     }
 
 
@@ -392,6 +404,7 @@ class FlowRecorder:
         self._down_since_ms = None
         self._last_outage_end_ms = None
         self._connected = False
+        self._write_error = None      # reason while a disk write is failing
         self._stop = None             # set in run() (needs a live loop)
 
     @property
@@ -399,6 +412,29 @@ class FlowRecorder:
         """Live socket state, readable from another thread (a single bool).
         /flow uses it so a drop is seen at once, not at the next status tick."""
         return self._connected
+
+    @property
+    def write_error(self):
+        """Reason string while the tape cannot be written to disk, else None.
+        The flow endpoint treats any value as not-connected (fail closed)."""
+        return self._write_error
+
+    def _note_write_error(self, exc):
+        self._write_error = f"{type(exc).__name__}: {exc}"
+        print(f"{iso_utc_ms(self.clock())} recorder: DISK WRITE FAILED "
+              f"({self._write_error}) under {self.out_dir} — tape is NOT being "
+              "recorded; this is not a network error", file=sys.stderr)
+
+    def _store(self, coin, channel, record, day):
+        """The one place the tape is written. A disk error is recorded loudly
+        and surfaced in status(), then re-raised as _WriteFailed so run() does
+        not file it under an ordinary connection error."""
+        try:
+            self.files.write(coin, channel, record, day)
+        except OSError as exc:
+            self._note_write_error(exc)
+            raise _WriteFailed(str(exc)) from exc
+        self._write_error = None
 
     # -- message handling (pure-ish: no socket I/O, easy to unit test) --
 
@@ -429,7 +465,7 @@ class FlowRecorder:
 
     def _write(self, coin, channel, record, exchange_ts_ms, recv_ms):
         day = day_str_utc(recv_ms)
-        self.files.write(coin, channel, record, day)
+        self._store(coin, channel, record, day)
         if exchange_ts_ms is not None:
             self._last_exchange_ts[(coin, channel)] = exchange_ts_ms
         # string key ("COIN:channel") — self._counts feeds build_status(),
@@ -450,7 +486,7 @@ class FlowRecorder:
                 last_seen = self._last_exchange_ts.get((coin, channel))
                 rec = make_gap_record(coin, channel, last_seen, reconnect_ms)
                 day = day_str_utc(reconnect_ms)
-                self.files.write(coin, channel, rec, day)
+                self._store(coin, channel, rec, day)
 
     def mark_disconnected(self):
         """A live connection just dropped: open an outage starting at the last
@@ -512,7 +548,8 @@ class FlowRecorder:
             self._counts, self._last_recv_ms, self._connected, now=now,
             last_recv_per_stream=self._last_recv_per_stream,
             reconnects_24h=reconnects_24h, gap_seconds_24h=gap_seconds_24h,
-            disk_low=disk_low, disk_free_gb=free_gb)
+            disk_low=disk_low, disk_free_gb=free_gb,
+            write_error=self._write_error)
 
     def dispatch_message(self, msg):
         """Route one decoded WS message ({"channel": ..., "data": ...}) to the
@@ -556,7 +593,10 @@ class FlowRecorder:
             except NotImplementedError:
                 pass  # signals unsupported on this platform (e.g. some Windows setups)
 
-        self.emit_gaps()  # cold-start marker: "recording begins here"
+        try:
+            self.emit_gaps()  # cold-start marker: "recording begins here"
+        except _WriteFailed:
+            pass  # already logged loudly and shown in /status; keep serving it
         status_task = asyncio.create_task(self._status_loop())
         backoff = RECONNECT_BASE_S
         try:
@@ -575,6 +615,10 @@ class FlowRecorder:
                             ping_task.cancel()
                 except _StopRequested:
                     break
+                except _WriteFailed as exc:
+                    print(f"{iso_utc_ms(self.clock())} recorder: disk write "
+                          f"failed ({exc}) — reconnecting; /status write_error is set",
+                          file=sys.stderr)
                 except _WatchdogTimeout as exc:
                     print(f"{iso_utc_ms(self.clock())} recorder: {exc} — "
                           "reconnecting", file=sys.stderr)
@@ -598,10 +642,16 @@ class FlowRecorder:
             # shutdown (not a reconnect). A clean stop also leaves the final
             # status saying disconnected — the break on _StopRequested skips
             # the reset inside the loop.
-            self.end_outage(self.clock(), reconnected=False)
+            try:
+                self.end_outage(self.clock(), reconnected=False)
+            except _WriteFailed:
+                pass  # already logged loudly; shutdown must still finish
             self._connected = False
             self.files.close_all()
-            write_status(self.out_dir, self.status())
+            try:
+                write_status(self.out_dir, self.status())
+            except OSError as exc:
+                self._note_write_error(exc)
 
     async def _recv_loop(self, ws):
         while not self._stop.is_set():
@@ -643,7 +693,13 @@ class FlowRecorder:
     async def _status_loop(self):
         while True:
             st = self.status()
-            write_status(self.out_dir, st)
+            try:
+                write_status(self.out_dir, st)
+            except OSError as exc:
+                # A full disk must not kill this loop (and with it the status
+                # the watcher reads): surface it and keep reporting.
+                self._note_write_error(exc)
+                st = self.status()
             if self.on_status is not None:
                 try:
                     self.on_status(st)

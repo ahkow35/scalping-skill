@@ -17,10 +17,13 @@ CLI usage:
   python3 audit_log.py summary [--since-days N] [--system NAME]
 """
 
+import contextlib
+import fcntl
 import json
 import math
 import os
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -48,70 +51,211 @@ def _generate_trade_id(coin, side, ts_ms, existing_ids):
     return f"{candidate}-{n}"
 
 
-def _load_entries(path=None):
-    path = path or AUDIT_LOG_PATH
+def _read_lines(path):
+    """Raw non-blank lines of the log (no trailing newline), [] if absent."""
     if not os.path.exists(path):
         return []
-    out = []
     try:
         with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    out.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+            return [line.rstrip("\n") for line in f if line.strip()]
     except OSError:
-        pass
-    return out
+        return []
 
 
-def _write_entries(entries, path=None):
-    path = path or AUDIT_LOG_PATH
+def _parse_line(line):
+    """The entry dict on this line, or None if it is not a JSON object."""
+    try:
+        entry = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
+def _load_entries_counted(path=None):
+    """(entries, skipped): parseable rows, and how many non-blank lines could
+    not be parsed. Readers compute from the former and report the latter."""
+    out, skipped = [], 0
+    for line in _read_lines(path or AUDIT_LOG_PATH):
+        entry = _parse_line(line)
+        if entry is None:
+            skipped += 1
+        else:
+            out.append(entry)
+    return out, skipped
+
+
+def _load_entries(path=None):
+    return _load_entries_counted(path)[0]
+
+
+@contextlib.contextmanager
+def _locked(path):
+    """Exclusive lock on a sibling lock file, held across a read-modify-write
+    or an append, so concurrent writers (scalp + scalp2 sessions) cannot lose
+    each other's rows. The lock file is never the data file, so os.replace of
+    the data file does not break the lock."""
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        for e in entries:
-            f.write(json.dumps(e) + "\n")
-    os.replace(tmp, path)
+    with open(path + ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _replace_lines(lines, path):
+    """Atomically replace the file with `lines`, via a unique temp file in the
+    same directory (never a fixed .tmp name two writers could share)."""
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".",
+                               suffix=".tmp", dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "w") as f:
+            for line in lines:
+                f.write(line + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _append_line(line, path):
+    """Append one row under the caller's lock. A file whose last line was torn
+    (no trailing newline) is terminated first so the new row starts its own
+    line and the torn one is kept as it is."""
+    needs_newline = False
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        with open(path, "rb") as f:
+            f.seek(-1, os.SEEK_END)
+            needs_newline = f.read(1) != b"\n"
+    with open(path, "a") as f:
+        if needs_newline:
+            f.write("\n")
+        f.write(line + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _update_entry(trade_id, mutate, path=None):
+    """Read-modify-write one row under the lock. `mutate(entry)` returns True
+    to keep its change or False to leave the row alone. Every other line —
+    including lines that do not parse — is written back verbatim. Returns
+    True if a row was changed."""
+    path = path or AUDIT_LOG_PATH
+    with _locked(path):
+        lines = _read_lines(path)
+        for i, line in enumerate(lines):
+            entry = _parse_line(line)
+            if entry is None or entry.get("id") != trade_id:
+                continue
+            if not mutate(entry):
+                return False
+            lines[i] = json.dumps(entry)
+            _replace_lines(lines, path)
+            return True
+    return False
 
 
 REQUIRED_FIELDS = ("coin", "side", "mode", "verdict")
+
+# Allowed values on WRITE. Derived from what the specs and code emit:
+# side/mode: scalp-core.md Step 7 (ENTRY/MANAGE, long/short), scan2.py SCAN rows
+# (side "none"). verdict: decide.py + scalp-core.md Step 4b (ACTION_VERDICTS and
+# WAIT/VETOED/NO-TRADE/HALT), scalp-passive.md (SIT-OUT), scan2.py (CARDS,
+# TAKEN), and the MANAGE-action rows of scalp-core.md (see MANAGE_VERDICTS).
+# conviction: high/med/low, "n/a" when a veto skips scoring (decide.py).
+# macro_status: the card2/decide macro gate statuses.
+ALLOWED_SIDES = ("long", "short", "none")
+ALLOWED_MODES = ("ENTRY", "MANAGE", "SCAN")
+ALLOWED_CONVICTIONS = ("high", "med", "low", "n/a")
+ALLOWED_MACRO_STATUSES = ("CLEAR", "VETO", "NO-TRADE", "HALT")
+ALLOWED_TRIGGERS = ("A", "B", "C")
+# Exact spellings only: REDUCE_AND_STOP / REDUCE-AND-STOP style drift in the
+# historical rows is why a closed list exists.
+MANAGE_VERDICTS = ("MANAGE", "MANAGE-action-required", "HOLD", "ADD", "EXIT",
+                   "REDUCE", "REDUCE-AND-STOP", "REDUCE-INTO-STRENGTH")
+# A trigger_used that names no trigger. Anything outside ALLOWED_TRIGGERS is
+# rejected; these (plus an empty or whitespace-only string) are called out as
+# stubs in the error.
+STUB_TRIGGERS = ("none", "null", "n/a", "na", "tbd", "todo", "stub",
+                 "placeholder", "unknown", "manual", "-", "?")
+
+
+def _allowed_verdicts():
+    return (*ACTION_VERDICTS, "WAIT", "VETOED", "NO-TRADE", "HALT", "SIT-OUT",
+            "CARDS", "TAKEN", *MANAGE_VERDICTS)
+
+
+def _bad_value(field, value, allowed, extra=""):
+    return ValueError(f"audit entry field {field!r} has invalid value {value!r}"
+                      f"{extra}; allowed: {', '.join(allowed)}")
+
+
+def validate_audit_payload(payload):
+    """Value checks for a NEW row (never run over historical rows). Raises
+    ValueError naming the field, the bad value and the allowed values."""
+    if not isinstance(payload, dict):
+        raise ValueError("audit entry must be a JSON object")
+    for required in REQUIRED_FIELDS:
+        if required not in payload:
+            raise ValueError(f"audit entry missing required field: {required}")
+    coin = payload["coin"]
+    if not isinstance(coin, str) or not coin.strip():
+        raise ValueError(
+            f"audit entry field 'coin' has invalid value {coin!r}; "
+            "allowed: a non-empty string")
+    checks = (("side", ALLOWED_SIDES), ("mode", ALLOWED_MODES),
+              ("verdict", _allowed_verdicts()))
+    for field, allowed in checks:
+        if payload[field] not in allowed:
+            raise _bad_value(field, payload[field], allowed)
+    # Optional: absent or null means "not evaluated" and is left alone.
+    for field, allowed in (("conviction", ALLOWED_CONVICTIONS),
+                           ("macro_status", ALLOWED_MACRO_STATUSES)):
+        value = payload.get(field)
+        if value is not None and value not in allowed:
+            raise _bad_value(field, value, allowed)
+    trigger = payload.get("trigger_used")
+    if trigger is not None and trigger not in ALLOWED_TRIGGERS:
+        is_stub = (isinstance(trigger, str)
+                   and (not trigger.strip() or trigger.strip().lower() in STUB_TRIGGERS))
+        raise _bad_value("trigger_used", trigger, (*ALLOWED_TRIGGERS, "null"),
+                         " (a placeholder/stub, not a trigger)" if is_stub else "")
 
 
 def write_audit_entry(payload, ts_ms=None, path=None):
     """Append a new audit row. Returns the generated trade_id.
 
-    Required fields in payload: coin, side, mode, verdict. All other fields
+    Required fields in payload: coin, side, mode, verdict, each checked
+    against its allowed values (validate_audit_payload). All other fields
     are passed through verbatim. `outcome` is forced to None at write time.
+    The row is appended under an exclusive lock; the file is not rewritten.
     """
-    for required in REQUIRED_FIELDS:
-        if required not in payload:
-            raise ValueError(f"audit entry missing required field: {required}")
+    validate_audit_payload(payload)
 
+    path = path or AUDIT_LOG_PATH
     ts_ms = ts_ms or _ts_ms()
-    entries = _load_entries(path)
-    existing_ids = {e.get("id") for e in entries}
-    trade_id = _generate_trade_id(
-        payload["coin"], payload["side"], ts_ms, existing_ids)
 
     # Strip caller-supplied id/ts/outcome — those are owned by this module.
     safe_payload = {k: v for k, v in payload.items()
                     if k not in ("id", "ts_ms", "ts_utc", "outcome")}
 
-    entry = {
-        "id": trade_id,
-        "ts_ms": ts_ms,
-        "ts_utc": _utc_iso(ts_ms),
-        **safe_payload,
-        "outcome": None,
-    }
-    entries.append(entry)
-    _write_entries(entries, path)
+    with _locked(path):
+        existing_ids = {e.get("id") for e in _load_entries(path)}
+        trade_id = _generate_trade_id(
+            payload["coin"], payload["side"], ts_ms, existing_ids)
+        entry = {
+            "id": trade_id,
+            "ts_ms": ts_ms,
+            "ts_utc": _utc_iso(ts_ms),
+            **safe_payload,
+            "outcome": None,
+        }
+        _append_line(json.dumps(entry), path)
     return trade_id
 
 
@@ -124,21 +268,20 @@ def resolve_audit_entry(trade_id, outcome_r, exit_reason, lesson=None,
     and re-create if a fix is needed (immutability by default).
     """
     resolved_at_ms = resolved_at_ms or _ts_ms()
-    entries = _load_entries(path)
-    for e in entries:
-        if e.get("id") == trade_id:
-            if e.get("outcome") is not None:
-                return False
-            e["outcome"] = {
-                "resolved_at_ms": resolved_at_ms,
-                "resolved_at_utc": _utc_iso(resolved_at_ms),
-                "outcome_r": float(outcome_r),
-                "exit_reason": exit_reason,
-                "lesson": lesson,
-            }
-            _write_entries(entries, path)
-            return True
-    return False
+
+    def mutate(e):
+        if e.get("outcome") is not None:
+            return False
+        e["outcome"] = {
+            "resolved_at_ms": resolved_at_ms,
+            "resolved_at_utc": _utc_iso(resolved_at_ms),
+            "outcome_r": float(outcome_r),
+            "exit_reason": exit_reason,
+            "lesson": lesson,
+        }
+        return True
+
+    return _update_entry(trade_id, mutate, path)
 
 
 ACTION_VERDICTS = (
@@ -155,15 +298,13 @@ def attach_counterfactual(trade_id, counterfactual, path=None, force=False):
     counterfactual (unless force=True). Never touches `outcome` — a real
     trade result always lives separately and takes precedence.
     """
-    entries = _load_entries(path)
-    for e in entries:
-        if e.get("id") == trade_id:
-            if e.get("counterfactual") is not None and not force:
-                return False
-            e["counterfactual"] = counterfactual
-            _write_entries(entries, path)
-            return True
-    return False
+    def mutate(e):
+        if e.get("counterfactual") is not None and not force:
+            return False
+        e["counterfactual"] = counterfactual
+        return True
+
+    return _update_entry(trade_id, mutate, path)
 
 
 def list_open_entries(now_ms=None, path=None):
@@ -248,6 +389,8 @@ def compute_summary(since_days=None, path=None, now_ms=None, system=None):
     """Aggregate stats across audit entries.
 
     Returns:
+      skipped_unparseable_lines: lines that could not be parsed and were not
+        counted (left untouched in the file)
       total_entries, resolved (actual ENTRY outcomes only), resolved_rows, open
       verdict_distribution: {verdict: count}  (across ALL entries in window)
       by_setup: {system/family/side/setup: {n, win_rate, expectancy_r, total_r}}
@@ -258,7 +401,7 @@ def compute_summary(since_days=None, path=None, now_ms=None, system=None):
     matches (e.g. "scan2") — v1 entries have no `system` key and are excluded.
     """
     now_ms = now_ms or _ts_ms()
-    entries = _load_entries(path)
+    entries, skipped_lines = _load_entries_counted(path)
     if since_days is not None:
         cutoff_ms = now_ms - since_days * 86_400_000
         entries = [e for e in entries if int(e.get("ts_ms", 0)) >= cutoff_ms]
@@ -309,6 +452,7 @@ def compute_summary(since_days=None, path=None, now_ms=None, system=None):
                  and e.get("counterfactual") is not None))
 
     return {
+        "skipped_unparseable_lines": skipped_lines,
         "total_entries": len(entries),
         "resolved": len(resolved),
         "resolved_rows": len(resolved_rows),
@@ -487,6 +631,10 @@ def main(argv):
 
     if cmd == "list-open":
         out = list_open_entries()
+        skipped = _load_entries_counted()[1]
+        if skipped:
+            print(f"warning: {skipped} unparseable line(s) in the audit log "
+                  "were skipped (kept in the file, not read)", file=sys.stderr)
         print(json.dumps(out, indent=2, default=str))
         return 0
 
@@ -507,6 +655,10 @@ def main(argv):
                 print("--system requires a value", file=sys.stderr)
                 return 2
         out = compute_summary(since_days=since, system=system)
+        if out["skipped_unparseable_lines"]:
+            print(f"warning: {out['skipped_unparseable_lines']} unparseable "
+                  "line(s) in the audit log were skipped (kept in the file, "
+                  "not counted below)", file=sys.stderr)
         print(json.dumps(out, indent=2))
         return 0
 

@@ -510,7 +510,8 @@ def test_status_body_carries_only_the_documented_safe_fields():
     body = rr.build_full_status(snapshot, FakeUploader(), now_ms=1000)
     assert set(body.keys()) == {
         "connected", "seconds_since_last_message", "reconnects", "total_gap_seconds",
-        "disk_free_gb", "uploads_enabled", "last_successful_upload_ts_utc", "oldest_unconfirmed_day",
+        "disk_free_gb", "disk_low", "write_error", "uploads_enabled",
+        "last_successful_upload_ts_utc", "oldest_unconfirmed_day",
         "seconds_since_oldest_unconfirmed_day_ended", "upload_failing_since_ts_utc",
         "seconds_upload_failing",
     }
@@ -742,3 +743,29 @@ def test_flow_endpoint_is_a_404_when_no_flow_source_is_given():
 
     response = invoke(_flow_handler(None), b"GET /flow?coin=HYPE HTTP/1.1\r\n\r\n")
     assert b"404" in status_line(response)
+
+
+# ── disk_low / write_error in the merged /status, and the flow gate ─────
+
+class _NoUploads:
+    def status(self):
+        return {"uploads_enabled": True}
+
+
+def test_full_status_carries_disk_low_and_write_error_from_a_fresh_snapshot():
+    snapshot = rr.StatusSnapshot(clock=lambda: 1000)
+    snapshot.update({"connected": True, "lag_s": 1.0, "reconnects_24h": 0, "gap_seconds_24h": 0.0,
+                     "disk_free_gb": 1.2, "disk_low": True, "write_error": "OSError: full"})
+    body = rr.build_full_status(snapshot, _NoUploads(), now_ms=1000)
+    assert body["disk_low"] is True and body["disk_free_gb"] == 1.2
+    assert body["write_error"] == "OSError: full"
+
+
+def test_full_status_without_a_fresh_snapshot_is_unknown_not_healthy():
+    snapshot = rr.StatusSnapshot(clock=lambda: 1000)
+    body = rr.build_full_status(snapshot, _NoUploads(), now_ms=1000)
+    assert body["disk_low"] is None
+    assert "write_error" not in body            # absent, never a false "fine"
+    snapshot.update({"connected": True, "lag_s": 1.0, "disk_low": False, "write_error": None})
+    stale = rr.build_full_status(snapshot, _NoUploads(), now_ms=1000 + 10 * 3600 * 1000)
+    assert stale["disk_low"] is None and "write_error" not in stale

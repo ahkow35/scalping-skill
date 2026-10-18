@@ -477,6 +477,15 @@ For no-action verdicts (`WAIT`/`NO-TRADE`/`VETOED`/`HALT`) the row is still
 logged with its trade_id, but NO stub is shown — there is no trade to journal
 yet. Set `trigger_used: "A"` (or B/C) for action verdicts, `null` otherwise.
 
+`audit_log.py log` rejects values outside these sets (the error names the
+field, the value and the allowed list): `side` long|short|none; `mode`
+ENTRY|MANAGE|SCAN; `conviction` high|med|low|n/a; `macro_status`
+CLEAR|VETO|NO-TRADE|HALT; `trigger_used` A|B|C|null (no placeholders); `verdict`
+one of the verdicts above, SIT-OUT, or for MANAGE rows MANAGE |
+MANAGE-action-required | HOLD | ADD | EXIT | REDUCE | REDUCE-AND-STOP |
+REDUCE-INTO-STRENGTH. Omit `conviction`/`macro_status` (or send null) when not
+evaluated; do not invent a value.
+
 For MANAGE-action-required: payload uses `mode: "MANAGE"`, plus an `event`
 field naming what triggered the action (`stop_move`, `t1_hit`, `t2_hit`,
 `tape_flip`, `add_fired`, `invalidation`). The `triggers` block becomes

@@ -978,3 +978,61 @@ def test_recorder_exposes_its_live_connection_flag(tmp_path):
     assert fr.connected is False
     fr._connected = True
     assert fr.connected is True
+
+
+# ── disk write failure: loud, in /status, not a silent network blip ─────
+
+def test_status_has_no_write_error_normally(tmp_path):
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: MIDNIGHT)
+    assert fr.status()["write_error"] is None
+    assert fr.write_error is None
+
+
+def test_build_status_carries_disk_low_free_gb_and_write_error():
+    st = rec.build_status({}, None, True, now=MIDNIGHT, disk_low=True,
+                          disk_free_gb=1.26, write_error="OSError: boom")
+    assert st["disk_low"] is True
+    assert st["disk_free_gb"] == 1.3
+    assert st["write_error"] == "OSError: boom"
+
+
+def test_disk_write_oserror_is_raised_as_write_failed_and_shown_in_status(tmp_path, monkeypatch, capsys):
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: MIDNIGHT)
+
+    def full_disk(*_a, **_k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(fr.files, "write", full_disk)
+    with pytest.raises(rec._WriteFailed):
+        fr.handle_snapshot("bbo", "HYPE", {"coin": "HYPE", "time": MIDNIGHT})
+    assert "No space left on device" in fr.write_error
+    assert "No space left on device" in fr.status()["write_error"]
+    assert "DISK WRITE FAILED" in capsys.readouterr().err
+
+
+def test_a_successful_write_clears_the_write_error(tmp_path, monkeypatch):
+    fr = rec.FlowRecorder(["HYPE"], out_dir=str(tmp_path), clock=lambda: MIDNIGHT)
+    real_write = fr.files.write
+    monkeypatch.setattr(fr.files, "write", lambda *a, **k: (_ for _ in ()).throw(OSError("full")))
+    with pytest.raises(rec._WriteFailed):
+        fr.handle_snapshot("bbo", "HYPE", {"coin": "HYPE", "time": MIDNIGHT})
+    monkeypatch.setattr(fr.files, "write", real_write)
+    fr.handle_snapshot("bbo", "HYPE", {"coin": "HYPE", "time": MIDNIGHT + 1})
+    fr.files.close_all()
+    assert fr.write_error is None
+
+
+def test_run_reports_a_write_failure_loudly_not_as_a_connection_error(tmp_path, monkeypatch, capsys):
+    def full_disk(self, *_a, **_k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(rec.FlowFileSet, "write", full_disk)
+    clock = {"t": MIDNIGHT}
+    fr, st = _run_with_script(tmp_path, monkeypatch, clock, [
+        ("ws", MIDNIGHT, [_bbo(MIDNIGHT)], "stop"),
+        ("fail_and_stop", MIDNIGHT + 1000),
+    ])
+    err = capsys.readouterr().err
+    assert "disk write failed" in err
+    assert "connection error (OSError(28" not in err
+    assert "No space left on device" in st["write_error"]

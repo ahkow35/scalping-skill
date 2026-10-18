@@ -337,3 +337,248 @@ def test_passive_expectancy_stop_when_negative_at_sample_size(tmp_path):
     out = audit_log.passive_expectancy(path=p, min_samples=20)
     assert out["state"] == "STOP"
     assert out["size_mult"] == 0.0
+
+
+# ── write safety: lock, append, preserve unparseable lines ──────────────
+
+GOOD = {"coin": "HYPE", "side": "long", "mode": "ENTRY", "verdict": "WAIT"}
+
+
+def test_write_appends_without_rewriting_existing_lines(tmp_path):
+    p = _path(tmp_path)
+    with open(p, "w") as f:
+        f.write("CORRUPT {not json\n")
+        f.write(json.dumps({"id": "old", "ts_ms": 1, "verdict": "WAIT", "outcome": None}) + "\n")
+    before = open(p).read()
+    audit_log.write_audit_entry(GOOD, ts_ms=1779102720000, path=p)
+    after = open(p).read()
+    assert after.startswith(before)                     # old bytes untouched
+    assert len(after[len(before):].strip().splitlines()) == 1
+
+
+def test_append_terminates_a_torn_last_line_instead_of_gluing_to_it(tmp_path):
+    p = _path(tmp_path)
+    with open(p, "w") as f:
+        f.write('{"id": "torn"')                        # no closing brace, no newline
+    audit_log.write_audit_entry(GOOD, ts_ms=1779102720000, path=p)
+    lines = open(p).read().splitlines()
+    assert lines[0] == '{"id": "torn"'
+    assert json.loads(lines[1])["coin"] == "HYPE"
+
+
+def test_resolve_preserves_unparseable_and_untouched_lines_verbatim(tmp_path):
+    p = _path(tmp_path)
+    odd = '{"id":"spaced",   "ts_ms": 5,"verdict":"WAIT","outcome":null}'
+    tid = audit_log.write_audit_entry(GOOD, ts_ms=1779102720000, path=p)
+    with open(p, "a") as f:
+        f.write("CORRUPT {not json\n" + odd + "\n")
+    assert audit_log.resolve_audit_entry(tid, 1.5, "T1", path=p)
+    lines = open(p).read().splitlines()
+    assert "CORRUPT {not json" in lines
+    assert odd in lines                                  # formatting kept, not re-dumped
+    assert json.loads(lines[0])["outcome"]["outcome_r"] == 1.5
+
+
+def test_attach_counterfactual_preserves_unparseable_lines(tmp_path):
+    p = _path(tmp_path)
+    tid = audit_log.write_audit_entry(GOOD, ts_ms=1779102720000, path=p)
+    with open(p, "a") as f:
+        f.write("GARBAGE\n")
+    assert audit_log.attach_counterfactual(tid, {"best_r": 1}, path=p)
+    assert "GARBAGE" in open(p).read().splitlines()
+
+
+def test_update_leaves_no_temp_files_and_uses_no_fixed_tmp_name(tmp_path):
+    p = _path(tmp_path)
+    tid = audit_log.write_audit_entry(GOOD, ts_ms=1779102720000, path=p)
+    audit_log.resolve_audit_entry(tid, 1.0, "T1", path=p)
+    names = sorted(os.listdir(tmp_path))
+    assert not any(n.endswith(".tmp") for n in names)
+    assert os.path.basename(p) + ".lock" in names
+
+
+def test_concurrent_writers_lose_no_entry(tmp_path):
+    import subprocess
+    p = _path(tmp_path)
+    code = (
+        "import sys; sys.path.insert(0, %r); import audit_log\n"
+        "for i in range(25):\n"
+        "    audit_log.write_audit_entry({'coin': 'C%%s' %% sys.argv[1], 'side': 'long',"
+        " 'mode': 'ENTRY', 'verdict': 'WAIT'}, ts_ms=1000 + i, path=%r)\n"
+    ) % (os.path.dirname(os.path.dirname(os.path.abspath(__file__))), p)
+    procs = [subprocess.Popen([sys.executable, "-c", code, str(n)]) for n in range(4)]
+    assert all(proc.wait(timeout=60) == 0 for proc in procs)
+    entries = audit_log._load_entries(p)
+    assert len(entries) == 100
+    assert len({e["id"] for e in entries}) == 100
+
+
+def test_concurrent_resolve_and_write_keep_both(tmp_path):
+    import subprocess
+    p = _path(tmp_path)
+    ids = [audit_log.write_audit_entry({**GOOD, "coin": f"R{i}"}, ts_ms=2000 + i, path=p)
+           for i in range(20)]
+    code = (
+        "import sys; sys.path.insert(0, %r); import audit_log\n"
+        "for tid in sys.argv[1:]:\n"
+        "    assert audit_log.resolve_audit_entry(tid, 1.0, 'T1', path=%r)\n"
+        "for i in range(20):\n"
+        "    audit_log.write_audit_entry({'coin': 'W', 'side': 'long', 'mode': 'ENTRY',"
+        " 'verdict': 'WAIT'}, ts_ms=9000 + i, path=%r)\n"
+    ) % (os.path.dirname(os.path.dirname(os.path.abspath(__file__))), p, p)
+    procs = [subprocess.Popen([sys.executable, "-c", code, *chunk])
+             for chunk in (ids[:10], ids[10:])]
+    assert all(proc.wait(timeout=60) == 0 for proc in procs)
+    entries = audit_log._load_entries(p)
+    assert len(entries) == 60
+    assert sum(1 for e in entries if e["outcome"]) == 20
+
+
+def test_readers_report_skipped_unparseable_lines(tmp_path, monkeypatch, capsys):
+    p = _path(tmp_path)
+    audit_log.write_audit_entry(GOOD, ts_ms=1779102720000, path=p)
+    with open(p, "a") as f:
+        f.write("CORRUPT\n[1, 2]\n")
+    assert audit_log.compute_summary(path=p)["skipped_unparseable_lines"] == 2
+    assert audit_log._load_entries_counted(p)[1] == 2
+    monkeypatch.setattr(audit_log, "AUDIT_LOG_PATH", p)
+    assert audit_log.main(["audit_log.py", "summary"]) == 0
+    captured = capsys.readouterr()
+    assert "2 unparseable" in captured.err
+    assert json.loads(captured.out)["skipped_unparseable_lines"] == 2
+    assert audit_log.main(["audit_log.py", "list-open"]) == 0
+    assert "2 unparseable" in capsys.readouterr().err
+
+
+# ── value checks on write ───────────────────────────────────────────────
+
+@pytest.mark.parametrize("change,field", [
+    ({"coin": ""}, "coin"), ({"coin": "  "}, "coin"), ({"coin": None}, "coin"),
+    ({"coin": 5}, "coin"),
+    ({"side": "LONG"}, "side"), ({"side": "B"}, "side"),
+    ({"mode": "QUICK"}, "mode"), ({"mode": "entry"}, "mode"),
+    ({"verdict": "MAYBE"}, "verdict"), ({"verdict": "REDUCE_AND_STOP"}, "verdict"),
+    ({"verdict": "CARD"}, "verdict"),
+    ({"conviction": "med-high"}, "conviction"), ({"conviction": "MED"}, "conviction"),
+    ({"macro_status": "YELLOW"}, "macro_status"),
+    ({"macro_status": "CLEAR (partial - BTC.D unavailable)"}, "macro_status"),
+    ({"trigger_used": "D"}, "trigger_used"),
+    ({"trigger_used": ""}, "trigger_used"), ({"trigger_used": "TBD"}, "trigger_used"),
+    ({"trigger_used": "none"}, "trigger_used"), ({"trigger_used": " n/a "}, "trigger_used"),
+    ({"trigger_used": "manual"}, "trigger_used"), ({"trigger_used": {}}, "trigger_used"),
+])
+def test_write_rejects_bad_values_naming_field_value_and_allowed(tmp_path, change, field):
+    p = _path(tmp_path)
+    with pytest.raises(ValueError) as exc:
+        audit_log.write_audit_entry({**GOOD, **change}, path=p)
+    message = str(exc.value)
+    assert repr(field) in message and "allowed:" in message
+    if field != "coin":
+        assert repr(change[field]) in message
+    assert not os.path.exists(p)                         # nothing written
+
+
+def test_stub_trigger_error_says_placeholder(tmp_path):
+    with pytest.raises(ValueError, match="placeholder/stub"):
+        audit_log.write_audit_entry({**GOOD, "trigger_used": "TBD"}, path=_path(tmp_path))
+
+
+@pytest.mark.parametrize("payload", [
+    {**GOOD, "conviction": "high", "macro_status": "CLEAR", "trigger_used": "A", "verdict": "LONG-NOW"},
+    {**GOOD, "conviction": "n/a", "macro_status": "VETO", "verdict": "VETOED", "trigger_used": None},
+    {**GOOD, "macro_status": "NO-TRADE", "verdict": "NO-TRADE", "conviction": None},
+    {**GOOD, "macro_status": "HALT", "verdict": "HALT"},
+    {**GOOD, "side": "short", "verdict": "SHORT-CLOSE", "trigger_used": "B", "conviction": "med"},
+    {**GOOD, "verdict": "FADE-SHORT-NOW", "setup_family": "passive-fade"},
+    {**GOOD, "verdict": "SIT-OUT"},
+    {**GOOD, "side": "none", "mode": "SCAN", "verdict": "CARDS", "system": "scan2"},
+    {**GOOD, "mode": "MANAGE", "verdict": "MANAGE-action-required", "event": "t1_hit"},
+    {**GOOD, "side": "long", "verdict": "TAKEN", "system": "scan2"},
+    {**GOOD, "coin": "xyz:GOLD", "conviction": "low", "trigger_used": "C"},
+])
+def test_write_accepts_every_value_the_specs_produce(tmp_path, payload):
+    assert audit_log.write_audit_entry(payload, path=_path(tmp_path)).startswith("scalp-")
+
+
+def test_every_action_verdict_and_decide_output_is_writable(tmp_path):
+    p = _path(tmp_path)
+    for verdict in audit_log.ACTION_VERDICTS:
+        audit_log.write_audit_entry({**GOOD, "verdict": verdict}, path=p)
+    import decide
+    for verdict in decide._VERDICT.values():
+        assert verdict in audit_log._allowed_verdicts()
+
+
+def test_historical_rows_are_not_validated_and_summary_still_reads_them(tmp_path):
+    p = _path(tmp_path)
+    old = {"id": "legacy", "ts_ms": 1779102720000, "coin": "HYPE", "side": "long",
+           "mode": "ENTRY", "verdict": "REDUCE_AND_STOP", "conviction": "med-high",
+           "macro_status": "YELLOW", "trigger_used": "manual", "outcome": None}
+    with open(p, "w") as f:
+        f.write(json.dumps(old) + "\n")
+    s = audit_log.compute_summary(path=p)
+    assert s["total_entries"] == 1 and s["verdict_distribution"] == {"REDUCE_AND_STOP": 1}
+    assert audit_log.resolve_audit_entry("legacy", 1.0, "T1", path=p)   # rewrite path does not validate
+
+
+def test_cli_log_rejects_a_bad_value_with_a_clear_error(tmp_path, monkeypatch, capsys):
+    p = _path(tmp_path)
+    monkeypatch.setattr(audit_log, "AUDIT_LOG_PATH", p)
+    payload = json.dumps({**GOOD, "macro_status": "YELLOW"})
+    monkeypatch.setattr("sys.stdin", _StringIO(payload))
+    assert audit_log.main(["audit_log.py", "log"]) == 2
+    err = capsys.readouterr().err
+    assert "'macro_status'" in err and "'YELLOW'" in err and "CLEAR" in err
+    assert not os.path.exists(p)
+
+
+def test_cli_log_rejects_a_non_object_payload(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(audit_log, "AUDIT_LOG_PATH", _path(tmp_path))
+    monkeypatch.setattr("sys.stdin", _StringIO("[1, 2]"))
+    assert audit_log.main(["audit_log.py", "log"]) == 2
+    assert "JSON object" in capsys.readouterr().err
+
+
+def test_a_second_writer_waits_while_the_first_holds_the_lock(tmp_path):
+    import threading
+    p = _path(tmp_path)
+    holding, release, done = threading.Event(), threading.Event(), threading.Event()
+
+    def hold():
+        with audit_log._locked(p):
+            holding.set()
+            release.wait(5)
+
+    def write():
+        audit_log.write_audit_entry(GOOD, ts_ms=1779102720000, path=p)
+        done.set()
+
+    t1 = threading.Thread(target=hold)
+    t1.start()
+    assert holding.wait(5)
+    t2 = threading.Thread(target=write)
+    t2.start()
+    assert not done.wait(0.3)                    # blocked behind the held lock
+    assert not os.path.exists(p)
+    release.set()
+    t1.join(5)
+    t2.join(5)
+    assert done.is_set() and len(audit_log._load_entries(p)) == 1
+
+
+def test_a_failed_replace_leaves_the_log_intact_and_no_temp_file(tmp_path, monkeypatch):
+    p = _path(tmp_path)
+    tid = audit_log.write_audit_entry(GOOD, ts_ms=1779102720000, path=p)
+    with open(p, "a") as f:
+        f.write("CORRUPT\n")
+    before = open(p).read()
+
+    def boom(*_a, **_k):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(audit_log.os, "replace", boom)
+    with pytest.raises(OSError):
+        audit_log.resolve_audit_entry(tid, 1.0, "T1", path=p)
+    monkeypatch.undo()
+    assert open(p).read() == before
+    assert not [n for n in os.listdir(tmp_path) if n.endswith(".tmp")]

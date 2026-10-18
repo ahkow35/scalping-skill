@@ -1353,3 +1353,129 @@ def test_report_response_is_byte_identical_with_and_without_the_flow_route():
                 b"GET /report HTTP/1.1\r\nAuthorization: Bearer x\r\n\r\n"):
         assert invoke(rw.make_handler(state, "correct-token"), bad) == \
             invoke(rw.make_handler(state, "correct-token", _flow_fetch()), bad)
+
+
+# ---------------------------------------------------------------------------
+# Recorder disk alerts: RECORDER_DISK_LOW and RECORDER_WRITE_FAILING
+# ---------------------------------------------------------------------------
+
+def test_recorder_disk_low_appears_with_free_gb_repeats_and_clears():
+    w = make_watcher()
+    low = _recorder_status(disk_low=True, disk_free_gb=1.4)
+    appear = w.recorder_step(low, MIDNIGHT)
+    assert len(appear) == 1 and appear[0].startswith("PROBLEM:") and "1.4 GB free" in appear[0]
+    assert "RECORDER_DISK_LOW" in w.active
+    assert w.recorder_step(low, MIDNIGHT + 29 * 60_000) == []
+    repeat = w.recorder_step(low, MIDNIGHT + 30 * 60_000)
+    assert len(repeat) == 1 and repeat[0].startswith("PROBLEM (ongoing):")
+    cleared = w.recorder_step(_recorder_status(disk_low=False, disk_free_gb=6.0), MIDNIGHT + 31 * 60_000)
+    assert len(cleared) == 1 and cleared[0].startswith("ALL CLEAR:")
+    assert "RECORDER_DISK_LOW" not in w.active
+
+
+def test_recorder_disk_low_is_left_alone_when_the_poll_is_unreachable_or_unknown():
+    w = make_watcher()
+    w.recorder_step(_recorder_status(disk_low=True, disk_free_gb=1.4), MIDNIGHT)
+    w.recorder_step(None, MIDNIGHT + 1000)
+    w.recorder_step(_recorder_status(disk_low=None), MIDNIGHT + 2000)
+    w.recorder_step(_recorder_status(), MIDNIGHT + 3000)            # key absent (old recorder)
+    assert "RECORDER_DISK_LOW" in w.active
+
+
+def test_recorder_disk_not_low_raises_nothing():
+    w = make_watcher()
+    assert w.recorder_step(_recorder_status(disk_low=False, disk_free_gb=8.0), MIDNIGHT) == []
+
+
+def test_recorder_write_failing_appears_with_reason_and_clears():
+    w = make_watcher()
+    failing = _recorder_status(write_error="OSError: [Errno 28] No space left on device")
+    appear = w.recorder_step(failing, MIDNIGHT)
+    assert len(appear) == 1 and "No space left on device" in appear[0]
+    assert "RECORDER_WRITE_FAILING" in w.active
+    w.recorder_step(None, MIDNIGHT + 1000)
+    assert "RECORDER_WRITE_FAILING" in w.active                     # unreachable: unchanged
+    cleared = w.recorder_step(_recorder_status(write_error=None), MIDNIGHT + 2000)
+    assert len(cleared) == 1 and cleared[0].startswith("ALL CLEAR:")
+    assert "RECORDER_WRITE_FAILING" not in w.active
+
+
+# ---------------------------------------------------------------------------
+# USDC-hold alert: change-based (USD 100), not time-based
+# ---------------------------------------------------------------------------
+
+def hold_report(hold):
+    from test_account_observation import unified, spot
+    data = unified(now=MIDNIGHT)
+    data["spot"] = spot(hold=hold)
+    report, _ = observe(data)
+    assert report["status"] == "UNSUPPORTED"
+    return report
+
+
+def test_usdc_hold_amount_is_parsed_from_the_reason_text():
+    assert rw.usdc_hold_amount(hold_report("1382.57")) == 1382.57
+    assert rw.usdc_hold_amount({"reasons": ["unsupported account mode 'x'"]}) is None
+    assert rw.usdc_hold_amount({"reasons": ["USDC hold abc on a perps-only unified account"]}) is None
+    assert rw.usdc_hold_amount({"reasons": ["USDC hold nan on a perps-only unified account"]}) is None
+    assert rw.usdc_hold_amount({}) is None
+
+
+def test_usdc_hold_alerts_once_then_stays_quiet_for_hours_without_a_100_move():
+    w = make_watcher()
+    first = w.step(hold_report("1382.57"), MIDNIGHT)
+    assert len(first) == 1 and first[0].startswith("PROBLEM:") and "1382.57" in first[0]
+    for hours in (1, 2, 5):                                  # well past 30 min: no timer repeat
+        assert w.step(hold_report("1382.57"), MIDNIGHT + hours * 3_600_000) == []
+    assert w.step(hold_report("1450"), MIDNIGHT + 6 * 3_600_000) == []       # +67.43, under 100
+
+
+def test_usdc_hold_re_alerts_when_it_moves_100_up_or_down_from_the_last_alert():
+    w = make_watcher()
+    w.step(hold_report("1000"), MIDNIGHT)
+    assert w.step(hold_report("1099.99"), MIDNIGHT + 1000) == []
+    up = w.step(hold_report("1100"), MIDNIGHT + 2000)
+    assert len(up) == 1 and up[0].startswith("PROBLEM (ongoing):") and "1100" in up[0]
+    # The baseline is now 1100 (the last alert sent), not the original 1000.
+    assert w.step(hold_report("1050"), MIDNIGHT + 3000) == []
+    down = w.step(hold_report("1000"), MIDNIGHT + 4000)
+    assert len(down) == 1 and down[0].startswith("PROBLEM (ongoing):")
+
+
+def test_usdc_hold_slow_drift_is_measured_from_the_last_alert_not_the_last_poll():
+    w = make_watcher()
+    w.step(hold_report("1000"), MIDNIGHT)
+    for i, amount in enumerate(("1040", "1080", "1099"), start=1):
+        assert w.step(hold_report(amount), MIDNIGHT + i * 1000) == []
+    assert len(w.step(hold_report("1101"), MIDNIGHT + 5000)) == 1
+
+
+def test_usdc_hold_still_sends_all_clear():
+    w = make_watcher()
+    w.step(hold_report("1382.57"), MIDNIGHT)
+    recovered, _ = start_day()
+    messages = w.step(recovered, MIDNIGHT + 1000)
+    assert len(messages) == 1 and messages[0].startswith("ALL CLEAR:")
+    assert "CONFIG_UNSUPPORTED" not in w.active
+
+
+def test_usdc_hold_with_an_unparseable_amount_keeps_the_30_minute_repeat():
+    w = make_watcher()
+    report = {"status": "UNSUPPORTED", "daily": None,
+              "reasons": ["USDC hold ??? on a perps-only unified account: open spot orders; equity unknown"]}
+    assert len(w.step(report, MIDNIGHT)) == 1
+    assert w.step(report, MIDNIGHT + 29 * 60_000) == []
+    repeat = w.step(report, MIDNIGHT + 30 * 60_000)
+    assert len(repeat) == 1 and repeat[0].startswith("PROBLEM (ongoing):")
+
+
+def test_other_config_unsupported_reasons_keep_the_30_minute_repeat():
+    w = make_watcher()
+    unsupported, _ = observe(snapshot(now=MIDNIGHT, mode="portfolioMargin"))
+    assert len(w.step(unsupported, MIDNIGHT)) == 1
+    assert w.step(unsupported, MIDNIGHT + 29 * 60_000) == []
+    assert len(w.step(unsupported, MIDNIGHT + 30 * 60_000)) == 1
+
+
+def test_usdc_hold_threshold_is_100_usd():
+    assert rw.USDC_HOLD_ALERT_STEP_USD == 100
