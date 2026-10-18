@@ -496,6 +496,21 @@ field naming what triggered the action (`stop_move`, `t1_hit`, `t2_hit`,
 `tape_flip`, `add_fired`, `invalidation`). The `triggers` block becomes
 the current `scale_ladder` (T1/T2 prices, current SL).
 
+MANAGE `verdict` is set by what ACTION NOW does, never free text:
+
+| ACTION NOW does | `verdict` |
+|---|---|
+| takes profit at T1/T2 (`t1_hit`, `t2_hit`) | `REDUCE` |
+| moves the stop only (`stop_move`) | `MANAGE-action-required` |
+| cuts size and moves the stop together (e.g. `tape_flip`) | `REDUCE-AND-STOP` |
+| sells into a bounce while underwater, no T1 hit | `REDUCE-INTO-STRENGTH` |
+| adds to the position (`add_fired`) | `ADD` |
+| closes the position (`invalidation`, a full `tape_flip`, the time-stop) | `EXIT` |
+| changes nothing (only if logged at all; the compact form is not) | `HOLD` |
+
+If two apply, use the larger change (`EXIT` > `REDUCE-AND-STOP` > `REDUCE` /
+`REDUCE-INTO-STRENGTH` > `ADD` > `MANAGE-action-required` > `HOLD`).
+
 ### Resolving on close
 
 When the trade closes (or the thesis is invalidated without an entry), run:
@@ -528,7 +543,10 @@ on an action verdict) usually mean the user forgot to resolve — prompt them.
 
 ### Failure handling
 
-If `audit_log.py log` fails (disk full, permission error, etc.), report
+If `audit_log.py log` refuses the payload (exit code 2: a value outside the
+allowed sets above, or bad JSON), fix the named field and run `log` again —
+see "How to log". If it fails for any other reason (non-zero exit other than
+2: disk full, permission error, etc.), report
 the error to the user AND still emit the trading output — the audit log is
 non-blocking. A missed audit row is better than a missed trade. But flag
 the failure prominently so it gets fixed.
