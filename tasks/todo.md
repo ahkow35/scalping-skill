@@ -193,4 +193,4 @@ This would make the market fetcher read the recorder's tape for the execution wi
 ## Review fixes 2026-10-18 (disk alert, audit log safety, audit schema, USDC-hold alert)
 
 - [x] Recorder disk-low alert, locked audit-log writes, audit-log value checks, USDC-hold alert on $100 change only. PR #26 (merged f72d5f5)
-- [x] Stop recording BTC on the Railway recorder (RECORDER_COINS → HYPE,ZEC,PUMP in `.railway/railway.ts` + docs). Separate PR after the review-fix PR; Nyan runs `railway config apply --yes` after merge. PR #27 (merged de6fd84; config apply pending)
+- [x] Stop recording BTC on the Railway recorder (RECORDER_COINS → HYPE,ZEC,PUMP in `.railway/railway.ts` + docs). Separate PR after the review-fix PR; Nyan runs `railway config apply --yes` after merge. PR #27 (merged de6fd84; config applied — confirmed up to date 2026-10-19)
