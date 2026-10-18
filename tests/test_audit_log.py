@@ -483,6 +483,19 @@ def test_stub_trigger_error_says_placeholder(tmp_path):
         audit_log.write_audit_entry({**GOOD, "trigger_used": "TBD"}, path=_path(tmp_path))
 
 
+@pytest.mark.parametrize("value", ["VETO (PCE + GDP day)", "CLEAR (partial - BTC.D unavailable)"])
+def test_macro_status_with_a_reason_points_at_macro_reason(tmp_path, value):
+    with pytest.raises(ValueError, match="macro_reason"):
+        audit_log.write_audit_entry({**GOOD, "macro_status": value}, path=_path(tmp_path))
+
+
+def test_macro_reason_is_stored_beside_the_bare_status(tmp_path):
+    p = _path(tmp_path)
+    audit_log.write_audit_entry({**GOOD, "macro_status": "VETO", "macro_reason": "PCE + GDP day"}, path=p)
+    row = json.loads(open(p).read().strip())
+    assert row["macro_status"] == "VETO" and row["macro_reason"] == "PCE + GDP day"
+
+
 @pytest.mark.parametrize("payload", [
     {**GOOD, "conviction": "high", "macro_status": "CLEAR", "trigger_used": "A", "verdict": "LONG-NOW"},
     {**GOOD, "conviction": "n/a", "macro_status": "VETO", "verdict": "VETOED", "trigger_used": None},

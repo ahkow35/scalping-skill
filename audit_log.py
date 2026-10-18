@@ -218,7 +218,13 @@ def validate_audit_payload(payload):
                            ("macro_status", ALLOWED_MACRO_STATUSES)):
         value = payload.get(field)
         if value is not None and value not in allowed:
-            raise _bad_value(field, value, allowed)
+            extra = ""
+            if (field == "macro_status" and isinstance(value, str)
+                    and value.split(" ", 1)[0].strip("(:-") in allowed):
+                # "VETO (PCE day)": the spec's display line invites this shape.
+                extra = (" (send the bare status here and put the reason in "
+                         "'macro_reason')")
+            raise _bad_value(field, value, allowed, extra)
     trigger = payload.get("trigger_used")
     if trigger is not None and trigger not in ALLOWED_TRIGGERS:
         is_stub = (isinstance(trigger, str)

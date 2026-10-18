@@ -484,7 +484,12 @@ CLEAR|VETO|NO-TRADE|HALT; `trigger_used` A|B|C|null (no placeholders); `verdict`
 one of the verdicts above, SIT-OUT, or for MANAGE rows MANAGE |
 MANAGE-action-required | HOLD | ADD | EXIT | REDUCE | REDUCE-AND-STOP |
 REDUCE-INTO-STRENGTH. Omit `conviction`/`macro_status` (or send null) when not
-evaluated; do not invent a value.
+evaluated; do not invent a value. `macro_status` is the bare status only: the
+reason shown on the `MACRO:` line (e.g. "PCE day", "partial - BTC.D
+unavailable") goes in a separate `macro_reason` string. If `log` refuses a
+payload (exit code 2), correct the field the error names and run `log` again
+before replying: a row that is never written is invisible to the behavioral
+gates.
 
 For MANAGE-action-required: payload uses `mode: "MANAGE"`, plus an `event`
 field naming what triggered the action (`stop_move`, `t1_hit`, `t2_hit`,
