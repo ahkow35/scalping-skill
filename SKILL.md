@@ -35,8 +35,8 @@ key or place orders.
 
 Run:
 ```bash
-python3 /Users/nyanyk/Claude/research/scalp/audit_log.py summary [--since-days N]
-python3 /Users/nyanyk/Claude/research/scalp/audit_log.py list-open
+python3 /Users/nyanyk/Claude/projects/scalp/audit_log.py summary [--since-days N]
+python3 /Users/nyanyk/Claude/projects/scalp/audit_log.py list-open
 ```
 
 Both return JSON. Render as the block below — do NOT dump raw JSON. The
@@ -82,7 +82,7 @@ Then append calibration callouts if any of these conditions are TRUE
 
 Run:
 ```bash
-python3 /Users/nyanyk/Claude/research/scalp/audit_log.py resolve <args>
+python3 /Users/nyanyk/Claude/projects/scalp/audit_log.py resolve <args>
 ```
 
 If the script returns 0, confirm to the user with the trade_id and outcome.
@@ -95,7 +95,7 @@ Counterfactual scorer — replays every open logged decision against the candles
 that followed it: did the trigger fill, and did the stop or targets get hit
 first? Run:
 ```bash
-python3 /Users/nyanyk/Claude/research/scalp/replay.py [--window-h N] [--force]
+python3 /Users/nyanyk/Claude/projects/scalp/replay.py [--window-h N] [--force]
 ```
 
 Returns JSON `{scored: [...], skipped: [...]}`. Render one line per scored
@@ -113,7 +113,7 @@ always take precedence — replay never touches resolved entries.
 
 Run:
 ```bash
-python3 /Users/nyanyk/Claude/research/scalp/audit_log.py list-open
+python3 /Users/nyanyk/Claude/projects/scalp/audit_log.py list-open
 ```
 
 Render as a compact table:
@@ -135,7 +135,7 @@ If the list is empty: `No open audit entries — everything's closed out.`
 Account state the sizing math needs but cannot infer (equity, phase). With no
 args, show current profile:
 ```bash
-python3 /Users/nyanyk/Claude/research/scalp/profile.py get
+python3 /Users/nyanyk/Claude/projects/scalp/profile.py get
 ```
 To update: `python3 .../profile.py set equity 5000` or `set phase 2`. Fields:
 `equity` (USDC, > 0), `phase` (1 → 0.5% default cap, 2 → 2.0%). Render the
@@ -146,14 +146,14 @@ it before any action verdict can show sizing.
 ## Step 1 — Determine direction, then load the protocol
 
 - Long (default): args do NOT contain `short` → load BOTH
-  `/Users/nyanyk/Claude/research/scalp/scalp-core.md` and
-  `/Users/nyanyk/Claude/research/scalp/scalp-long.md`.
+  `/Users/nyanyk/Claude/projects/scalp/scalp-core.md` and
+  `/Users/nyanyk/Claude/projects/scalp/scalp-long.md`.
 - Short: args contain `short` → load BOTH
-  `/Users/nyanyk/Claude/research/scalp/scalp-core.md` and
-  `/Users/nyanyk/Claude/research/scalp/scalp-short.md`.
+  `/Users/nyanyk/Claude/projects/scalp/scalp-core.md` and
+  `/Users/nyanyk/Claude/projects/scalp/scalp-short.md`.
 - Passive: args contain `passive` → load BOTH
-  `/Users/nyanyk/Claude/research/scalp/scalp-core.md` and
-  `/Users/nyanyk/Claude/research/scalp/scalp-passive.md`. (Overrides long/short:
+  `/Users/nyanyk/Claude/projects/scalp/scalp-core.md` and
+  `/Users/nyanyk/Claude/projects/scalp/scalp-passive.md`. (Overrides long/short:
   passive mode fades both sides.) Invoked as `/scalp passive <COIN>` or
   `/scalp tiny passive <COIN>`.
 
@@ -252,7 +252,7 @@ Follow `scalp-core.md` + the direction module exactly.
 
 ## Note on taker_delta cache
 The fetch script builds a local trade cache at
-`/Users/nyanyk/Claude/research/scalp/.trade_cache/<COIN>.jsonl` because the
+`/Users/nyanyk/Claude/projects/scalp/.trade_cache/<COIN>.jsonl` because the
 Hyperliquid `recentTrades` endpoint is hard-capped at 10 trades per call.
 Each /scalp run dedupes by `tid` and appends. This sparse REST sample cannot
 establish complete capture, even after repeated calls. Per-window span,

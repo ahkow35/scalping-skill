@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.nyanyk.scalp-account-midnight</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Frameworks/Python.framework/Versions/3.14/bin/python3</string>
+    <string>/Users/nyanyk/Claude/projects/scalp/account_monitor.py</string>
+    <string>watch</string>
+    <string>--json</string>
+    <string>--interval-seconds</string><string>20</string>
+    <string>--count</string><string>12</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/nyanyk/Claude/projects/scalp</string>
+  <!-- Daily 23:58 SGT: 12 observations x 20s straddle 00:00 so the account
+       monitor gets a near-reset baseline (needs one read within 60s before
+       midnight and one within 60s after). Read-only; never places orders. -->
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>23</integer>
+        <key>Minute</key><integer>58</integer></dict>
+  <key>StandardOutPath</key>
+  <string>/Users/nyanyk/Claude/projects/scalp/logs/account_midnight.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/nyanyk/Claude/projects/scalp/logs/account_midnight.err</string>
+</dict>
+</plist>

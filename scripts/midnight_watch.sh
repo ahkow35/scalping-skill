@@ -13,7 +13,7 @@
 # which is the normal resting state, so it is swallowed deliberately.
 
 set -u
-SCALP_DIR="/Users/nyanyk/Claude/research/scalp"
+SCALP_DIR="/Users/nyanyk/Claude/projects/scalp"
 LOG="${SCALP_DIR}/logs/midnight-watch.log"
 
 cd "$SCALP_DIR" || exit 1
@@ -29,7 +29,7 @@ echo "=== midnight watch end   $(date -u '+%Y-%m-%dT%H:%M:%SZ') rc=${rc} ===" >>
 # Report the resulting baseline quality so the log answers "did it work?" directly.
 /Library/Frameworks/Python.framework/Versions/3.14/bin/python3 - <<'PY' >> "$LOG" 2>&1
 import json, pathlib
-d = pathlib.Path("/Users/nyanyk/Claude/research/scalp/.account_monitor")
+d = pathlib.Path("/Users/nyanyk/Claude/projects/scalp/.account_monitor")
 try:
     cfg = json.loads((d / "config.json").read_text())
     st = json.loads((d / (cfg["wallet"] + ".json")).read_text())

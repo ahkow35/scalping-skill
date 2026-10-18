@@ -189,3 +189,8 @@ This would make the market fetcher read the recorder's tape for the execution wi
 - **Mac on battery or lid closed.** Keeping it awake on mains power doesn't cover battery. Those periods show as gaps, which is honest but still a hole.
 - **Exchange changes since July.** The message format may have drifted, and the live run catches that.
 - **Disk estimate unverified** until week one is measured.
+
+## Review fixes 2026-10-18 (disk alert, audit log safety, audit schema, USDC-hold alert)
+
+- [x] Recorder disk-low alert, locked audit-log writes, audit-log value checks, USDC-hold alert on $100 change only. PR #26 (merged f72d5f5)
+- [x] Stop recording BTC on the Railway recorder (RECORDER_COINS → HYPE,ZEC,PUMP in `.railway/railway.ts` + docs). Separate PR after the review-fix PR; Nyan runs `railway config apply --yes` after merge. PR #27 (merged de6fd84; config applied — confirmed up to date 2026-10-19)
