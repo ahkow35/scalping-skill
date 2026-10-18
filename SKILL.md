@@ -262,7 +262,7 @@ validate a current window.
 
 The Railway recorder (`recorder.py` + `railway_record.py`, holds a WebSocket
 connection open and writes an append-only tape of every trade) DOES feed this
-gate for the coins it captures (`RECORDER_COINS`, currently HYPE, ZEC, PUMP, BTC).
+gate for the coins it captures (`RECORDER_COINS`, currently HYPE, ZEC, PUMP).
 `fetch_market.py` asks the Railway watcher's token-protected `/flow` for the
 primary coin's per-minute tape, and builds the same 5m/15m/1h/4h windows with
 `source: "ws_recorder"`. `coverage_pct` is recorded trades over Hyperliquid's

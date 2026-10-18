@@ -1,5 +1,16 @@
 # Changelog — scalp skill
 
+## 2026-10-18 — Stop recording BTC
+
+- `RECORDER_COINS` is now `HYPE,ZEC,PUMP`. The BTC tape fed only the flow
+  gate of `/scalp BTC` (2 of 178 journal rows); the BTC macro veto and the
+  strip-BTC gate read exchange candles, not the tape. BTC is the busiest
+  market and the recorder held ~600 MB of memory, most of the Railway bill.
+- `/scalp BTC` now falls back to the sampled REST flow (`reliable` false,
+  which leans WAIT). BTC tape files already uploaded stay in the bucket.
+- Needs `railway config apply --yes` after merge: a merge does not apply
+  `.railway/railway.ts` variables.
+
 ## 2026-10-05 — Cross-review round 3: each minute must clear the coverage floor
 
 - **One thin minute hidden by a full window.** A minute that caught 1 of 1,000
