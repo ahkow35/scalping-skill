@@ -127,15 +127,18 @@ variable does not itself trigger a redeploy).
   check — never tied to exchange connectivity) and `GET /status` (JSON —
   connected, seconds since last message, reconnects, total gap seconds,
   last successful upload time, the oldest finished day not yet confirmed
-  uploaded, how long uploads have been failing, and disk free — never a
+  uploaded, how long uploads have been failing, disk free, `disk_low`, and `write_error` (the reason a disk write is failing,
+  else null; `/flow` reads as not connected while it is set) — never a
   secret) on `PORT`, bound to `::` (Railway's private network is IPv6).
 - If `RECORDER_STATUS_URL` is set on the watcher, it polls this `/status` at
-  most once a minute and raises two alerts through the same Telegram
+  most once a minute and raises four alerts through the same Telegram
   channel and appear/repeat/clear rules as its own account problems:
   `RECORDER_SILENT` (unreachable, disconnected, or silent for 5 minutes) and
   `RECORDER_UPLOAD_FAILING` (uploads disabled by missing bucket
-  configuration, a day unconfirmed, or uploads failing, for over 24 hours).
-  Neither ever touches `/report`, `entry_allowed`, or any account-derived
+  configuration, a day unconfirmed, or uploads failing, for over 24 hours),
+  `RECORDER_DISK_LOW` (`disk_low` true; the message gives `disk_free_gb`) and
+  `RECORDER_WRITE_FAILING` (`write_error` set: the tape could not be written
+  to disk). None ever touches `/report`, `entry_allowed`, or any account-derived
   alert.
 
 ## Listing / downloading the tape later

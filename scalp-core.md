@@ -477,10 +477,39 @@ For no-action verdicts (`WAIT`/`NO-TRADE`/`VETOED`/`HALT`) the row is still
 logged with its trade_id, but NO stub is shown — there is no trade to journal
 yet. Set `trigger_used: "A"` (or B/C) for action verdicts, `null` otherwise.
 
+`audit_log.py log` rejects values outside these sets (the error names the
+field, the value and the allowed list): `side` long|short|none; `mode`
+ENTRY|MANAGE|SCAN; `conviction` high|med|low|n/a; `macro_status`
+CLEAR|VETO|NO-TRADE|HALT; `trigger_used` A|B|C|null (no placeholders); `verdict`
+one of the verdicts above, SIT-OUT, or for MANAGE rows MANAGE |
+MANAGE-action-required | HOLD | ADD | EXIT | REDUCE | REDUCE-AND-STOP |
+REDUCE-INTO-STRENGTH. Omit `conviction`/`macro_status` (or send null) when not
+evaluated; do not invent a value. `macro_status` is the bare status only: the
+reason shown on the `MACRO:` line (e.g. "PCE day", "partial - BTC.D
+unavailable") goes in a separate `macro_reason` string. If `log` refuses a
+payload (exit code 2), correct the field the error names and run `log` again
+before replying: a row that is never written is invisible to the behavioral
+gates.
+
 For MANAGE-action-required: payload uses `mode: "MANAGE"`, plus an `event`
 field naming what triggered the action (`stop_move`, `t1_hit`, `t2_hit`,
 `tape_flip`, `add_fired`, `invalidation`). The `triggers` block becomes
 the current `scale_ladder` (T1/T2 prices, current SL).
+
+MANAGE `verdict` is set by what ACTION NOW does, never free text:
+
+| ACTION NOW does | `verdict` |
+|---|---|
+| takes profit at T1/T2 (`t1_hit`, `t2_hit`) | `REDUCE` |
+| moves the stop only (`stop_move`) | `MANAGE-action-required` |
+| cuts size and moves the stop together (e.g. `tape_flip`) | `REDUCE-AND-STOP` |
+| sells into a bounce while underwater, no T1 hit | `REDUCE-INTO-STRENGTH` |
+| adds to the position (`add_fired`) | `ADD` |
+| closes the position (`invalidation`, a full `tape_flip`, the time-stop) | `EXIT` |
+| changes nothing (only if logged at all; the compact form is not) | `HOLD` |
+
+If two apply, use the larger change (`EXIT` > `REDUCE-AND-STOP` > `REDUCE` /
+`REDUCE-INTO-STRENGTH` > `ADD` > `MANAGE-action-required` > `HOLD`).
 
 ### Resolving on close
 
@@ -514,7 +543,10 @@ on an action verdict) usually mean the user forgot to resolve — prompt them.
 
 ### Failure handling
 
-If `audit_log.py log` fails (disk full, permission error, etc.), report
+If `audit_log.py log` refuses the payload (exit code 2: a value outside the
+allowed sets above, or bad JSON), fix the named field and run `log` again —
+see "How to log". If it fails for any other reason (non-zero exit other than
+2: disk full, permission error, etc.), report
 the error to the user AND still emit the trading output — the audit log is
 non-blocking. A missed audit row is better than a missed trade. But flag
 the failure prominently so it gets fixed.

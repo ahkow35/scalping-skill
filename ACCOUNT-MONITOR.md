@@ -48,7 +48,7 @@ Both are read-only warnings surfaced only in `reasons`; a later, separate decisi
 
 ## Railway watcher
 
-`railway_watch.py` runs this monitor as an always-on Railway service. It calls `account_monitor.check()` directly in a loop — every 30 seconds normally, every 15 seconds from 23:58 to 00:02 configured-timezone time so the watcher's own day baseline lands as a near-reset observation — and sends a Telegram alert when a problem appears (unprotected/partial stop coverage, the daily loss latch, open trigger-distance risk exceeding the remaining budget, an oversized position, an add to a losing position, or the monitor itself failing to read the account for over 5 minutes), repeating every 30 minutes while it lasts, with an "all clear" when a fully successful check shows it gone. It is read-only in the same sense as the rest of this file: it cannot place, cancel or close an order, and adds no exchange read beyond `account_api.READ_TYPES`.
+`railway_watch.py` runs this monitor as an always-on Railway service. It calls `account_monitor.check()` directly in a loop — every 30 seconds normally, every 15 seconds from 23:58 to 00:02 configured-timezone time so the watcher's own day baseline lands as a near-reset observation — and sends a Telegram alert when a problem appears (unprotected/partial stop coverage, the daily loss latch, open trigger-distance risk exceeding the remaining budget, an oversized position, an add to a losing position, or the monitor itself failing to read the account for over 5 minutes), repeating every 30 minutes while it lasts (one exception: the USDC-hold condition below repeats on a change in the held amount, not on a timer), with an "all clear" when a fully successful check shows it gone. It is read-only in the same sense as the rest of this file: it cannot place, cancel or close an order, and adds no exchange read beyond `account_api.READ_TYPES`.
 
 Environment variables it reads on boot (names only — values are Railway service secrets, never pasted into chat or committed):
 
@@ -70,10 +70,16 @@ When `RECORDER_STATUS_URL` is set, the watcher also serves `GET /flow?coin=X`: a
 
 ### Recorder alerts (optional, `RECORDER_STATUS_URL`)
 
-When `RECORDER_STATUS_URL` is set, the watcher additionally polls it (at most once a minute, on a background thread with at most one poll in flight — a poll hung for over 2 minutes counts as unreachable — independent of the account check's own cadence) and raises two more alerts through the same Telegram channel and appear/30-minute-repeat/all-clear rules as the account problems above — but as a fully separate group that never affects `/report`, `entry_allowed`, or any account-derived alert, and a fetch exception here can never crash or stall the account loop:
+When `RECORDER_STATUS_URL` is set, the watcher additionally polls it (at most once a minute, on a background thread with at most one poll in flight — a poll hung for over 2 minutes counts as unreachable — independent of the account check's own cadence) and raises four more alerts through the same Telegram channel and appear/30-minute-repeat/all-clear rules as the account problems above — but as a fully separate group that never affects `/report`, `entry_allowed`, or any account-derived alert, and a fetch exception here can never crash or stall the account loop:
 
 - `RECORDER_SILENT` — the recorder's `/status` was unreachable, or reported not connected, or no message for 5 minutes, sustained for 5 minutes. Clears only when a poll comes back healthy.
 - `RECORDER_UPLOAD_FAILING` — uploads disabled by missing or invalid S3 bucket configuration, or a finished day's file is still unconfirmed uploaded to the Railway Storage Bucket more than 24 hours after that UTC day ended, or uploads have been failing for over 24 hours. Clears when caught up.
+- `RECORDER_DISK_LOW` — the recorder's `/status` reports `disk_low` true (free space under `RECORDER_DISK_FLOOR_GB`); the message gives `disk_free_gb`. Clears when it reports false. An unreachable or unparseable poll, or a status with no definite `disk_low`, leaves it as it was.
+- `RECORDER_WRITE_FAILING` — the recorder's `/status` carries a `write_error` (a disk write failed: full disk, permissions, read-only volume), so the tape is not being recorded. The recorder logs it loudly and does not treat it as a network error; the `/flow` endpoint also reads as not connected while it lasts, so the entry gate stays closed. Clears when the recorder writes successfully again.
+
+### USDC-hold alert (change-based)
+
+When the account monitor reports `UNSUPPORTED` because of a USDC hold (`USDC hold <amount> on a perps-only unified account: open spot orders; equity unknown`), the watcher raises `CONFIG_UNSUPPORTED` once when it appears. After that it re-alerts (`PROBLEM (ongoing)`) only when the held amount has moved by at least `USDC_HOLD_ALERT_STEP_USD` (100 USD, in `railway_watch.py`, either direction) from the amount in the last alert sent. There is no time-based repeat for this condition. The amount is read from the reason text (the report has no separate numeric field); if it cannot be parsed, that alert falls back to the ordinary 30-minute repeat. `ALL CLEAR` is sent when the condition clears. Every other `CONFIG_UNSUPPORTED` reason and every other alert keeps the 30-minute repeat.
 
 ### Telegram `/check`
 

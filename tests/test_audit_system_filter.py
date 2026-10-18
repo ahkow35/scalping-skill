@@ -5,7 +5,7 @@ def test_summary_system_filter(tmp_path):
     path = str(tmp_path / "log.json")
     audit_log.write_audit_entry(
         {"coin": "HYPE", "side": "long", "mode": "ENTRY",
-         "verdict": "CARD", "system": "scan2"}, path=path)
+         "verdict": "CARDS", "system": "scan2"}, path=path)
     audit_log.write_audit_entry(
         {"coin": "HYPE", "side": "long", "mode": "ENTRY",
          "verdict": "LONG-NOW"}, path=path)          # v1 entry, no system key
