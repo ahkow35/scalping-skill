@@ -405,6 +405,7 @@ class FlowRecorder:
         self._last_outage_end_ms = None
         self._connected = False
         self._write_error = None      # reason while a disk write is failing
+        self._cold_gap_pending = False  # cold-start GAP not yet written (disk full)
         self._stop = None             # set in run() (needs a live loop)
 
     @property
@@ -600,6 +601,7 @@ class FlowRecorder:
             # the marker is retried on every connect until it lands: without
             # it, tape from before this start reads as continuous.
             self._down_since_ms = self.clock()
+            self._cold_gap_pending = True
         status_task = asyncio.create_task(self._status_loop())
         backoff = RECONNECT_BASE_S
         try:
@@ -607,7 +609,10 @@ class FlowRecorder:
                 try:
                     async with websockets.connect(WS_URL, ping_interval=None) as ws:
                         self._connected = True
-                        self.end_outage(self.clock())
+                        # The deferred cold-start marker is not a reconnect.
+                        self.end_outage(self.clock(),
+                                        reconnected=not self._cold_gap_pending)
+                        self._cold_gap_pending = False
                         backoff = RECONNECT_BASE_S
                         for sub in self._subscribe_messages():
                             await ws.send(json.dumps(sub))

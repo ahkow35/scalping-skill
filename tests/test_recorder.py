@@ -1058,3 +1058,4 @@ def test_run_retries_a_failed_cold_start_gap_once_the_disk_recovers(tmp_path, mo
     records = list(rec.iter_jsonl_records(path))
     assert records[0]["record_type"] == "gap"                     # marker precedes new tape
     assert st["write_error"] is None
+    assert st["reconnects_24h"] == 0                              # first connect, not a reconnect
