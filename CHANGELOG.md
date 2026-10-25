@@ -1,5 +1,19 @@
 # Changelog — scalp skill
 
+## 2026-10-26 — Railway redeploy after the breach secret rotation
+
+- Both services redeployed (`railway redeploy`, recorder 00:10 SGT, watcher
+  00:11 SGT) from the same commit (c9efd67); no code change.
+- Watcher: the Telegram token saved in the dashboard on 2026-10-22 was not
+  live (staged-changes list empty), so it was re-set by Nyan and verified
+  with `getMe` before the deploy. The new `REPORT_TOKEN` was already live.
+- Recorder: every bucket HEAD had failed with 403 since 2026-10-21 because
+  the running container kept the pre-reset bucket keys; the stored variables
+  already matched. After the redeploy all 2026-10-21 to 10-24 tape files are
+  in the bucket.
+- Open: confirm the new healthchecks.io check and pause the old one;
+  rotate `FRED_API_KEY`.
+
 ## 2026-10-18 — Stop recording BTC
 
 - `RECORDER_COINS` is now `HYPE,ZEC,PUMP`. The BTC tape fed only the flow
