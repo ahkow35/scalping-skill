@@ -7,10 +7,8 @@ This is a persistent warning latch and an entry preflight, **not an exchange-enf
 Use the actual public trading wallet, not an agent wallet, and a loss limit explicitly selected by the account owner. There is no default loss amount. From this repository:
 
 ```sh
-python3 account_monitor.py configure --wallet 0xYOUR_PUBLIC_WALLET --daily-loss-usdc YOUR_LIMIT \
-  --watcher-url https://YOUR-RAILWAY-WATCHER.up.railway.app
+python3 account_monitor.py configure --wallet 0xYOUR_PUBLIC_WALLET --daily-loss-usdc YOUR_LIMIT
 python3 account_monitor.py check --json
-python3 account_monitor.py remote-check --json
 python3 account_monitor.py watch --interval-seconds 30
 ```
 
@@ -46,7 +44,14 @@ Two additional checks add reasons only — they never change `status` or `entry_
 
 Both are read-only warnings surfaced only in `reasons`; a later, separate decision may choose to make either blocking.
 
-## Railway watcher
+## Railway watcher (deleted 2026-11-21)
+
+**Retired.** The Railway watcher, the recorder, their Telegram bot, the
+storage bucket and the Railway project were all deleted on 2026-11-21 when new
+scalp entries were retired. Everything from here to the end of this file, including
+`remote-check`, describes how they worked and is kept only as a record; the
+code is still in the repository. Use the local `check` above.
+
 
 `railway_watch.py` runs this monitor as an always-on Railway service. It calls `account_monitor.check()` directly in a loop — every 30 seconds normally, every 15 seconds from 23:58 to 00:02 configured-timezone time so the watcher's own day baseline lands as a near-reset observation — and sends a Telegram alert when a problem appears (unprotected/partial stop coverage, the daily loss latch, open trigger-distance risk exceeding the remaining budget, an oversized position, an add to a losing position, or the monitor itself failing to read the account for over 5 minutes), repeating every 30 minutes while it lasts (one exception: the USDC-hold condition below repeats on a change in the held amount, not on a timer), with an "all clear" when a fully successful check shows it gone. It is read-only in the same sense as the rest of this file: it cannot place, cancel or close an order, and adds no exchange read beyond `account_api.READ_TYPES`.
 

@@ -16,6 +16,17 @@ Activating the tactical scalp discipline companion. Entry alpha is unvalidated;
 historical component tests were negative. Do not add indicators, loosen gates,
 or treat replay results as proof of profitability. New signal research stays paper-only.
 
+**Status (2026-11-21): new entries are retired; this skill is a position-management
+checklist.** The owner stopped looking for scalping edge after the flow gate's
+58/42 buy/sell bias failed a pre-registered test on the recorder tape (no
+measurable effect at 1h on HYPE, ZEC or PUMP, far below the ~13 bps round-trip
+cost). The Railway recorder, the Railway watcher (Telegram alerts, `/report`,
+`/flow`) and their data were deleted. Consequences: the Step 1b flow gate can
+never see complete flow, so every ENTRY ends WAIT, and say so plainly as the
+reason (`entries retired: no recorder`) instead of listing flow diagnostics.
+MANAGE, the admin commands and the local account check still work. Do not
+suggest rebuilding the recorder or watcher.
+
 ## Step 0 — Admin commands (short-circuit before trading flow)
 
 Check args FIRST. If the first token is one of these, run the admin command
@@ -24,9 +35,10 @@ NOT run behavioral preflight.
 
 ### `/scalp account check`
 
-For `/scalp account check`, run `python3 account_monitor.py remote-check --json`
+For `/scalp account check`, run `python3 account_monitor.py check --json`
 from the skill repository and report its status and limitations; then STOP.
-The local `python3 account_monitor.py check` remains available to run by hand.
+(`remote-check` read the Railway watcher, which was deleted on 2026-11-21; it
+now always fails.)
 For account configuration, read `ACCOUNT-MONITOR.md` and obtain the public
 trading wallet and owner-selected daily loss limit. Never request a private
 key or place orders.
@@ -186,9 +198,9 @@ Follow `scalp-core.md` + the direction module exactly.
 - `/loop` invocations default to TINY unless QUICK/DEEP is explicit.
 - Coin arg defaults to HYPE.
 - **Account preflight runs before every new entry**, including passive mode:
-  run `python3 account_monitor.py remote-check --json` from the skill
-  repository (reads the always-on Railway watcher; the local `check --json`
-  remains available to run by hand). Only a fresh `entry_allowed: true`
+  run `python3 account_monitor.py check --json` from the skill
+  repository (the Railway watcher behind `remote-check` was deleted on
+  2026-11-21). Only a fresh `entry_allowed: true`
   permits further entry checks. Missing configuration, unsupported account
   mode, errors and unknown data block new entries. Report the exact status;
   do not infer CLEAR from silence or a cached result. MANAGE and protective
@@ -260,8 +272,10 @@ freshness and gap diagnostics are not coverage proof: `coverage_pct` and
 `capture_complete` remain null, `reliable` is false. Old cached trades cannot
 validate a current window.
 
-The Railway recorder (`recorder.py` + `railway_record.py`, holds a WebSocket
-connection open and writes an append-only tape of every trade) DOES feed this
+**Retired 2026-11-21: the recorder and watcher below no longer exist, so the
+tape lookup always falls back and this gate always says WAIT.** Kept as a record
+of how the gate worked. The Railway recorder (`recorder.py` + `railway_record.py`, holds a WebSocket
+connection open and writes an append-only tape of every trade) fed this
 gate for the coins it captures (`RECORDER_COINS`, currently HYPE, ZEC, PUMP).
 `fetch_market.py` asks the Railway watcher's token-protected `/flow` for the
 primary coin's per-minute tape, and builds the same 5m/15m/1h/4h windows with
@@ -284,5 +298,5 @@ buckets are exactly the REST output described above (`recent_trades_rest`,
 `reliable` false, `coverage_pct` null, `capture_complete` null) and the gate
 says WAIT. The REST sample is never treated as confirmation. A complete tape
 only removes the "cannot see the flow" block: entry alpha is still unvalidated,
-the 58/42 bias thresholds have not been tested on a complete tape, and the
-gate only cuts conviction, never raises it.
+the 58/42 bias thresholds were tested on the complete tape on 2026-11-20 and
+showed no measurable effect, and the gate only cuts conviction, never raises it.
